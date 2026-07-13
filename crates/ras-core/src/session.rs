@@ -509,7 +509,28 @@ async fn host_control_loop<C, E>(
                 break;
             }
             Ok(_) => {}
-            Err(_) => break, // channel closed
+            Err(_) => {
+                // Controller vanished without a Bye. Stop the media thread and end the session.
+                if !inner.stop.swap(true, Ordering::SeqCst) {
+                    apply(
+                        &inner.state,
+                        SessionEvent::Fatal {
+                            code: ErrorCode::TransportError,
+                        },
+                    );
+                    if let Some(sink) = inner
+                        .lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.emit(LifecycleEvent::SessionEnded {
+                            reason: StopReason::Error(ErrorCode::TransportError),
+                        });
+                    }
+                }
+                break;
+            }
         }
     }
 }
@@ -527,15 +548,19 @@ pub struct ControllerSessionConfig {
     pub target: DialTarget,
     /// Local decode/render buffer target (~10–50 ms; WebCodecs has no jitter buffer).
     pub target_buffer: Duration,
+    /// How long to stay `Suspended` after a transport loss before giving up (→ `Terminated`). While
+    /// suspended the controller freezes/blanks video but keeps its cursor + controls live.
+    pub reconnect_window: Duration,
 }
 
 impl ControllerSessionConfig {
-    /// Dial the given target with a small default buffer.
+    /// Dial the given target with a small default buffer and a 10 s reconnect window.
     #[must_use]
     pub fn new(target: DialTarget) -> Self {
         Self {
             target,
             target_buffer: Duration::from_millis(30),
+            reconnect_window: Duration::from_secs(10),
         }
     }
 }
@@ -790,7 +815,45 @@ async fn controller_control_loop(
                     break;
                 }
                 Ok(_) => {}
-                Err(_) => break,
+                Err(_) => {
+                    // The reliable channel died WITHOUT a clean Bye ⇒ transport loss, not a peer
+                    // close. Freeze video but keep the UI live: Active → Suspended, then honor the
+                    // reconnect window before giving up. (Re-dial itself is deferred to the iroh
+                    // transport; the state/UX contract is exercised now.)
+                    if inner.stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if apply(&inner.state, SessionEvent::TransportLost).is_none() {
+                        break; // not in a suspendable state (e.g. still connecting) — just end
+                    }
+                    if let Some(sink) = inner
+                        .lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.emit(LifecycleEvent::Suspended { since_ms: 0 });
+                    }
+                    tokio::time::sleep(inner.config.reconnect_window).await;
+                    if inner.stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    // Still suspended (Phase 1 has no re-dial) → window elapsed → Terminated.
+                    if apply(&inner.state, SessionEvent::ReconnectWindowExpired).is_some() {
+                        inner.stop.store(true, Ordering::SeqCst);
+                        if let Some(sink) = inner
+                            .lifecycle
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone()
+                        {
+                            sink.emit(LifecycleEvent::SessionEnded {
+                                reason: StopReason::Timeout,
+                            });
+                        }
+                    }
+                    break;
+                }
             },
         }
     }

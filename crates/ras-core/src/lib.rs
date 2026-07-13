@@ -281,6 +281,81 @@ mod tests {
             Transition::Invalid
         );
     }
+
+    const ALL_STATES: [SessionState; 9] = [
+        SessionState::Created,
+        SessionState::SessionConnecting,
+        SessionState::ControlEstablished,
+        SessionState::Active,
+        SessionState::Suspended,
+        SessionState::Terminated,
+        SessionState::Revoked,
+        SessionState::Rejected,
+        SessionState::Expired,
+    ];
+
+    fn all_events() -> [SessionEvent; 13] {
+        use SessionEvent as E;
+        [
+            E::Start,
+            E::ControlUp,
+            E::Authorized,
+            E::StreamConfigured,
+            E::TransportLost,
+            E::TransportRestored,
+            E::LocalStop,
+            E::PeerClosed,
+            E::Revoke {
+                code: ErrorCode::SessionRevoked,
+            },
+            E::Reject {
+                code: ErrorCode::ConsentDenied,
+            },
+            E::Expire {
+                code: ErrorCode::RequestExpired,
+            },
+            E::Fatal {
+                code: ErrorCode::Internal,
+            },
+            E::ReconnectWindowExpired,
+        ]
+    }
+
+    /// Invariant 4: emergency stop / revoke overrides *everything* — from every non-terminal state
+    /// a `Revoke` lands in the audit-distinct `Revoked` terminal.
+    #[test]
+    fn emergency_stop_overrides_every_non_terminal_state() {
+        for s in ALL_STATES {
+            if !s.is_terminal() {
+                assert_eq!(
+                    transition(
+                        s,
+                        SessionEvent::Revoke {
+                            code: ErrorCode::SessionRevoked
+                        }
+                    ),
+                    Transition::To(SessionState::Revoked),
+                    "revoke must win from {s:?}"
+                );
+            }
+        }
+    }
+
+    /// A terminal state has no outgoing edges — no event can resurrect or re-terminalize it.
+    #[test]
+    fn terminal_states_reject_every_event() {
+        for s in ALL_STATES {
+            if s.is_terminal() {
+                for e in all_events() {
+                    assert_eq!(
+                        transition(s, e),
+                        Transition::Invalid,
+                        "terminal {s:?} must reject {e:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// End-to-end spine test: a host (synthetic capture+encode) and a controller wired through the
@@ -388,5 +463,67 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
         assert_eq!(controller.state(), SessionState::Terminated);
         assert_eq!(host.state(), SessionState::Terminated);
+    }
+
+    #[tokio::test]
+    async fn controller_suspends_then_terminates_when_transport_drops() {
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr {
+            id: EndpointId([0u8; 32]),
+        });
+        cfg.reconnect_window = Duration::from_millis(120); // short so the test is fast
+        let controller = ControllerSession::new(cfg, ctrl_tp);
+
+        let _host_events = host.start().await.unwrap();
+        let mut ctrl_events = controller.connect().await.unwrap();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Active, 300).await,
+            "controller should reach Active, got {:?}",
+            controller.state()
+        );
+
+        // Abrupt transport loss: the host tears down without sending a clean Bye.
+        host.stop(StopReason::UserRequested).await;
+
+        // The controller must freeze (Suspended) but keep its UI live, then terminate once the
+        // reconnect window elapses (Phase 1 has no re-dial yet).
+        assert!(
+            wait_until(|| controller.state() == SessionState::Suspended, 300).await
+                || controller.state() == SessionState::Terminated,
+            "controller should suspend on transport loss, got {:?}",
+            controller.state()
+        );
+        assert!(
+            wait_until(|| controller.state() == SessionState::Terminated, 300).await,
+            "controller should terminate after the reconnect window, got {:?}",
+            controller.state()
+        );
+
+        let mut saw_suspended = false;
+        let mut saw_timeout_end = false;
+        while let Ok(ev) = ctrl_events.try_recv() {
+            match ev {
+                LifecycleEvent::Suspended { .. } => saw_suspended = true,
+                LifecycleEvent::SessionEnded {
+                    reason: StopReason::Timeout,
+                } => saw_timeout_end = true,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_suspended,
+            "controller must surface Suspended (video frozen, controls live)"
+        );
+        assert!(
+            saw_timeout_end,
+            "controller must end with Timeout after the window"
+        );
     }
 }
