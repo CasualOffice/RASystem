@@ -866,4 +866,78 @@ mod e2e {
             "controller must surface a Revoked SessionEnded, not a plain PeerClosed"
         );
     }
+
+    /// Invariants 2 & 9: authorization is a host-enforced gate, and it fails **closed**. A denying
+    /// validator must block the session on the `Rejected` terminal *before* any capture/encode starts
+    /// (the media pump spawns only after the authorize gate passes) — no frame can ever leave.
+    #[tokio::test]
+    async fn denying_validator_blocks_the_session_before_capture() {
+        use crate::deps::{GrantDecision, GrantValidator, SessionAuthContext};
+
+        struct DenyValidator;
+        #[async_trait::async_trait]
+        impl GrantValidator for DenyValidator {
+            async fn authorize(
+                &self,
+                _ctx: &SessionAuthContext,
+            ) -> Result<GrantDecision, crate::CoreError> {
+                Ok(GrantDecision::Denied(
+                    ras_protocol::ErrorCode::ConsentDenied,
+                ))
+            }
+        }
+
+        let (host_tp, _ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(1280, 720),
+            SyntheticEncoder::new(),
+            Arc::new(DenyValidator),
+        );
+
+        let err = host.start().await.unwrap_err();
+        assert_eq!(err.code, ras_protocol::ErrorCode::ConsentDenied);
+        assert_eq!(
+            host.state(),
+            SessionState::Rejected,
+            "a denied session must land on the Rejected terminal, never Active"
+        );
+    }
+
+    /// Fail-closed for a decision Phase 1 can't service: an interactive `NeedConsent` must be treated
+    /// as a denial (Rejected + error), never silently proceed to `Active` or hang. Guards against a
+    /// future `GrantDecision` variant accidentally falling through the authorize gate.
+    #[tokio::test]
+    async fn unsupported_consent_decision_fails_closed() {
+        use crate::deps::{GrantDecision, GrantValidator, SessionAuthContext};
+
+        struct NeedsConsentValidator;
+        #[async_trait::async_trait]
+        impl GrantValidator for NeedsConsentValidator {
+            async fn authorize(
+                &self,
+                _ctx: &SessionAuthContext,
+            ) -> Result<GrantDecision, crate::CoreError> {
+                Ok(GrantDecision::NeedConsent)
+            }
+        }
+
+        let (host_tp, _ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(NeedsConsentValidator),
+        );
+
+        let err = host.start().await.unwrap_err();
+        assert_eq!(err.code, ras_protocol::ErrorCode::ConsentDenied);
+        assert_ne!(
+            host.state(),
+            SessionState::Active,
+            "an unserviceable consent decision must never reach Active"
+        );
+    }
 }
