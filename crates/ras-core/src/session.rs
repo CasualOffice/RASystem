@@ -11,7 +11,7 @@
 //! and sinks stay `dyn` (see [`crate::deps`]). Phase-1 target fps is a constant ([`HOST_TARGET_FPS`])
 //! because `HostSessionConfig` carries no fps field yet.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,7 +33,7 @@ use ras_media::{
     CaptureOptions, ColorSpace, MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec,
     VideoEncoderBackend, VideoTransportKind,
 };
-use ras_protocol::{ControlMsg, ErrorCode, KeyframeReason, StreamConfigWire};
+use ras_protocol::{ControlMsg, DecoderFeedback, ErrorCode, KeyframeReason, StreamConfigWire};
 use ras_transport_iroh::{EndpointAddr, EndpointId, VideoEvent};
 
 /// Phase-1 host capture rate (no fps field on `HostSessionConfig` yet).
@@ -46,6 +46,10 @@ const LIFECYCLE_DEPTH: usize = 32;
 /// Fast enough for a responsive quality badge and RTT-scale bitrate reactions, cheap enough to be
 /// off the frame path entirely.
 const STATS_TICK: Duration = Duration::from_millis(250);
+
+/// How often the controller reports content-free decoder feedback (last decoded frame + drops +
+/// decode latency) back to the host, feeding the host's ABR (design §2.3). Cold path.
+const FEEDBACK_TICK: Duration = Duration::from_millis(200);
 
 /// Process-global session-id source (content-free, monotonic).
 fn next_session_id() -> SessionId {
@@ -150,6 +154,11 @@ struct HostInner<C, E> {
     target_bitrate: Arc<AtomicU32>,
     /// Frames actually handed to the transport since the last stats tick (delivered-fps signal).
     frames_sent: Arc<AtomicU32>,
+    /// Latest decoder feedback from the controller (consumed by the ABR tick). `None` until the
+    /// first report arrives.
+    last_feedback: Mutex<Option<DecoderFeedback>>,
+    /// Count of feedback reports received (observability / tests).
+    feedback_count: AtomicU64,
     lifecycle: Mutex<Option<LifecycleSink>>,
     session_id: SessionId,
     media: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -188,6 +197,8 @@ where
                 keyframe: Arc::new(AtomicBool::new(false)),
                 target_bitrate: Arc::new(AtomicU32::new(0)),
                 frames_sent: Arc::new(AtomicU32::new(0)),
+                last_feedback: Mutex::new(None),
+                feedback_count: AtomicU64::new(0),
                 lifecycle: Mutex::new(None),
                 session_id: next_session_id(),
                 media: Mutex::new(None),
@@ -212,6 +223,13 @@ where
     #[must_use]
     pub fn current_bitrate_bps(&self) -> u32 {
         self.inner.target_bitrate.load(Ordering::Relaxed)
+    }
+
+    /// Number of decoder-feedback reports received from the controller. Advisory — for status UIs
+    /// and tests.
+    #[must_use]
+    pub fn feedback_received(&self) -> u64 {
+        self.inner.feedback_count.load(Ordering::Relaxed)
     }
 
     /// Accept a controller, negotiate, and start pushing frames. Returns the lifecycle stream. The
@@ -461,7 +479,14 @@ async fn host_stats_loop<C, E>(inner: &HostInner<C, E>, config: StreamConfig) {
             break;
         }
         let health = inner.transport.health();
-        let decision = abr.on_tick(&health, None);
+        // Consume the latest controller feedback (drops + last-decoded + any keyframe request) so
+        // the ABR reacts to what the decoder actually sees, not just transport stats.
+        let feedback = inner
+            .last_feedback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let decision = abr.on_tick(&health, feedback);
         inner
             .target_bitrate
             .store(decision.target_bitrate_bps, Ordering::Relaxed);
@@ -492,6 +517,13 @@ async fn host_control_loop<C, E>(
         match control.recv().await {
             Ok(ControlMsg::KeyframeRequest(_)) => {
                 inner.keyframe.store(true, Ordering::Relaxed);
+            }
+            Ok(ControlMsg::Feedback(fb)) => {
+                *inner
+                    .last_feedback
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fb);
+                inner.feedback_count.fetch_add(1, Ordering::Relaxed);
             }
             Ok(ControlMsg::Bye { .. }) => {
                 inner.stop.store(true, Ordering::SeqCst);
@@ -569,6 +601,7 @@ impl ControllerSessionConfig {
 /// bidi channel: one task both sends and receives via `select!`).
 enum ControlCommand {
     Keyframe(KeyframeReason),
+    Feedback(DecoderFeedback),
     Bye,
 }
 
@@ -581,6 +614,10 @@ struct ControllerInner {
     renderer: Mutex<Option<Arc<dyn FrameSink>>>,
     stream_config: Mutex<Option<StreamConfig>>,
     command_tx: Mutex<Option<mpsc::Sender<ControlCommand>>>,
+    /// Highest frame id delivered to the renderer (reported back as `last_decoded_frame`).
+    last_decoded_frame: AtomicU64,
+    /// Frames dropped since the last feedback report (reset each report).
+    frames_dropped: AtomicU32,
     session_id: SessionId,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -605,6 +642,8 @@ impl ControllerSession {
                 renderer: Mutex::new(None),
                 stream_config: Mutex::new(None),
                 command_tx: Mutex::new(None),
+                last_decoded_frame: AtomicU64::new(0),
+                frames_dropped: AtomicU32::new(0),
                 session_id: next_session_id(),
                 tasks: Mutex::new(Vec::new()),
             }),
@@ -690,12 +729,17 @@ impl ControllerSession {
         let vid_inner = inner.clone();
         let vid_task = tokio::spawn(async move { controller_video_loop(&vid_inner).await });
 
+        // Feedback task: periodically report content-free decoder stats to the host (feeds its ABR).
+        let fb_inner = inner.clone();
+        let fb_task = tokio::spawn(async move { controller_feedback_loop(&fb_inner).await });
+
         let mut tasks = inner
             .tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         tasks.push(ctrl_task);
         tasks.push(vid_task);
+        tasks.push(fb_task);
 
         Ok(rx)
     }
@@ -798,6 +842,9 @@ async fn controller_control_loop(
                     });
                     if control.send(msg).await.is_err() { break; }
                 }
+                Some(ControlCommand::Feedback(fb)) => {
+                    if control.send(ControlMsg::Feedback(fb)).await.is_err() { break; }
+                }
                 Some(ControlCommand::Bye) => {
                     let _ = control.send(ControlMsg::Bye { code: ErrorCode::SessionRevoked }).await;
                     break;
@@ -874,6 +921,7 @@ async fn controller_video_loop(inner: &ControllerInner) {
                     }
                     seen_keyframe = true;
                 }
+                let fid = ef.frame_id;
                 if let Some(r) = inner
                     .renderer
                     .lock()
@@ -882,8 +930,10 @@ async fn controller_video_loop(inner: &ControllerInner) {
                 {
                     let _ = r.push(ef);
                 }
+                inner.last_decoded_frame.store(fid, Ordering::Relaxed);
             }
             Ok(VideoEvent::FrameDropped { .. }) => {
+                inner.frames_dropped.fetch_add(1, Ordering::Relaxed);
                 // A run of drops → ask for a fresh IDR (never freezes; last-good frame stays).
                 // Clone the sender out from under the std mutex before awaiting (guards are !Send).
                 let tx = inner
@@ -898,6 +948,38 @@ async fn controller_video_loop(inner: &ControllerInner) {
                 }
             }
             Err(_) => break,
+        }
+    }
+}
+
+/// Periodically report content-free decoder feedback to the host (cold path; feeds the host ABR).
+async fn controller_feedback_loop(inner: &ControllerInner) {
+    while !inner.stop.load(Ordering::Relaxed) {
+        tokio::time::sleep(FEEDBACK_TICK).await;
+        if inner.stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let fb = DecoderFeedback {
+            last_decoded_frame: inner.last_decoded_frame.load(Ordering::Relaxed),
+            frames_dropped: inner.frames_dropped.swap(0, Ordering::Relaxed),
+            // Real decode latency comes from the WebCodecs worker later; 0 (unknown) in Phase 1.
+            decode_latency_us: 0,
+            // The immediate PLI path (KeyframeRequest on loss) handles resync; periodic feedback is
+            // for ABR, so it does not itself request a keyframe.
+            keyframe_request: None,
+        };
+        let tx = inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match tx {
+            Some(tx) => {
+                if tx.send(ControlCommand::Feedback(fb)).await.is_err() {
+                    break;
+                }
+            }
+            None => break,
         }
     }
 }

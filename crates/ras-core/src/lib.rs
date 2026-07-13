@@ -544,6 +544,12 @@ mod e2e {
         }
         assert!(saw_quality, "host should emit ConnectionQuality events");
 
+        // The controller must report decoder feedback back to the host (feeds its ABR).
+        assert!(
+            wait_until(|| host.feedback_received() > 0, 300).await,
+            "host should receive decoder feedback from the controller"
+        );
+
         // Clean teardown → both terminal.
         controller.disconnect(StopReason::UserRequested).await;
         host.stop(StopReason::UserRequested).await;
