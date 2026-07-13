@@ -94,27 +94,35 @@ with the `presets::N0` discovery+relay preset, ALPN dial, bidi stream, and the
 Direct/relay success + per-frame RTT over a real WAN feed the network half of the glass-to-glass
 budget and the `VideoTransport` choice; those are the numbers that gate the go/no-go ADR.
 
-### macOS capture (`spike/macos-capture`) — *built + on-device run: GO (capture half)*
+### macOS capture→encode (`spike/macos-capture`) — *built + on-device run: GO (both halves)*
 
-The capture half of the ScreenCaptureKit → VideoToolbox path (the part the WebCodecs GO did **not**
-cover — that was decode/render only). Measured on the dev-lead Mac (macOS 26.3, Retina 1470×956
-logical / BGRA, whole-display `SCContentFilter`, delegate on a dedicated dispatch queue):
+The whole host video head — ScreenCaptureKit **capture** → VideoToolbox H.264 **encode** — the part
+the WebCodecs GO did **not** cover (that was decode/render only). Measured on the dev-lead Mac
+(macOS 26.3, Retina 1470×956 logical / BGRA, whole-display `SCContentFilter`, delegate on a dedicated
+dispatch queue; encoder: realtime, no B-frames, Baseline AutoLevel, ~∞ GOP, 8 Mbps):
 
 | metric | 30 fps target | 60 fps target (release) |
 |--------|--------------|------------------------|
-| delivered FPS | 29.9 | 48.3 |
+| delivered FPS (capture) | 29.9 | 48.3 |
 | SCK pts interval (med / p95) | 33.33 / 50.0 ms | 16.67 / 33.33 ms |
 | wall inter-arrival (med / p95) | 33.90 / 34.54 ms | 18.11 / 31.81 ms |
 | lock+touch µs/frame (med / p95 / max) | 39 / 103 / 264 | 20 / 56 / 242 |
+| **encode latency ms/frame** (med / p95 / max) | 12.26 / 13.22 / 31.42 | **10.84 / 12.92 / 25.70** |
+| mean encoded frame size | 19.5 KB | 16.0 KB |
 
-**Assessment — capture is GO.** SCK's own presentation-timestamp interval sits on the exact target
-period (16.67 ms at 60, 33.33 ms at 30) whenever the screen changes, so the source cadence is
-frame-accurate and 60 fps-capable. The sub-target *delivered* FPS is **SCK coalescing static frames**
-(it emits on change, not on a fixed clock) — a bandwidth feature, not a defect; the p95 gaps are
-exactly one skipped still frame. Getting pixels out of the delivered `CVPixelBuffer` costs ~20–40 µs
-median (release), negligible against even a 16.67 ms budget — so the capture stage leaves essentially
-the whole per-frame budget for encode + network. **Still unmeasured:** the VideoToolbox **encode**
-stage (`VTCompressionSession` → Annex-B, encode latency) — the next spike slice.
+**Assessment — capture AND encode are GO.** SCK's own presentation-timestamp interval sits on the
+exact target period (16.67 ms at 60, 33.33 ms at 30) whenever the screen changes, so the source
+cadence is frame-accurate and 60 fps-capable. The sub-target *delivered* FPS is **SCK coalescing
+static frames** (it emits on change, not on a fixed clock) — a bandwidth feature, not a defect; the
+p95 gaps are exactly one skipped still frame. Getting pixels out costs ~20–40 µs median (release) —
+negligible. VideoToolbox H.264 **encode latency is ~11 ms median (p95 ~13 ms)** at 60 fps, well inside
+a 16.67 ms frame budget; the emitted **Annex-B `.h264` decodes cleanly** (`ffprobe`: h264, 1470×956,
+171 frames), confirming correct SPS/PPS + start-code framing (NAL 7/8/6/5 verified). Combined with the
+~1 ms WebCodecs decode, the host+controller ends of the pipe consume ~12 ms of the 120 ms
+glass-to-glass budget, leaving the bulk for network RTT (iroh probe, pending). **Remaining:** the two
+codec bits deferred to the real backend — on-demand IDR (recovery keyframe) and dynamic bitrate under
+`ConnectionQuality` — are API-present (`kVTEncodeFrameOptionKey_ForceKeyFrame`,
+`AverageBitRate`/`DataRateLimits`), not risks.
 
 Binding note: this spike uses the pure-Rust **`objc2`** framework crates, **not** the svtlabs
 `screencapturekit` crate — the latter pulls `apple-metal`, whose build-time **Swift bridge** fails to
@@ -130,8 +138,8 @@ backend should adopt (permissive, no opaque build steps, smaller supply-chain su
   read from `Endpoint::remote_info(peer).await` and each active `TransportAddr` is classified
   relay-vs-direct via `TransportAddr::is_relay()`; `EndpointId` (= `PublicKey`) parses from 64-char
   hex. If you re-pin iroh, re-check these three call sites.
-- The **web harness's encoder** stands in for the host encoder to make the controller half runnable
-  now. The *capture* stage is now measured on macOS (`spike/macos-capture`, above); the *encode*
-  stage (VideoToolbox) is the remaining unmeasured slice of the host `FrameSource`.
+- The **web harness's encoder** stood in for the host encoder to make the controller half runnable
+  before the host head existed; the real macOS **capture→encode** path is now measured end to end
+  (`spike/macos-capture`, above), so the host `FrameSource` budget is no longer a guess.
 - Everything here is **throwaway** — do not carry spike code into Phase 1; carry the *numbers* and
   the go/no-go ADR.

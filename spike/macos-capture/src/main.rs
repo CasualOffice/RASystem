@@ -1,22 +1,31 @@
-//! Casual RAS — Phase-S macOS capture spike (throwaway).
+//! Casual RAS — Phase-S macOS capture→encode spike (throwaway).
 //!
-//! Measures the **capture half** of the ScreenCaptureKit → VideoToolbox path that `docs/18 §8`
-//! flags as still-unmeasured (the WebCodecs GO covered *decode* only): does SCStream deliver a
-//! stable frame cadence, and what does it cost to get pixels out? Reports delivered FPS, frame
-//! cadence (wall-clock inter-arrival + SCK presentation-timestamp interval), and the per-frame
-//! lock+touch cost of the delivered `CVPixelBuffer`.
+//! Measures the whole host video head that `docs/18 §8` flags as unmeasured (the WebCodecs GO
+//! covered *decode/render* only): **capture** (ScreenCaptureKit) → **encode** (VideoToolbox H.264).
 //!
-//! This is the pull-from-a-push-delegate shape `ScreenCaptureKitBackend` will use. The encode half
-//! (VTCompressionSession → Annex-B) is the next spike slice.
+//! - Capture: does SCStream deliver a stable cadence, and what does it cost to touch pixels?
+//!   Reports delivered FPS, cadence (wall inter-arrival + SCK presentation-timestamp interval), and
+//!   per-frame `CVPixelBuffer` lock+touch cost.
+//! - Encode: each captured `CVPixelBuffer` is fed to a low-latency `VTCompressionSession`
+//!   (realtime, no B-frames, Baseline, ~infinite GOP). Reports per-frame **encode latency**,
+//!   encoded FPS, keyframe count, and mean encoded frame size, and writes an Annex-B `.h264`
+//!   elementary stream (SPS/PPS + start-code framing) for external playback verification.
+//!
+//! This is the pull-from-a-push-delegate + encoder shape `ScreenCaptureKitBackend` /
+//! `VideoToolboxEncoder` will use.
 //!
 //! Bindings: the pure-Rust **objc2** framework crates (no Swift bridge / no build-time SDK codegen),
 //! which is also the family the real `ras-media-macos` backend will use.
 //!
 //! Run (on a Mac with a GUI session + Screen-Recording permission — NOT over SSH/headless):
-//!   cargo run -p macos-capture-probe            # 60 fps, 5 s
+//!   cargo run -p macos-capture-probe            # 60 fps, 5 s → ./capture.h264
 //!   cargo run -p macos-capture-probe -- 30 8    # <fps> <seconds>
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::ffi::{c_char, c_void};
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::ptr::{self, NonNull};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,9 +35,15 @@ use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
-use objc2_core_media::{CMSampleBuffer, CMTime};
+use objc2_core_foundation::{
+    kCFBooleanFalse, kCFBooleanTrue, CFBoolean, CFNumber, CFNumberType, CFRetained,
+};
+use objc2_core_media::{
+    kCMVideoCodecType_H264, CMSampleBuffer, CMTime, CMTimeFlags,
+    CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+};
 use objc2_core_video::{
-    CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+    CVImageBuffer, CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
     CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
 };
@@ -37,11 +52,30 @@ use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
     SCStreamOutput, SCStreamOutputType,
 };
+use objc2_video_toolbox::{
+    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
+    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
+    kVTProfileLevel_H264_Baseline_AutoLevel, VTCompressionSession, VTEncodeInfoFlags, VTSession,
+    VTSessionSetProperty,
+};
 
 /// `kCVPixelFormatType_32BGRA` — a FourCC packed as an OSType (u32). 4 bytes/pixel, one plane.
 const PIXEL_FORMAT_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
 /// `kCVReturnSuccess`.
 const CV_RETURN_SUCCESS: i32 = 0;
+/// `kVTEncodeInfo_FrameDropped` — bit set in the encoder's info flags when a frame was dropped.
+const VT_ENCODE_INFO_FRAME_DROPPED: u32 = 1 << 1;
+/// Spike encode bitrate target (8 Mbps) — realistic for a full-screen desktop feed.
+const ENCODE_BITRATE: i32 = 8_000_000;
+/// Output elementary-stream path (Annex-B), written alongside the working directory.
+const OUT_PATH: &str = "capture.h264";
+/// H.264 NAL type for an IDR (keyframe) slice.
+const NAL_TYPE_IDR: u8 = 5;
+/// VideoToolbox emits H.264 in AVCC framing with a 4-byte big-endian length prefix per NAL.
+const AVCC_LENGTH_PREFIX: usize = 4;
+/// Annex-B NAL start code.
+const START_CODE: [u8; 4] = [0, 0, 0, 1];
 
 /// Content-free per-frame telemetry the delegate accumulates (runs on SCK's private queue).
 #[derive(Default)]
@@ -60,9 +94,290 @@ fn lock_push<T>(m: &Mutex<Vec<T>>, v: T) {
     lock(m).push(v);
 }
 
+/// Content-free encoder telemetry, shared with the VideoToolbox output callback via a raw refcon.
+#[derive(Default)]
+struct EncodeStats {
+    file: Mutex<Option<BufWriter<File>>>,
+    latency_us: Mutex<Vec<u64>>, // frame-in → callback-out, per delivered frame
+    wrote_params: AtomicBool,    // SPS/PPS written once at stream head
+    frames_out: AtomicU64,
+    keyframes: AtomicU64,
+    bytes_out: AtomicU64,
+}
+
+impl EncodeStats {
+    fn write_all(&self, bytes: &[u8]) {
+        if let Some(f) = lock(&self.file).as_mut() {
+            let _ = f.write_all(bytes);
+        }
+        self.bytes_out.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    }
+}
+
+/// A low-latency H.264 `VTCompressionSession`. Feeds captured `CVPixelBuffer`s and streams encoded
+/// Annex-B out through the C output callback below. Holds the shared `EncodeStats` (whose pointer
+/// the callback dereferences) alive for the session's whole lifetime.
+struct Encoder {
+    session: CFRetained<VTCompressionSession>,
+    stats: Arc<EncodeStats>,
+}
+
+impl Encoder {
+    fn new(width: i32, height: i32, fps: i32) -> Result<Self, String> {
+        let file = File::create(OUT_PATH).map_err(|e| format!("create {OUT_PATH}: {e}"))?;
+        let stats = Arc::new(EncodeStats {
+            file: Mutex::new(Some(BufWriter::new(file))),
+            ..EncodeStats::default()
+        });
+
+        // SAFETY: valid dims; NULL specification/attributes; `on_encoded` reads the refcon (a live
+        // `Arc<EncodeStats>` pointer held in `self.stats`); out-param written on success.
+        let mut raw: *mut VTCompressionSession = ptr::null_mut();
+        let status = unsafe {
+            VTCompressionSession::create(
+                None,
+                width,
+                height,
+                kCMVideoCodecType_H264,
+                None,
+                None,
+                None,
+                Some(on_encoded),
+                Arc::as_ptr(&stats) as *mut c_void,
+                NonNull::from(&mut raw),
+            )
+        };
+        let session = NonNull::new(raw)
+            .filter(|_| status == 0)
+            .map(|p| unsafe { CFRetained::from_raw(p) })
+            .ok_or_else(|| format!("VTCompressionSessionCreate failed (OSStatus {status})"))?;
+
+        let enc = Encoder { session, stats };
+        enc.configure(fps)?;
+        Ok(enc)
+    }
+
+    /// Low-latency H.264: realtime, no frame reordering (no B-frames), Baseline, ~infinite GOP so a
+    /// single IDR sits at the head (recovery keyframes are requested on demand in the real pipeline).
+    fn configure(&self, fps: i32) -> Result<(), String> {
+        // SAFETY: keys are framework constants; values live across the set call.
+        unsafe {
+            self.set_bool(kVTCompressionPropertyKey_RealTime, true)?;
+            self.set_bool(kVTCompressionPropertyKey_AllowFrameReordering, false)?;
+            self.set_property(
+                kVTCompressionPropertyKey_ProfileLevel,
+                Some(kVTProfileLevel_H264_Baseline_AutoLevel),
+            )?;
+            self.set_i32(kVTCompressionPropertyKey_MaxKeyFrameInterval, i32::MAX)?;
+            self.set_i32(kVTCompressionPropertyKey_ExpectedFrameRate, fps)?;
+            self.set_i32(kVTCompressionPropertyKey_AverageBitRate, ENCODE_BITRATE)?;
+        }
+        Ok(())
+    }
+
+    /// SAFETY: `value` must outlive the call; `key` is a framework property constant.
+    unsafe fn set_property(
+        &self,
+        key: &objc2_core_foundation::CFString,
+        value: Option<&objc2_core_foundation::CFType>,
+    ) -> Result<(), String> {
+        // A VTCompressionSessionRef is a VTSessionRef in the C API — cast the CF pointer.
+        let session = &*(CFRetained::as_ptr(&self.session).as_ptr() as *const VTSession);
+        let status = VTSessionSetProperty(session, key, value);
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(format!("VTSessionSetProperty failed (OSStatus {status})"))
+        }
+    }
+
+    unsafe fn set_bool(
+        &self,
+        key: &objc2_core_foundation::CFString,
+        v: bool,
+    ) -> Result<(), String> {
+        let b: Option<&CFBoolean> = if v { kCFBooleanTrue } else { kCFBooleanFalse };
+        self.set_property(key, b.map(|b| b.as_ref()))
+    }
+
+    unsafe fn set_i32(
+        &self,
+        key: &objc2_core_foundation::CFString,
+        v: i32,
+    ) -> Result<(), String> {
+        let n = CFNumber::new(None, CFNumberType::SInt32Type, &v as *const i32 as *const c_void)
+            .ok_or("CFNumberCreate failed")?;
+        self.set_property(key, Some(n.as_ref()))
+    }
+
+    /// Feed one captured frame. `pts` is SCK's presentation timestamp; the per-frame refcon carries
+    /// the enqueue `Instant` so the callback can measure encode latency.
+    fn encode(&self, image: &CVImageBuffer, pts: CMTime) {
+        let started = Box::into_raw(Box::new(Instant::now())) as *mut c_void;
+        let mut flags = VTEncodeInfoFlags(0);
+        // Duration unknown → kCMTimeInvalid (all-zero flags).
+        let invalid = CMTime {
+            value: 0,
+            timescale: 0,
+            flags: CMTimeFlags(0),
+            epoch: 0,
+        };
+        // SAFETY: session + image are live; refcon is a leaked Box the callback reclaims. If the
+        // encode call itself errors, VT won't invoke the callback, so we reclaim the Box here.
+        let status = unsafe {
+            self.session
+                .encode_frame(image, pts, invalid, None, started, &mut flags)
+        };
+        if status != 0 {
+            // SAFETY: `started` is the Box we just leaked and VT never took ownership.
+            drop(unsafe { Box::from_raw(started as *mut Instant) });
+        }
+    }
+
+    /// Flush pending frames and tear the session down.
+    fn finish(&self) {
+        let invalid = CMTime {
+            value: 0,
+            timescale: 0,
+            flags: CMTimeFlags(0),
+            epoch: 0,
+        };
+        // SAFETY: session is live; completes all frames, then invalidates.
+        unsafe {
+            let _ = self.session.complete_frames(invalid);
+            self.session.invalidate();
+        }
+        if let Some(mut f) = lock(&self.stats.file).take() {
+            let _ = f.flush();
+        }
+    }
+}
+
+/// VideoToolbox output callback. Runs on a VT encode thread. Reclaims the per-frame `Instant`,
+/// records encode latency, and writes the frame out as Annex-B (SPS/PPS once at head).
+///
+/// SAFETY: matches `VTCompressionOutputCallback`. `output_ref_con` is the `Arc<EncodeStats>` pointer
+/// held alive by `Encoder`; `source_ref_con` is a `Box<Instant>` leaked by `encode`.
+unsafe extern "C-unwind" fn on_encoded(
+    output_ref_con: *mut c_void,
+    source_ref_con: *mut c_void,
+    status: i32,
+    flags: VTEncodeInfoFlags,
+    sample: *mut CMSampleBuffer,
+) {
+    let started = if source_ref_con.is_null() {
+        None
+    } else {
+        Some(*unsafe { Box::from_raw(source_ref_con as *mut Instant) })
+    };
+    if output_ref_con.is_null() {
+        return;
+    }
+    let stats = unsafe { &*(output_ref_con as *const EncodeStats) };
+
+    let dropped = flags.0 & VT_ENCODE_INFO_FRAME_DROPPED != 0;
+    let Some(sample) = (unsafe { sample.as_ref() }) else {
+        return;
+    };
+    if status != 0 || dropped {
+        return;
+    }
+
+    // SPS/PPS once at the head of the stream (single-IDR, ~infinite GOP).
+    if !stats.wrote_params.swap(true, Ordering::Relaxed) {
+        write_parameter_sets(sample, stats);
+    }
+    write_annexb(sample, stats);
+
+    stats.frames_out.fetch_add(1, Ordering::Relaxed);
+    if let Some(t0) = started {
+        lock_push(&stats.latency_us, t0.elapsed().as_micros() as u64);
+    }
+}
+
+/// Emit the H.264 SPS/PPS parameter sets (from the sample's format description) as Annex-B.
+fn write_parameter_sets(sample: &CMSampleBuffer, stats: &EncodeStats) {
+    // SAFETY: encoded samples carry a video format description holding the H.264 parameter sets.
+    let Some(fmt) = (unsafe { sample.format_description() }) else {
+        return;
+    };
+    let mut count: usize = 0;
+    // First query the parameter-set count.
+    // SAFETY: NULL out-pointers are permitted except the count we request here.
+    let rc = unsafe {
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            &fmt,
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut count,
+            ptr::null_mut(),
+        )
+    };
+    if rc != 0 {
+        return;
+    }
+    for i in 0..count {
+        let mut p: *const u8 = ptr::null();
+        let mut size: usize = 0;
+        // SAFETY: fmt is retained for this scope; p/size receive an internal pointer + length.
+        let rc = unsafe {
+            CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                &fmt,
+                i,
+                &mut p,
+                &mut size,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if rc != 0 || p.is_null() || size == 0 {
+            continue;
+        }
+        // SAFETY: p points to `size` bytes owned by fmt, valid while fmt is retained.
+        let nal = unsafe { std::slice::from_raw_parts(p, size) };
+        stats.write_all(&START_CODE);
+        stats.write_all(nal);
+    }
+}
+
+/// Convert the sample's AVCC (length-prefixed) NAL units to Annex-B start-code framing and write.
+fn write_annexb(sample: &CMSampleBuffer, stats: &EncodeStats) {
+    // SAFETY: an encoded sample carries its data in a CMBlockBuffer.
+    let Some(bb) = (unsafe { sample.data_buffer() }) else {
+        return;
+    };
+    let mut total: usize = 0;
+    let mut data: *mut c_char = ptr::null_mut();
+    // SAFETY: contiguous access from offset 0; total length + base pointer returned.
+    let rc = unsafe { bb.data_pointer(0, ptr::null_mut(), &mut total, &mut data) };
+    if rc != 0 || data.is_null() || total == 0 {
+        return;
+    }
+    // SAFETY: `data` points to `total` valid bytes for the lifetime of `bb`.
+    let buf = unsafe { std::slice::from_raw_parts(data as *const u8, total) };
+
+    let mut off = 0usize;
+    while off + AVCC_LENGTH_PREFIX <= buf.len() {
+        let len = u32::from_be_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]) as usize;
+        off += AVCC_LENGTH_PREFIX;
+        if len == 0 || off + len > buf.len() {
+            break;
+        }
+        let nal = &buf[off..off + len];
+        if nal[0] & 0x1F == NAL_TYPE_IDR {
+            stats.keyframes.fetch_add(1, Ordering::Relaxed);
+        }
+        stats.write_all(&START_CODE);
+        stats.write_all(nal);
+        off += len;
+    }
+}
+
 /// The instance state our SCK output/delegate object carries.
 struct OutputIvars {
     stats: Arc<Stats>,
+    encoder: Arc<Encoder>,
 }
 
 define_class!(
@@ -98,8 +413,8 @@ define_class!(
 );
 
 impl CaptureOutput {
-    fn new(stats: Arc<Stats>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(OutputIvars { stats });
+    fn new(stats: Arc<Stats>, encoder: Arc<Encoder>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(OutputIvars { stats, encoder });
         unsafe { msg_send![super(this), init] }
     }
 
@@ -120,6 +435,10 @@ impl CaptureOutput {
         let Some(image) = (unsafe { sample.image_buffer() }) else {
             return;
         };
+
+        // Feed the encoder from the same CVImageBuffer (VideoToolbox reads it asynchronously).
+        self.ivars().encoder.encode(&image, pts);
+
         let pixels: &CVPixelBuffer = &image; // CVImageBuffer and CVPixelBuffer are the same type.
 
         // Lock read-only, then measure the base-address touch — the real per-frame extraction cost.
@@ -222,7 +541,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let stats = Arc::new(Stats::default());
-    let output = CaptureOutput::new(stats.clone());
+    // Shared with SCK's delegate queue: sound because VideoToolbox sessions are thread-safe and the
+    // stats are Mutex-guarded; only `CFRetained` lacks the Send/Sync marker.
+    #[allow(clippy::arc_with_non_send_sync)]
+    let encoder = Arc::new(Encoder::new(dw as i32, dh as i32, fps)?);
+    let output = CaptureOutput::new(stats.clone(), encoder.clone());
     let delegate = ProtocolObject::from_ref(&*output);
 
     // SAFETY: filter/config/delegate all outlive the stream construction call.
@@ -251,8 +574,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     start_capture_blocking(&stream)?;
     std::thread::sleep(Duration::from_secs(secs));
     stop_capture_blocking(&stream);
+    encoder.finish(); // flush pending frames + close the .h264 file
 
     report(&stats, secs);
+    report_encode(&encoder.stats);
     Ok(())
 }
 
@@ -325,6 +650,35 @@ fn report(stats: &Stats, secs: u64) {
         println!("  frame                             {w}x{h}, {bpr} bytes/row");
     }
     println!("\n  Record delivered FPS + the pts interval (cadence stability) in phase-S-design.md §4.1.");
+}
+
+fn report_encode(stats: &EncodeStats) {
+    let frames = stats.frames_out.load(Ordering::Relaxed);
+    let keyframes = stats.keyframes.load(Ordering::Relaxed);
+    let bytes = stats.bytes_out.load(Ordering::Relaxed);
+    let mut lat: Vec<f64> = lock(&stats.latency_us).iter().map(|&u| u as f64).collect();
+
+    println!("\n  VideoToolbox H.264 encode — {frames} frames out, {keyframes} keyframe(s)");
+    println!("  {:-<58}", "");
+    if lat.is_empty() {
+        println!("  no frames encoded — see errors above.");
+        return;
+    }
+    for x in &mut lat {
+        *x /= 1000.0; // µs → ms
+    }
+    print_pctl("encode latency ms/frame", &mut lat);
+    let mean_kb = if frames > 0 {
+        bytes as f64 / frames as f64 / 1024.0
+    } else {
+        0.0
+    };
+    println!("  mean encoded frame size          {mean_kb:>8.1} KB");
+    println!("  total encoded                     {:>8.1} KB → {OUT_PATH}", bytes as f64 / 1024.0);
+    println!(
+        "\n  Verify playback: ffplay {OUT_PATH}  (or: ffmpeg -i {OUT_PATH} -c copy out.mp4)"
+    );
+    println!("  Record encode latency (med/p95) in phase-S-design.md §4.1.");
 }
 
 /// Print median / p95 / max of `xs` (mutates: sorts in place).

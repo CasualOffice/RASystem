@@ -24,7 +24,7 @@ objc2-foundation = { version = "0.3", features = [
   "NSGeometry",
   "NSThread",
 ] }
-objc2-core-foundation = { version = "0.3", features = ["CFBase"] }
+objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFNumber"] }
 objc2-screen-capture-kit = { version = "0.3", features = [
   "SCStream",
   "SCShareableContent",
@@ -40,6 +40,16 @@ objc2-core-media = { version = "0.3", features = [
   "CMSampleBuffer",
   "CMTime",
   "CMBase",
+  "CMFormatDescription",
+  "CMBlockBuffer",
+  "objc2-core-video",
+] }
+objc2-video-toolbox = { version = "0.3", features = [
+  "VTCompressionSession",
+  "VTSession",
+  "VTCompressionProperties",
+  "VTErrors",
+  "objc2-core-media",
   "objc2-core-video",
 ] }
 objc2-core-video = { version = "0.3", features = [
