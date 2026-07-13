@@ -31,22 +31,30 @@ compositor penalty appears (toggle **rVFC vs immediate draw**), and any WebView2
 
 ## B. Iroh transport probe
 
+Builds clean against **iroh 1.0.2** (pinned via `spike/Cargo.lock`) and is **validated on
+localhost** — the two endpoints connect, echo 300 frames, and the probe observes the live
+**relay→direct upgrade** (`at connect — RELAY`, then `after stream — DIRECT (hole-punched)`). It is
+turnkey for the real two-machine run:
+
 ```
 # machine 1 (host side):
 cargo run -p iroh-probe -- server
-#   → prints an ENDPOINT_ID and whether connections come in direct or relayed
+#   → prints an ENDPOINT_ID (64-char hex) and waits for a client
 
 # machine 2 (controller side), across each network in the matrix:
 cargo run -p iroh-probe -- client <ENDPOINT_ID>
-#   → prints connection type, handshake time, and RTT stats (min/median/p95/max)
+#   → prints handshake time, the connection path sampled twice (at connect + after the stream,
+#     each classified DIRECT / RELAY / PENDING from Endpoint::remote_info), and RTT stats
+#     (min/median/p95/max) over 300 ~30 fps frames
 ```
 
 Run the client across the **network matrix** (`docs/08 §3`): same-LAN · different NATs · **symmetric
 NAT** · **UDP-blocked / 443-only** · relay-only · Wi-Fi↔hotspot migration. Record for each: did it
-connect? direct or relayed? RTT distribution?
+connect? did it end on a **direct** path or stay on **relay**? RTT distribution?
 
-> **Iroh 1.x API is young.** `cargo build -p iroh-probe` and reconcile any drift against
-> `cargo doc -p iroh --open` — the `// VERIFY:` comments mark the calls most likely to have changed.
+> The path is sampled *after* the stream as well as at connect because iroh upgrades relay→direct a
+> moment after the handshake — a same-LAN pair that reads `RELAY` at connect will typically read
+> `DIRECT` on the second sample. A pair stuck on `RELAY` after the stream is the finding.
 
 ## C. Capture skeleton (macOS lead)
 

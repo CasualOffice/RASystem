@@ -13,7 +13,8 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use iroh::{Endpoint, RelayMode};
+use iroh::endpoint::{presets, TransportAddrUsage};
+use iroh::Endpoint;
 
 const ALPN: &[u8] = b"casual-ras/spike/1";
 const FRAMES: usize = 300; // ~10 s at 30 fps
@@ -38,12 +39,12 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Build an endpoint bound to our spike ALPN, using the default n0 relays + n0 discovery.
+/// Build an endpoint bound to our spike ALPN. The `presets::N0` preset bundles the default n0
+/// relay mode + n0 discovery (Pkarr publish + DNS address-lookup), which is exactly what we want
+/// for a two-machine WAN probe.
 async fn endpoint() -> Result<Endpoint> {
-    let ep = Endpoint::builder()
+    let ep = Endpoint::builder(presets::N0)
         .alpns(vec![ALPN.to_vec()])
-        .relay_mode(RelayMode::Default)
-        .discovery_n0() // VERIFY: discovery method name on your version
         .bind()
         .await?;
     Ok(ep)
@@ -92,6 +93,7 @@ async fn client(peer: &str) -> Result<()> {
     let conn = ep.connect(peer_id, ALPN).await?; // VERIFY: connect(impl Into<EndpointAddr>, alpn)
     let handshake = t0.elapsed();
     println!("connected in {:.1} ms", handshake.as_secs_f64() * 1000.0);
+    print!("at connect — ");
     report_path(&ep, peer_id).await;
 
     let (mut send, mut recv) = conn.open_bi().await?;
@@ -108,20 +110,47 @@ async fn client(peer: &str) -> Result<()> {
         rtts.push(t.elapsed());
         tokio::time::sleep(Duration::from_millis(33)).await; // ~30 fps pacing
     }
-    send.finish().ok(); // VERIFY: finish() signature
+    let _ = send.finish(); // best-effort half-close; nothing left to send
+
+    // iroh upgrades relay→direct a moment after connect, so re-sample once the stream has run:
+    // on a real two-machine WAN link this is where a successful hole-punch shows up as DIRECT.
+    print!("after stream — ");
+    report_path(&ep, peer_id).await;
 
     print_stats(&rtts);
     Ok(())
 }
 
-/// Best-effort direct-vs-relay report. VERIFY: `conn_type` API on your version.
+/// Best-effort direct-vs-relay report. iroh 1.x exposes the live path set via
+/// `Endpoint::remote_info`; we classify each *active* transport address as relay (`TransportAddr`
+/// is a relay URL) or direct (a UDP socket address that was hole-punched). A fresh connection
+/// often starts on the relay and upgrades to direct a moment later, so this is sampled after the
+/// stream has been flowing.
 async fn report_path(ep: &Endpoint, peer: iroh::EndpointId) {
-    match ep.conn_type(peer) {
-        Ok(watcher) => match watcher.get() {
-            Ok(ct) => println!("connection type: {ct:?}  (Direct = hole-punched, Relay = via relay)"),
-            Err(_) => println!("connection type: <unavailable>"),
-        },
-        Err(_) => println!("connection type: <conn_type API differs — check cargo doc -p iroh>"),
+    match ep.remote_info(peer).await {
+        Some(info) => {
+            let mut direct = 0usize;
+            let mut relay = 0usize;
+            for a in info.addrs() {
+                if !matches!(a.usage(), TransportAddrUsage::Active) {
+                    continue;
+                }
+                if a.addr().is_relay() {
+                    relay += 1;
+                } else {
+                    direct += 1;
+                }
+            }
+            let kind = if direct > 0 {
+                "DIRECT (hole-punched)"
+            } else if relay > 0 {
+                "RELAY (via n0 relay)"
+            } else {
+                "PENDING (no active path yet)"
+            };
+            println!("connection path: {kind}  [active: {direct} direct, {relay} relay]");
+        }
+        None => println!("connection path: <no remote_info yet>"),
     }
 }
 

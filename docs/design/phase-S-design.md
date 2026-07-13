@@ -80,16 +80,28 @@ for network RTT (iroh probe, pending) + host capture/encode.
   the design flagged (D4); record median & p95 with the toggle on vs off, per engine. (Small refinement
   — it does not change the GO given the ~115 ms of headroom.)
 
-### iroh transport (`spike/iroh-probe`) — *not yet run*
+### iroh transport (`spike/iroh-probe`) — *built + localhost-validated; matrix run pending*
 
-Blocked on a two-machine (Mac↔Linux) run across the network matrix (§3). Direct/relay success + per-
-frame RTT feed the network half of the glass-to-glass budget and the `VideoTransport` choice.
+Compiles clean against the pinned **iroh 1.0.2** (all `// VERIFY:` API markers resolved — see §5)
+and passes a **localhost end-to-end run**: two endpoints connect, echo 300 frames, and the probe
+observes the live **relay→direct upgrade** (`at connect — RELAY [0 direct, 1 relay]`, then
+`after stream — DIRECT (hole-punched) [1 direct, 1 relay]`). Localhost RTT was median 2.4 ms /
+p95 3.0 ms (loopback floor, not a WAN number). This proves the probe's plumbing — endpoint bind
+with the `presets::N0` discovery+relay preset, ALPN dial, bidi stream, and the
+`Endpoint::remote_info`-based direct/relay classifier — so the real two-machine run is turnkey.
+
+**Still pending (user-owned):** a two-machine (Mac↔Linux) run across the network matrix (§3).
+Direct/relay success + per-frame RTT over a real WAN feed the network half of the glass-to-glass
+budget and the `VideoTransport` choice; those are the numbers that gate the go/no-go ADR.
 
 ## 5. Caveats for the implementer
-- **Iroh 1.x API is young** — `iroh-probe` is written against the documented 1.x surface
-  (`EndpointId`, `Endpoint::builder()/connect()/accept()`, `conn_type`); `cargo build` on your pinned
-  version and reconcile any drift against `cargo doc -p iroh`. Marked with `// VERIFY:` at the
-  uncertain calls.
+- **Iroh 1.x API drift — resolved against 1.0.2.** The probe now builds clean; the `// VERIFY:`
+  markers are gone. What actually changed from the initial guess: `Endpoint::builder()` takes a
+  preset (`Endpoint::builder(presets::N0)` bundles n0 discovery + default relay, replacing the
+  separate `.relay_mode()/.discovery_n0()` calls); `conn_type()` no longer exists — the live path is
+  read from `Endpoint::remote_info(peer).await` and each active `TransportAddr` is classified
+  relay-vs-direct via `TransportAddr::is_relay()`; `EndpointId` (= `PublicKey`) parses from 64-char
+  hex. If you re-pin iroh, re-check these three call sites.
 - The **web harness's encoder** stands in for the host encoder to make the controller half runnable
   now; real numbers for the *capture→encode* stage come from the Windows `FrameSource`.
 - Everything here is **throwaway** — do not carry spike code into Phase 1; carry the *numbers* and

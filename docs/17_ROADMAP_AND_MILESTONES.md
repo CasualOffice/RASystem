@@ -94,6 +94,8 @@ triggers (native-surface pivot / codec change).
 
 **② Build — tasks** (spike scaffolded in `spike/`; **measurement runs on the user's Mac**)
 - ☑ `NET` Two-endpoint Iroh 1.x connect probe (`spike/iroh-probe`) — direct/relay + RTT under load.
+  Builds clean on **iroh 1.0.2** and **localhost-validated**: 300-frame echo + observed relay→direct
+  upgrade (`remote_info`-based path classifier). Turnkey for the two-machine run below.
 - ☐ `NET` **Run** across the network matrix (`docs/08 §3`): same-LAN, different NAT, **symmetric
   NAT**, **UDP-blocked/443-only**, relay-only, migration — record success + direct-vs-relay + RTT.
   *(Blocked: needs a Mac↔Linux two-machine run.)*
