@@ -33,6 +33,8 @@ ras-transport-iroh = { path = "../ras-transport-iroh" }
 [dev-dependencies]
 # Tests build the synthetic capture/encode doubles and drive the loopback transport.
 ras-media = { path = "../ras-media", features = ["synthetic"] }
+# Generative testing of the frame codec + state machine.
+proptest = "1"
 
 # The runnable demo needs the in-memory loopback transport; skip it unless `testkit` is on so
 # `cargo test --all` (default features) doesn't try to compile it.

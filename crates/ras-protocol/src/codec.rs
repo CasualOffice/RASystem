@@ -652,3 +652,136 @@ mod tests {
         assert_eq!(i32::from(reason_to_pb(KeyframeReason::PeriodicRefresh)), 5);
     }
 }
+
+/// Generative (property) tests. The control codec parses **untrusted** bytes off the wire, so the
+/// load-bearing properties are: (1) `decode`/`try_read_frame` never panic on *any* input, and
+/// (2) `decode(encode(m))` is the identity for every well-formed `ControlMsg`.
+#[cfg(test)]
+mod proptests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_reason() -> impl Strategy<Value = KeyframeReason> {
+        prop_oneof![
+            Just(KeyframeReason::StreamStart),
+            Just(KeyframeReason::UnrecoverableLoss),
+            Just(KeyframeReason::DecoderReset),
+            Just(KeyframeReason::ConfigChanged),
+            Just(KeyframeReason::PeriodicRefresh),
+        ]
+    }
+
+    fn arb_code() -> impl Strategy<Value = ErrorCode> {
+        prop_oneof![
+            Just(ErrorCode::InvalidMessage),
+            Just(ErrorCode::UnsupportedVersion),
+            Just(ErrorCode::IdentityMismatch),
+            Just(ErrorCode::SignatureInvalid),
+            Just(ErrorCode::RequestExpired),
+            Just(ErrorCode::ReplayDetected),
+            Just(ErrorCode::ConsentDenied),
+            Just(ErrorCode::CapabilityDenied),
+            Just(ErrorCode::GrantInvalid),
+            Just(ErrorCode::LeaseInvalid),
+            Just(ErrorCode::SessionRevoked),
+            Just(ErrorCode::TransportError),
+            Just(ErrorCode::CaptureFailed),
+            Just(ErrorCode::EncoderFailed),
+            Just(ErrorCode::InputFailed),
+            Just(ErrorCode::PolicyChanged),
+            Just(ErrorCode::Internal),
+        ]
+    }
+
+    fn arb_keyframe_request() -> impl Strategy<Value = KeyframeRequest> {
+        (any::<u64>(), arb_reason()).prop_map(|(since_frame, reason)| KeyframeRequest {
+            since_frame,
+            reason,
+        })
+    }
+
+    fn arb_control_msg() -> impl Strategy<Value = ControlMsg> {
+        prop_oneof![
+            any::<u32>().prop_map(|protocol_version| ControlMsg::Hello { protocol_version }),
+            (
+                any::<String>(),
+                any::<u32>(),
+                any::<u32>(),
+                any::<u32>(),
+                any::<u32>(),
+                any::<u8>(),
+                any::<u8>()
+            )
+                .prop_map(
+                    |(codec, width, height, fps, target_bitrate_bps, color, video_transport)| {
+                        ControlMsg::StreamConfig(StreamConfigWire {
+                            codec,
+                            width,
+                            height,
+                            fps,
+                            target_bitrate_bps,
+                            color,
+                            video_transport,
+                        })
+                    }
+                ),
+            arb_keyframe_request().prop_map(ControlMsg::KeyframeRequest),
+            (
+                any::<u64>(),
+                any::<u32>(),
+                any::<u32>(),
+                proptest::option::of(arb_keyframe_request())
+            )
+                .prop_map(
+                    |(last_decoded_frame, frames_dropped, decode_latency_us, keyframe_request)| {
+                        ControlMsg::Feedback(DecoderFeedback {
+                            last_decoded_frame,
+                            frames_dropped,
+                            decode_latency_us,
+                            keyframe_request,
+                        })
+                    }
+                ),
+            proptest::collection::vec(any::<u8>(), 0..512).prop_map(|b| ControlMsg::AuthEnvelope {
+                payload: Bytes::from(b)
+            }),
+            arb_code().prop_map(|code| ControlMsg::Bye { code }),
+        ]
+    }
+
+    proptest! {
+        /// Hostile input must never panic the decoder — only Ok or a typed Err.
+        #[test]
+        fn decode_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            let _ = decode(&bytes);
+        }
+
+        /// Framed reads over arbitrary bytes never panic and never over-allocate (the guard is inside).
+        #[test]
+        fn try_read_frame_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            let mut buf = BytesMut::from(bytes.as_slice());
+            let _ = try_read_frame(&mut buf);
+        }
+
+        /// Every well-formed message round-trips: decode(encode(m)) re-encodes to the same bytes.
+        #[test]
+        fn roundtrip_is_identity(msg in arb_control_msg()) {
+            let encoded = encode(&msg);
+            let decoded = decode(&encoded).expect("well-formed message decodes");
+            let re_encoded = encode(&decoded);
+            prop_assert_eq!(re_encoded.as_ref(), encoded.as_ref());
+        }
+
+        /// A framed well-formed message reads back byte-identical and fully consumes its frame.
+        #[test]
+        fn frame_roundtrip_is_identity(msg in arb_control_msg()) {
+            let mut buf = BytesMut::from(frame(&msg).as_ref());
+            let got = try_read_frame(&mut buf).expect("ok").expect("some");
+            let got_bytes = encode(&got);
+            let msg_bytes = encode(&msg);
+            prop_assert_eq!(got_bytes.as_ref(), msg_bytes.as_ref());
+            prop_assert!(buf.is_empty());
+        }
+    }
+}

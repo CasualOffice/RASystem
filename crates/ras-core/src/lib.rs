@@ -358,6 +358,92 @@ mod tests {
     }
 }
 
+/// Generative coverage of the state machine over the *whole* state×event space (the exhaustive
+/// tests above enumerate states; these fuzz the pairing and the code-carrying events).
+#[cfg(test)]
+mod state_proptests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_state() -> impl Strategy<Value = SessionState> {
+        prop_oneof![
+            Just(SessionState::Created),
+            Just(SessionState::SessionConnecting),
+            Just(SessionState::ControlEstablished),
+            Just(SessionState::Active),
+            Just(SessionState::Suspended),
+            Just(SessionState::Terminated),
+            Just(SessionState::Revoked),
+            Just(SessionState::Rejected),
+            Just(SessionState::Expired),
+        ]
+    }
+
+    fn arb_code() -> impl Strategy<Value = ErrorCode> {
+        prop_oneof![
+            Just(ErrorCode::SessionRevoked),
+            Just(ErrorCode::ConsentDenied),
+            Just(ErrorCode::RequestExpired),
+            Just(ErrorCode::Internal),
+            Just(ErrorCode::TransportError),
+        ]
+    }
+
+    fn arb_event() -> impl Strategy<Value = SessionEvent> {
+        prop_oneof![
+            Just(SessionEvent::Start),
+            Just(SessionEvent::ControlUp),
+            Just(SessionEvent::Authorized),
+            Just(SessionEvent::StreamConfigured),
+            Just(SessionEvent::TransportLost),
+            Just(SessionEvent::TransportRestored),
+            Just(SessionEvent::LocalStop),
+            Just(SessionEvent::PeerClosed),
+            Just(SessionEvent::ReconnectWindowExpired),
+            arb_code().prop_map(|code| SessionEvent::Revoke { code }),
+            arb_code().prop_map(|code| SessionEvent::Reject { code }),
+            arb_code().prop_map(|code| SessionEvent::Expire { code }),
+            arb_code().prop_map(|code| SessionEvent::Fatal { code }),
+        ]
+    }
+
+    proptest! {
+        /// The transition function is total — it never panics for any (state, event).
+        #[test]
+        fn transition_is_total(s in arb_state(), e in arb_event()) {
+            let _ = transition(s, e);
+        }
+
+        /// Terminal states are absorbing: no event produces an outgoing transition.
+        #[test]
+        fn terminal_is_absorbing(s in arb_state(), e in arb_event()) {
+            if s.is_terminal() {
+                prop_assert_eq!(transition(s, e), Transition::Invalid);
+            }
+        }
+
+        /// A resulting state is never a fresh `Created` — the machine only moves forward.
+        #[test]
+        fn never_transitions_back_to_created(s in arb_state(), e in arb_event()) {
+            if let Transition::To(next) = transition(s, e) {
+                prop_assert_ne!(next, SessionState::Created);
+            }
+        }
+
+        /// Invariant 4: from any non-terminal state, a revoke always wins (→ Revoked).
+        #[test]
+        fn revoke_always_wins_from_non_terminal(s in arb_state(), code in arb_code()) {
+            if !s.is_terminal() {
+                prop_assert_eq!(
+                    transition(s, SessionEvent::Revoke { code }),
+                    Transition::To(SessionState::Revoked)
+                );
+            }
+        }
+    }
+}
+
 /// End-to-end spine test: a host (synthetic capture+encode) and a controller wired through the
 /// in-memory loopback transport. Proves the state machine, control handshake, droppable video path,
 /// and keyframe-request plumbing all work together with no iroh / no OS / no GPU.

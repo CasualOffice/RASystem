@@ -157,7 +157,10 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
 - ☐ `MED` FEC (`nanors`) + loss handling (freeze-on-last-good, PLI/IDR request) per `docs/10 §4`.
 - ☐ `UI` Controller Tauri shell: Web Worker + `OffscreenCanvas` WebCodecs renderer over the
   frame-Channel codec; connection-state UI; **pin Tauri ≥ 2.11.1**, deny-by-default caps, strict CSP.
-- ◐ `QA` Reconnection behavior documented + tested (loopback); perf harness in CI still to wire.
+- ◐ `QA` Reconnection behavior documented + tested (loopback); **generative/fuzz property tests**
+  (`proptest`) over the untrusted-input control codec, frame codec, and state machine (decode never
+  panics on arbitrary bytes; round-trip identity; terminal-absorbing; revoke-always-wins). Perf
+  harness in CI still to wire.
 
 **③ Exit criteria:** stable ~30 FPS on standard desktop workloads · direct + relay sessions work ·
 prototype latency targets measured · reconnection documented · local cursor stays responsive during

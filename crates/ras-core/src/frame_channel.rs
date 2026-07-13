@@ -159,3 +159,55 @@ mod tests {
         assert!(parse_header(&blob).is_none());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use bytes::Bytes;
+    use proptest::prelude::*;
+    use ras_media::{ColorSpace, StreamConfig, VideoCodec, VideoTransportKind};
+
+    fn cfg() -> StreamConfig {
+        StreamConfig {
+            codec: VideoCodec::H264AnnexB,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            target_bitrate_bps: 4_000_000,
+            color: ColorSpace::Bt709Limited,
+            video_transport: VideoTransportKind::PerFrameStream,
+        }
+    }
+
+    proptest! {
+        /// The header round-trips for any ids/flags/payload, and the payload is preserved verbatim.
+        #[test]
+        fn header_and_payload_roundtrip(
+            frame_id in any::<u64>(),
+            captured_at_us in any::<u64>(),
+            keyframe in any::<bool>(),
+            data in proptest::collection::vec(any::<u8>(), 0..600),
+        ) {
+            let f = EncodedFrame {
+                frame_id,
+                captured_at_us,
+                is_keyframe: keyframe,
+                data: Bytes::from(data.clone()),
+                config: cfg(),
+            };
+            let blob = encode_frame_blob(&f);
+            let h = parse_header(&blob).expect("valid header");
+            prop_assert_eq!(h.frame_id, frame_id);
+            prop_assert_eq!(h.captured_at_us, captured_at_us);
+            prop_assert_eq!(h.is_keyframe(), keyframe);
+            prop_assert_eq!(&blob[FRAME_HEADER_LEN..], data.as_slice());
+        }
+
+        /// Parsing arbitrary bytes never panics (only Some/None).
+        #[test]
+        fn parse_header_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..128)) {
+            let _ = parse_header(&bytes);
+        }
+    }
+}

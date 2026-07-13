@@ -15,5 +15,8 @@ prost = "0.14"          # runtime Message trait; encode/decode of generated wire
 protox = "0.9"          # pure-Rust protoc replacement: .proto -> FileDescriptorSet (no system protoc)
 prost-build = "0.14"    # FileDescriptorSet -> Rust source (compile_fds path never invokes protoc)
 
+[dev-dependencies]
+proptest = "1"          # generative testing of the untrusted-input control codec
+
 [lints]
 workspace = true
