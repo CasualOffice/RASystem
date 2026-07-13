@@ -1,0 +1,21 @@
+[package]
+name = "ras-core"
+description = "Casual RAS core: session orchestration and state machines tying the crates together."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ras-protocol = { path = "../ras-protocol" }
+ras-identity = { path = "../ras-identity" }
+ras-grant = { path = "../ras-grant" }
+ras-policy = { path = "../ras-policy" }
+ras-control = { path = "../ras-control" }
+ras-audit = { path = "../ras-audit" }
+ras-media = { path = "../ras-media" }
+ras-transport-iroh = { path = "../ras-transport-iroh" }
+
+[lints]
+workspace = true

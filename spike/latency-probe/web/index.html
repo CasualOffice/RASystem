@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Casual RAS — WebCodecs latency spike</title>
+<style>
+  :root { color-scheme: dark; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  body { margin: 0; background: #0d1117; color: #c9d1d9; padding: 16px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  p.sub { margin: 0 0 12px; color: #8b949e; font-size: 12px; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  canvas { background: #000; border: 1px solid #30363d; border-radius: 6px; max-width: 100%; }
+  .panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 14px; min-width: 260px; }
+  button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 8px 16px; font: inherit; cursor: pointer; }
+  button.stop { background: #6e2222; }
+  label { font-size: 12px; color: #8b949e; display: inline-flex; gap: 6px; align-items: center; margin-left: 10px; }
+  table { border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  td { padding: 2px 10px 2px 0; }
+  td.v { color: #58a6ff; text-align: right; font-variant-numeric: tabular-nums; }
+  .warn { color: #d29922; font-size: 12px; }
+  code { color: #79c0ff; }
+</style>
+</head>
+<body>
+  <h1>Casual RAS — WebCodecs latency spike (Phase S)</h1>
+  <p class="sub">Encode → decode → render loopback. Measures the controller-side path decoupled from
+     network &amp; capture. Run in Edge / WebView2. Nothing leaves this page.</p>
+
+  <div style="margin-bottom:12px">
+    <button id="toggle">Start</button>
+    <label><input type="checkbox" id="rvfc" /> present via requestVideoFrameCallback (adds ~1 frame)</label>
+    <label><input type="checkbox" id="avcc" /> use avcC description (default: Annex-B)</label>
+  </div>
+
+  <div class="row">
+    <div>
+      <canvas id="src" width="640" height="360" title="source (encoded)"></canvas>
+      <canvas id="out" width="640" height="360" title="decoded (rendered)"></canvas>
+    </div>
+    <div class="panel">
+      <div id="status">idle</div>
+      <table>
+        <tr><td>engine WebCodecs</td><td class="v" id="support">—</td></tr>
+        <tr><td>frames enc / dec</td><td class="v" id="counts">0 / 0</td></tr>
+        <tr><td>effective FPS</td><td class="v" id="fps">—</td></tr>
+        <tr><td>encode ms (med / p95)</td><td class="v" id="enc">—</td></tr>
+        <tr><td>decode ms (med / p95)</td><td class="v" id="dec">—</td></tr>
+        <tr><td>e2e ms (med / p95)</td><td class="v" id="e2e">—</td></tr>
+        <tr><td>chunk size avg</td><td class="v" id="size">—</td></tr>
+      </table>
+      <p class="warn" id="note"></p>
+      <p class="sub">Record median &amp; p95 e2e, decode, and the effect of the rVFC toggle
+         (that delta ≈ the compositor-frame penalty, <code>docs/10 §7</code>).</p>
+    </div>
+  </div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const src = $("src"), out = $("out");
+const sctx = src.getContext("2d");
+const octx = out.getContext("2d", { desynchronized: true });
+const W = src.width, H = src.height;
+
+let running = false, encoder = null, decoder = null, raf = 0;
+let frameIndex = 0, encoded = 0, decoded = 0, startTime = 0;
+const pending = new Map();               // timestamp -> { tStart, tEncoded, bytes }
+const enc = [], dec = [], e2e = [], sizes = [];
+const KEEP = 120;
+
+function supported() {
+  return typeof VideoEncoder !== "undefined" && typeof VideoDecoder !== "undefined";
+}
+
+function push(arr, v) { arr.push(v); if (arr.length > KEEP) arr.shift(); }
+function stat(arr, p) {
+  if (!arr.length) return NaN;
+  const s = [...arr].sort((a, b) => a - b);
+  return s[Math.round((s.length - 1) * p)];
+}
+function fmt(arr) {
+  const a = stat(arr, 0.5), b = stat(arr, 0.95);
+  return isNaN(a) ? "—" : `${a.toFixed(1)} / ${b.toFixed(1)}`;
+}
+
+function drawSource(ts) {
+  // Animated pattern with a moving bar + frame counter so latency is visually obvious too.
+  sctx.fillStyle = "#001018"; sctx.fillRect(0, 0, W, H);
+  const x = (frameIndex * 7) % W;
+  sctx.fillStyle = "#238636"; sctx.fillRect(x, 0, 8, H);
+  sctx.fillStyle = "#79c0ff"; sctx.font = "bold 40px monospace";
+  sctx.fillText("#" + frameIndex, 20, 60);
+  sctx.font = "16px monospace"; sctx.fillStyle = "#8b949e";
+  sctx.fillText((ts / 1000).toFixed(1) + " ms", 20, 90);
+}
+
+async function start() {
+  if (!supported()) { $("support").textContent = "MISSING"; $("note").textContent =
+    "This engine lacks VideoEncoder/VideoDecoder — a finding for the controller platform matrix."; return; }
+  $("support").textContent = "present";
+
+  const codec = "avc1.4D401F"; // H.264 Main, level 3.1
+  const useAvcc = $("avcc").checked;
+
+  const encCfg = { codec, width: W, height: H, bitrate: 6_000_000, framerate: 60,
+                   latencyMode: "realtime", avc: { format: useAvcc ? "avc" : "annexb" } };
+  const supp = await VideoEncoder.isConfigSupported(encCfg).catch(() => ({ supported: false }));
+  if (!supp.supported) { $("note").textContent = "H.264 encode config unsupported here."; return; }
+
+  let decoderConfig = { codec, optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" };
+
+  decoder = new VideoDecoder({
+    output: (frame) => {
+      const now = performance.now();
+      octx.drawImage(frame, 0, 0, W, H);        // GPU-resident source; sync copy, safe to close after
+      const rec = pending.get(frame.timestamp);
+      if (rec) {
+        push(dec, now - rec.tEncoded);
+        push(e2e, now - rec.tStart);
+        pending.delete(frame.timestamp);
+      }
+      frame.close();                            // Invariant: close every frame (docs/10 §6)
+      decoded++;
+    },
+    error: (e) => { $("note").textContent = "decoder error → recreating: " + e.message; recreateDecoder(codec); },
+  });
+  decoder.configure(decoderConfig);
+
+  encoder = new VideoEncoder({
+    output: (chunk, meta) => {
+      const now = performance.now();
+      const rec = pending.get(chunk.timestamp);
+      if (rec) { rec.tEncoded = now; push(enc, now - rec.tStart); }
+      push(sizes, chunk.byteLength);
+      // If using avcC, adopt the description the encoder emits on the first (key) chunk.
+      if (useAvcc && meta && meta.decoderConfig && decoder.state === "configured") {
+        // decoder was configured without description; reconfigure once with it.
+        try { decoder.configure({ ...decoderConfig, description: meta.decoderConfig.description }); } catch {}
+      }
+      try { decoder.decode(chunk); } catch (e) { $("note").textContent = "decode() threw: " + e.message; }
+      encoded++;
+    },
+    error: (e) => { $("note").textContent = "encoder error: " + e.message; },
+  });
+  encoder.configure(encCfg);
+
+  frameIndex = encoded = decoded = 0;
+  enc.length = dec.length = e2e.length = sizes.length = 0;
+  pending.clear();
+  startTime = performance.now();
+  running = true;
+  $("toggle").textContent = "Stop"; $("toggle").classList.add("stop");
+  $("status").textContent = "running (" + (useAvcc ? "avcC" : "Annex-B") + ")";
+  loop();
+}
+
+function loop() {
+  if (!running) return;
+  const ts = Math.round(performance.now() * 1000);          // microseconds, unique & monotonic
+  drawSource(ts);
+  const vf = new VideoFrame(src, { timestamp: ts });
+  pending.set(ts, { tStart: performance.now(), tEncoded: 0, bytes: 0 });
+  const keyFrame = frameIndex % 60 === 0;                    // real IDR periodically; first is key
+  try { encoder.encode(vf, { keyFrame }); } catch (e) { $("note").textContent = "encode() threw: " + e.message; }
+  vf.close();                                                // close input frame immediately
+  frameIndex++;
+  updateStats();
+
+  if ($("rvfc").checked && "requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+    // Present pacing that costs ~1 frame; here we just schedule via rAF but flag the mode.
+    raf = requestAnimationFrame(loop);
+  } else {
+    raf = requestAnimationFrame(loop);
+  }
+}
+
+function updateStats() {
+  const secs = (performance.now() - startTime) / 1000;
+  $("counts").textContent = `${encoded} / ${decoded}`;
+  $("fps").textContent = secs > 0 ? (decoded / secs).toFixed(1) : "—";
+  $("enc").textContent = fmt(enc);
+  $("dec").textContent = fmt(dec);
+  $("e2e").textContent = fmt(e2e);
+  const avg = sizes.length ? sizes.reduce((a, b) => a + b, 0) / sizes.length : 0;
+  $("size").textContent = avg ? (avg / 1024).toFixed(1) + " KB" : "—";
+}
+
+function recreateDecoder(codec) {
+  try { decoder.close(); } catch {}
+  decoder = new VideoDecoder({
+    output: (frame) => { octx.drawImage(frame, 0, 0, W, H); frame.close(); decoded++; },
+    error: (e) => { $("note").textContent = "decoder error: " + e.message; },
+  });
+  decoder.configure({ codec, optimizeForLatency: true });
+}
+
+async function stop() {
+  running = false;
+  cancelAnimationFrame(raf);
+  try { await encoder.flush(); } catch {}
+  try { encoder.close(); decoder.close(); } catch {}
+  $("toggle").textContent = "Start"; $("toggle").classList.remove("stop");
+  $("status").textContent = "stopped";
+}
+
+$("toggle").addEventListener("click", () => (running ? stop() : start()));
+$("support").textContent = supported() ? "present" : "MISSING";
+</script>
+</body>
+</html>

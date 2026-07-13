@@ -1,0 +1,16 @@
+[package]
+name = "latency-probe"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# Dependency-light on purpose: the synthetic source is std-only so this builds anywhere.
+# The Windows DXGI+MF FrameSource (to implement) adds `windows` behind a target gate.
+[dependencies]
+
+# [target.'cfg(windows)'.dependencies]
+# windows = { version = "0.58", features = [
+#   "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D11",
+#   "Win32_Media_MediaFoundation", "Win32_Foundation",
+# ] }

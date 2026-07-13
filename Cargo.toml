@@ -1,0 +1,28 @@
+# Casual RAS — Cargo workspace. See docs/17 (roadmap) and docs/design/phase-0-design.md.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# The Phase-S spike is a throwaway with heavy/Windows-only deps; keep it out of the clean workspace.
+exclude = ["spike"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+authors = ["Casual RAS authors"]
+
+# Invariants encoded as lints (CLAUDE.md §5). unsafe is denied by default and may be
+# explicitly re-enabled per-crate for FFI/platform code, with justification.
+[workspace.lints.rust]
+unsafe_code = "deny"
+# Lint groups must carry a lower priority so specific lints can override them.
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
+# Keep release builds lean; tune later per docs/10 latency work.
+[profile.release]
+lto = "thin"

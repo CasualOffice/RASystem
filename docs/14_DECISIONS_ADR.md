@@ -1,0 +1,136 @@
+# 14 — Architecture Decision Records (ADR Log)
+
+> One entry per significant, hard-to-reverse decision. Format: **Decision · Status · Context ·
+> Consequences.** Statuses: `Accepted` (decided), `Provisional` (decided for MVP, revisit),
+> `Proposed` (needs sign-off — usually legal/product). Supersedes the inline ADR-001…010 in
+> `docs/02`; those are folded in below.
+
+## Foundational (from `docs/02`, carried forward)
+
+- **ADR-001 · Rust shared core · Accepted.** One Rust workspace of core crates underpins host,
+  controller, and future SDKs. Cross-platform, performant, versionable.
+- **ADR-002 · SDK talks to a separate host runtime · Accepted** (relaxed for MVP — see ADR-020).
+- **ADR-003 · Host issues grants in the MVP · Accepted.** No backend required; the host is the
+  authorization authority.
+- **ADR-004 · Grants are issuer-agnostic and endpoint-bound · Accepted.** A future
+  `ControlPlaneGrantIssuer` can replace the issuer without touching the validator (`docs/04 §6`).
+- **ADR-005 · Iroh is transport, not authorization · Accepted.** Iroh authenticates identity, never
+  permission. Authorization is entirely ours (`docs/09`).
+- **ADR-006 · One active OS-input controller by default · Accepted.**
+- **ADR-007 · Additional cursors are virtual · Accepted.**
+- **ADR-008 · No arbitrary shell execution · Accepted.** Actions are a signed catalogue with strict
+  argument schemas.
+- **ADR-009 · Protobuf for high-frequency channels, CBOR only for portable tickets · Accepted.**
+- **ADR-010 · Windows is the first host platform · Accepted.**
+
+## Strategy & build approach
+
+- **ADR-020 · App-first, extract SDKs later · Accepted.** Build two working reference apps (host +
+  controller) sharing Rust crates directly; draw the SDK boundary + C ABI/N-API around proven crates
+  afterward. *Rationale:* an SDK surface can't be validated without a real consumer. *Consequence:*
+  Phase 1 delivers apps, not an ABI; relaxes ADR-002 for the MVP.
+- **ADR-021 · Controller is Tauri v2 (Rust + React/TS) · Accepted.** Reuses the Rust core in-process,
+  no ABI. **Pin Tauri ≥ 2.11.1** (Origin-Confusion advisory GHSA-7gmj-67g7-phm9). *Consequence:*
+  deny-by-default capabilities, Isolation pattern, strict CSP, remote feed rendered to canvas only
+  (`docs/12`).
+- **ADR-022 · Controller video path is WebCodecs → canvas for the MVP · Accepted.** Encoded H.264
+  pushed to the webview via Tauri `Channel`+`Raw`; `VideoDecoder` decode; GPU-resident render.
+  Native-surface fallback is the planned v2 / Linux path (`docs/10 §7`, `docs/12 §5`).
+- **ADR-023 · Collapse the host process model for the MVP · Provisional.** One user-space process
+  (capture+encode+Iroh+consent+input) for the MVP; split into service + session-agent + input-helper
+  as a hardening phase. **Design the IPC + "which desktop am I on" boundary now** so the split is
+  mechanical. *Consequence:* the MVP is blind on the secure desktop and to elevated windows — an
+  honestly-documented cliff (`docs/11 §1`), not a shipping security posture.
+
+## Media & transport
+
+- **ADR-030 · DXGI Desktop Duplication is primary capture · Accepted.** WGC fallback for per-window /
+  hybrid-GPU. Rationale: lowest latency, no capture border, separate cursor metadata, dirty rects.
+- **ADR-031 · HW H.264, B-frames off, Main profile, CBR, infinite-GOP + forced-IDR · Accepted.**
+  Zero-copy D3D11 texture-in. MF MFT first, direct NVENC/AMF/oneVPL when ultra-low-latency knobs are
+  needed.
+- **ADR-032 · OpenH264 (`libloading`) software fallback — never x264 · Accepted.** x264/libx264 is
+  GPL (source-release trap). H.264/H.265 *patent* posture deferred to counsel (see ADR-051).
+- **ADR-033 · Annex-B bitstream; FEC over ARQ; RFI/intra-refresh over IDR-on-loss · Accepted.**
+  Robust to loss, no out-of-band `description` to keep in sync, no bitrate spikes. FEC via `nanors`
+  (MIT).
+- **ADR-034 · Self-hosted production relays · Accepted.** Public n0 relays are dev/test only. Relay
+  token-auth + allow-list; keeps connection-graph metadata in-house.
+
+## Security, authorization, fraud
+
+- **ADR-040 · Algorithm-pinned signed grants, sender-constrained · Accepted.** Prefer **Biscuit**
+  (attenuation + Datalog + per-block revocation) or PASETO v4.public over hand-rolled JWT;
+  endpoint+identity bound (DPoP-style) so a stolen grant is inert; libsodium Ed25519.
+- **ADR-041 · Per-message capability enforcement, host-side · Accepted.** Never trust the
+  controller's claimed scope. *Directly motivated by RustDesk CVE-2026-57850/-58056, where coarse
+  connect-time roles weren't enforced per message.* Fine-grained asymmetric capabilities live in the
+  core, **not paywalled**.
+- **ADR-042 · Tamper-evident audit is first-class · Accepted.** Hash chain + forward-secure key
+  evolution + periodic signed Merkle checkpoint + external witness/RFC 3161 timestamp + TPM monotonic
+  counter on seals. "Tamper-evident, not tamper-proof." Never log screen/keystrokes/secrets.
+- **ADR-043 · EV code-signing from the first external build · Accepted.** Unsigned = SmartScreen/AV
+  (PUA) blocked *and* impersonation-prone. Signing keys in HSM/TPM, off build/production, short-lived
+  + revocable (AnyDesk-2024 lesson).
+- **ADR-044 · On-device `content → verdict` fraud architecture · Accepted.** All fraud detection runs
+  on-host in volatile memory; only content-free verdict enums egress; analyzer inert unless a live
+  grant exists. `content` field forbidden at compile time (`docs/15`).
+- **ADR-045 · Persona-split enforcement profiles · Accepted.** Consumer-Protect (aggressive,
+  fail-closed) vs Attended-Support (warn-only, fail-open) vs Unattended/Fleet (consent layer
+  disabled). Warn-and-observe default; new fleets run **shadow/audit-only first**.
+- **ADR-046 · Enforcement ladder with local-user-only, controller-blind recovery · Accepted.**
+  banner→re-consent→input-suspend→video-mask→auto-pause→terminate; resume authority is local-only.
+- **ADR-047 · No UIAccess; lean on the Windows secure desktop · Accepted.** We never build a
+  secure-desktop injection bypass; credential/UAC prompts black out remotely by design, session
+  continues.
+- **ADR-048 · SAS-bound emergency stop · Accepted.** Panic path rides kernel-owned Ctrl+Alt+Del and
+  overrides all grants.
+- **ADR-049 · Tiered enrollment composing with signed grants · Accepted.** Standard/Recommended/
+  Hardened/Enterprise; TPM-sealed storage with attestation-gated tier advertising (software fallback
+  capped at Tier 0); FIDO2 PRF may fuse to grant issuance; no phishable factor recovers a
+  phishing-resistant one (`docs/16`).
+- **ADR-050 · Coerced-victim defense is friction + capability containment, not an auth factor ·
+  Accepted.** Non-skippable cool-off + directed warnings + default-deny capability classes;
+  explicitly harm-reduction. Public claims must distinguish prevent / deter / cannot-stop.
+- **ADR-052 · Session recording excluded from the fraud subsystem · Accepted.** If offered, it's a
+  separate, separately-consented product with its own DPIA/BAA.
+- **ADR-053 · Rotating single-use connection tickets are the always-on default; phone authenticator
+  is optional · Accepted.** A ticket is consumed on first use and dead thereafter; generating a new
+  one bumps `active_ticket_generation` and invalidates the previous (at most one live), on top of a
+  short expiry. Mitigates stolen/leaked/shoulder-surfed/replayed links. *Scope:* protects the
+  bootstrap artifact, **not** the endpoint private key (that stays covered by TPM storage +
+  revocation + generation bump + emergency stop), and a ticket never grants access without local
+  consent. TOTP/FIDO2 are the optional Tier 1+ upgrade, not a prerequisite (`docs/16 §1.5`).
+
+## Licensing
+
+- **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
+  counsel sign-off on codec patents before opening the repo).**
+  - **Single permissive license — Apache-2.0** across the repo (dropping the earlier open-core/BSL
+    plan). Rationale: it is the whole point of an embeddable SDK that customers can ship it in
+    proprietary apps with no copyleft obligation; Apache-2.0 adds an explicit **patent grant +
+    retaliation clause** and is the Rust-ecosystem norm.
+  - **Consequence accepted:** no field-of-use restriction → competitors may also use the code,
+    including the fraud subsystem. Differentiation rests on execution, brand, operated
+    relays/control-plane, and support — not the license. **MPL-2.0** is the only alternative under
+    consideration (file-level weak copyleft: still embeddable, but core-file changes stay open).
+  - **AGPL / SSPL rejected** (viral/network copyleft — would force licensees to open-source their
+    apps).
+  - **Dependency hygiene (hard blocker):** allow MIT / Apache-2.0 / BSD / ISC / Zlib / Unicode-DFS /
+    **MPL-2.0**; **deny GPL / LGPL / AGPL / SSPL** as build-breaking via `cargo-deny`. **RustDesk
+    (AGPL) is study-only, never linked/vendored** — pull `scrap`/capture/codec crates from permissive
+    **upstream crates.io**, never the RustDesk fork. `cargo-about`/`cargo-bundle-licenses` →
+    `THIRD-PARTY-NOTICES`; CycloneDX SBOM per release.
+  - **Codec patents ≠ copyright:** BSD-2 on `openh264` grants no H.264 patent rights. Prefer OS/GPU
+    hardware encoders or a royalty-free default (AV1 via `rav1e`/`dav1d`). Flag for IP counsel.
+  - **Contributions:** DCO (`Signed-off-by`); a CLA is optional under Apache-2.0.
+  - *Not legal advice — add the full Apache-2.0 text and get counsel sign-off on the codec-patent
+    strategy before shipping.*
+
+## Open decisions (tracked, not yet ADRs — see `docs/15 §7`, `docs/16 §6`)
+Cool-off durations & gated capability classes per vertical · Apache-2.0 vs MPL-2.0 final call ·
+codec strategy (royalty-free vs licensed vs HW-only) · minimum tier binding per vertical · whether to
+offer recording at all ·
+tamper-resistance vs anti-stalkerware bound · enterprise-console egress scope · concurrent-telephony
+detection acceptability · live technical-assumption validation (Chrome 138 UIA, OCR MSIX identity,
+`consent.exe` enumeration, FIDO2 ergonomics in Tauri/Rust).

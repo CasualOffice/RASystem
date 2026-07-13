@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package casual_ras.v1;
+
+// Wire source of truth for Casual RAS. See docs/04_PROTOCOL_AND_TOKEN_SPEC.md.
+// Codegen (prost + a vendored protoc, so no system protoc is required) is wired in Phase 1.
+// This is a placeholder message set — never hand-edit generated code; edit this file and regenerate.
+
+// Placeholder liveness message. Real bootstrap/session messages land in Phase 1/2.
+message Ping {
+  uint64 nonce = 1;
+}

@@ -1,0 +1,11 @@
+[package]
+name = "iroh-probe"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+iroh = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
