@@ -42,5 +42,11 @@ proptest = "1"
 name = "loopback_demo"
 required-features = ["testkit"]
 
+# Hand-rolled latency micro-benchmarks (no criterion — see the file header). `harness = false`
+# means the file's own `main` runs under `cargo bench`.
+[[bench]]
+name = "hot_paths"
+harness = false
+
 [lints]
 workspace = true

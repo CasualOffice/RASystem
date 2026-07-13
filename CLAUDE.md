@@ -84,6 +84,8 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   - `cargo clippy --all-targets --all-features -- -D warnings`
   - `cargo test --all`
   - `cargo deny check` (license gate: allows MIT/Apache/BSD/ISC/Zlib/MPL; denies GPL/LGPL/AGPL/SSPL)
+  - `cargo bench -p ras-core --bench hot_paths` (hand-rolled hot-path micro-bench + loose sanity
+    ceiling; no criterion — runs in CI as a gross-regression smoke check)
 - **Deviation resolved** (`docs/design/phase-0-design.md §8`): the deferred protobuf codegen is now
   wired. `crates/ras-protocol/build.rs` compiles `proto/casual_ras.proto` with **`protox`** (pure-Rust,
   no system `protoc`, no network, no vendored binary) + `prost-build` into `OUT_DIR`; `ras-protocol::codec`

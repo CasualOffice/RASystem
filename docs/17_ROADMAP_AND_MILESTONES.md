@@ -178,8 +178,11 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   terminal-absorbing; revoke-always-wins), **and the `FramedControlChannel` reader** — the code that
   will parse bytes off iroh's streams — fuzzed for no-panic/no-hang on adversarial input, correct
   reassembly under arbitrary chunking (1 byte … multi-frame), and an oversized length prefix leaving
-  the stream permanently refused (DoS guard fires before body allocation). Perf harness in CI still to
-  wire.
+  the stream permanently refused (DoS guard fires before body allocation). **Perf harness wired**
+  (`crates/ras-core/benches/hot_paths.rs`, hand-rolled — no criterion/dev-dep weight; `cargo bench` in
+  CI): per-op baselines on the per-frame/per-message hot paths (dev laptop: state transition ~6 ns,
+  control-codec round-trip ~130 ns, frame-Channel encode+parse ~26 ns — all sub-µs) behind a loose
+  1 ms/op sanity ceiling that trips on a gross regression without flaking on runner noise.
 
 **③ Exit criteria:** stable ~30 FPS on standard desktop workloads · direct + relay sessions work ·
 prototype latency targets measured · reconnection documented · local cursor stays responsive during
