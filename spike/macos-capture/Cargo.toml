@@ -1,0 +1,53 @@
+[package]
+name = "macos-capture-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Phase-S macOS capture spike (throwaway). Uses the pure-Rust `objc2` framework bindings
+# (no Swift bridge / no build-time SDK codegen) — unlike the svtlabs `screencapturekit` crate,
+# whose `apple-metal` Swift bridge cannot compile against a mismatched SDK. objc2 is also the
+# binding family the real `ras-media-macos` backend will use (permissive, no opaque build steps).
+
+[[bin]]
+name = "capture"
+path = "src/main.rs"
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+  "NSArray",
+  "NSString",
+  "NSError",
+  "NSObject",
+  "NSValue",
+  "NSGeometry",
+  "NSThread",
+] }
+objc2-core-foundation = { version = "0.3", features = ["CFBase"] }
+objc2-screen-capture-kit = { version = "0.3", features = [
+  "SCStream",
+  "SCShareableContent",
+  "SCError",
+  "objc2-core-media",
+  "objc2-core-graphics",
+  "objc2-core-foundation",
+  "block2",
+  "dispatch2",
+  "std",
+] }
+objc2-core-media = { version = "0.3", features = [
+  "CMSampleBuffer",
+  "CMTime",
+  "CMBase",
+  "objc2-core-video",
+] }
+objc2-core-video = { version = "0.3", features = [
+  "CVPixelBuffer",
+  "CVImageBuffer",
+  "CVBuffer",
+  "CVReturn",
+  "CVBase",
+] }
+dispatch2 = "0.3"
+block2 = "0.6"

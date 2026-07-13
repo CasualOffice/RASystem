@@ -94,6 +94,34 @@ with the `presets::N0` discovery+relay preset, ALPN dial, bidi stream, and the
 Direct/relay success + per-frame RTT over a real WAN feed the network half of the glass-to-glass
 budget and the `VideoTransport` choice; those are the numbers that gate the go/no-go ADR.
 
+### macOS capture (`spike/macos-capture`) — *built + on-device run: GO (capture half)*
+
+The capture half of the ScreenCaptureKit → VideoToolbox path (the part the WebCodecs GO did **not**
+cover — that was decode/render only). Measured on the dev-lead Mac (macOS 26.3, Retina 1470×956
+logical / BGRA, whole-display `SCContentFilter`, delegate on a dedicated dispatch queue):
+
+| metric | 30 fps target | 60 fps target (release) |
+|--------|--------------|------------------------|
+| delivered FPS | 29.9 | 48.3 |
+| SCK pts interval (med / p95) | 33.33 / 50.0 ms | 16.67 / 33.33 ms |
+| wall inter-arrival (med / p95) | 33.90 / 34.54 ms | 18.11 / 31.81 ms |
+| lock+touch µs/frame (med / p95 / max) | 39 / 103 / 264 | 20 / 56 / 242 |
+
+**Assessment — capture is GO.** SCK's own presentation-timestamp interval sits on the exact target
+period (16.67 ms at 60, 33.33 ms at 30) whenever the screen changes, so the source cadence is
+frame-accurate and 60 fps-capable. The sub-target *delivered* FPS is **SCK coalescing static frames**
+(it emits on change, not on a fixed clock) — a bandwidth feature, not a defect; the p95 gaps are
+exactly one skipped still frame. Getting pixels out of the delivered `CVPixelBuffer` costs ~20–40 µs
+median (release), negligible against even a 16.67 ms budget — so the capture stage leaves essentially
+the whole per-frame budget for encode + network. **Still unmeasured:** the VideoToolbox **encode**
+stage (`VTCompressionSession` → Annex-B, encode latency) — the next spike slice.
+
+Binding note: this spike uses the pure-Rust **`objc2`** framework crates, **not** the svtlabs
+`screencapturekit` crate — the latter pulls `apple-metal`, whose build-time **Swift bridge** fails to
+compile on a mismatched SDK (here: OS 26.3 with only the 15.5 SDK installed). `objc2` compiles from
+Rust `extern`/`msg_send!` bindings with no Swift step, and is the family the real `ras-media-macos`
+backend should adopt (permissive, no opaque build steps, smaller supply-chain surface).
+
 ## 5. Caveats for the implementer
 - **Iroh 1.x API drift — resolved against 1.0.2.** The probe now builds clean; the `// VERIFY:`
   markers are gone. What actually changed from the initial guess: `Endpoint::builder()` takes a
@@ -103,6 +131,7 @@ budget and the `VideoTransport` choice; those are the numbers that gate the go/n
   relay-vs-direct via `TransportAddr::is_relay()`; `EndpointId` (= `PublicKey`) parses from 64-char
   hex. If you re-pin iroh, re-check these three call sites.
 - The **web harness's encoder** stands in for the host encoder to make the controller half runnable
-  now; real numbers for the *capture→encode* stage come from the Windows `FrameSource`.
+  now. The *capture* stage is now measured on macOS (`spike/macos-capture`, above); the *encode*
+  stage (VideoToolbox) is the remaining unmeasured slice of the host `FrameSource`.
 - Everything here is **throwaway** — do not carry spike code into Phase 1; carry the *numbers* and
   the go/no-go ADR.

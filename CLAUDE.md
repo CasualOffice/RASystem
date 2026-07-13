@@ -52,12 +52,17 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
 - **Live progress tracker:** `docs/17_ROADMAP_AND_MILESTONES.md` (per-phase ☐/◐/☑ checkboxes) is the
   single source of truth for what's done; spike measurements are recorded in
   `docs/design/phase-S-design.md §4.1`. Keep both current as work lands.
-- **Phase S (risk spike) — half measured, half pending.** WebCodecs bet is **GO**: measured on Chrome
-  (e2e 7.1/10.5 ms) *and* Safari/WebKit (e2e 4.0/5.0 ms, 60 fps, 0 drops) — Safari is the WKWebView
-  engine, so the macOS-lead controller render path is validated and the native-surface PIVOT is off
-  the table. **Still pending (blocks the M1 go/no-go ADR):** the iroh network-matrix probe
-  (needs a Mac↔Linux two-machine run) and the minor rVFC compositor-penalty delta. The concrete iroh
-  transport + platform capture backends stay stubbed behind traits until that go/no-go.
+- **Phase S (risk spike) — mostly measured, one item pending.** WebCodecs bet is **GO**: measured on
+  Chrome (e2e 7.1/10.5 ms) *and* Safari/WebKit (e2e 4.0/5.0 ms, 60 fps, 0 drops) — Safari is the
+  WKWebView engine, so the macOS-lead controller render path is validated and the native-surface
+  PIVOT is off the table. **macOS capture is GO** (`spike/macos-capture`, on-device run): SCK delivers
+  a frame-accurate 16.67 ms/60 fps cadence on change (coalesces static frames — a bandwidth feature),
+  and pixel extraction costs ~20–40 µs/frame — negligible against the per-frame budget. Uses the
+  pure-Rust **`objc2`** bindings (no Swift bridge), the family the real `ras-media-macos` backend
+  should adopt. **Still pending (blocks the M1 go/no-go ADR):** the iroh network-matrix probe (needs a
+  Mac↔Linux two-machine run) and the minor rVFC compositor-penalty delta; the VideoToolbox **encode**
+  stage is the remaining capture→encode slice to measure. The concrete iroh transport + platform
+  capture backends stay stubbed behind traits until that go/no-go.
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

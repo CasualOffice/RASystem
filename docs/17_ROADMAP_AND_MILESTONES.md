@@ -99,9 +99,12 @@ triggers (native-surface pivot / codec change).
 - ☐ `NET` **Run** across the network matrix (`docs/08 §3`): same-LAN, different NAT, **symmetric
   NAT**, **UDP-blocked/443-only**, relay-only, migration — record success + direct-vs-relay + RTT.
   *(Blocked: needs a Mac↔Linux two-machine run.)*
-- ◐ `MED` Capture skeleton (`spike/latency-probe`, `FrameSource` + synthetic). **macOS-lead:**
-  ScreenCaptureKit → VideoToolbox source documented to implement (Windows DXGI+MF noted for the port)
-  — measures capture→encode on the Mac once implemented.
+- ☑ `MED` **macOS capture spike** (`spike/macos-capture`) — real ScreenCaptureKit via pure-Rust
+  `objc2` bindings (no Swift bridge). **On-device run: GO.** Frame-accurate 16.67 ms/60 fps SCK
+  cadence on change (static-frame coalescing = bandwidth feature); pixel extraction ~20–40 µs/frame.
+  Numbers in `docs/design/phase-S-design.md §4.1`.
+- ◐ `MED` Capture→**encode**: VideoToolbox (`VTCompressionSession` → Annex-B) encode-latency slice is
+  the remaining unmeasured half of the host `FrameSource` (Windows DXGI+MF noted for the port).
 - ☑ `MED`+`UI` **Turnkey WebCodecs loopback harness** (`spike/latency-probe/web/index.html`) —
   encode→decode→canvas latency, avcC/annexB, frame-close, compositor-frame toggle.
 - ◐ `QA` **Run** the probes; compile the latency report; record the compositor-frame penalty.

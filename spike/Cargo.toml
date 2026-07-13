@@ -1,4 +1,4 @@
 # Phase-S spike workspace (throwaway, excluded from the root workspace). See docs/design/phase-S-design.md.
 [workspace]
 resolver = "2"
-members = ["iroh-probe", "latency-probe"]
+members = ["iroh-probe", "latency-probe", "macos-capture"]
