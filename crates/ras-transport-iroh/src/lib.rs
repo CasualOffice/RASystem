@@ -435,4 +435,152 @@ mod framed_control_tests {
         let err = chan.recv().await.unwrap_err();
         assert_eq!(err.code, ErrorCode::TransportError);
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Adversarial coverage of the reader — the code that will parse untrusted bytes off iroh's
+    // streams. A tiny deterministic PRNG (xorshift64) keeps these reproducible without a fuzz dep.
+    // -----------------------------------------------------------------------------------------
+
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed | 1)
+        }
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        /// A value in `0..n` (n > 0).
+        fn below(&mut self, n: usize) -> usize {
+            (self.next_u64() % n as u64) as usize
+        }
+        fn byte(&mut self) -> u8 {
+            (self.next_u64() & 0xff) as u8
+        }
+    }
+
+    /// A representative valid message set for round-trip fuzzing.
+    fn sample_messages() -> Vec<ControlMsg> {
+        use ras_protocol::{DecoderFeedback, KeyframeReason, KeyframeRequest};
+        vec![
+            ControlMsg::Hello {
+                protocol_version: 1,
+            },
+            ControlMsg::KeyframeRequest(KeyframeRequest {
+                since_frame: 42,
+                reason: KeyframeReason::UnrecoverableLoss,
+            }),
+            ControlMsg::Feedback(DecoderFeedback {
+                last_decoded_frame: 1 << 40, // > 2^32, exercises the u64 path
+                frames_dropped: 3,
+                decode_latency_us: 900,
+                keyframe_request: None,
+            }),
+            ControlMsg::Bye {
+                code: ErrorCode::NormalClosure,
+            },
+        ]
+    }
+
+    /// Feeding arbitrary bytes to the reader never panics and never hangs: every case ends in a
+    /// decoded frame or a typed error, and EOF guarantees termination.
+    #[tokio::test]
+    async fn adversarial_byte_streams_never_panic() {
+        for seed in 1..=256u64 {
+            let mut rng = Rng::new(seed);
+            let len = rng.below(600);
+            let blob: Vec<u8> = (0..len).map(|_| rng.byte()).collect();
+
+            let (a, b) = tokio::io::duplex(8192);
+            let (ar, aw) = split(a);
+            let (br, mut bw) = split(b);
+            drop(br);
+            let mut reader = FramedControlChannel::new(ar, aw);
+
+            bw.write_all(&blob).await.unwrap();
+            bw.shutdown().await.unwrap(); // EOF → recv must terminate
+
+            // Drain to completion: a valid-looking frame may decode, but EOF forces a terminal error.
+            let mut guard = 0;
+            loop {
+                guard += 1;
+                assert!(guard < 10_000, "reader failed to terminate on seed {seed}");
+                match reader.recv().await {
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
+    /// A stream of valid frames reassembles correctly no matter how the bytes are chunked — down to
+    /// one byte at a time and up to several frames per write.
+    #[tokio::test]
+    async fn framed_messages_survive_adversarial_chunking() {
+        let msgs = sample_messages();
+        for seed in 1..=64u64 {
+            let mut wire = Vec::new();
+            for m in &msgs {
+                wire.extend_from_slice(&ras_protocol::codec::frame(m));
+            }
+
+            let (a, b) = tokio::io::duplex(64 * 1024);
+            let (ar, aw) = split(a);
+            let (br, mut bw) = split(b);
+            drop(br);
+            let mut reader = FramedControlChannel::new(ar, aw);
+
+            let writer = tokio::spawn(async move {
+                let mut rng = Rng::new(seed ^ 0xA5A5);
+                let mut off = 0;
+                while off < wire.len() {
+                    let step = 1 + rng.below(9); // 1..=9 bytes per write
+                    let end = (off + step).min(wire.len());
+                    bw.write_all(&wire[off..end]).await.unwrap();
+                    off = end;
+                    tokio::task::yield_now().await;
+                }
+                bw.shutdown().await.unwrap();
+            });
+
+            for expected in &msgs {
+                let got = reader
+                    .recv()
+                    .await
+                    .expect("a framed message must decode under any chunking");
+                assert_eq!(
+                    ras_protocol::codec::frame(&got),
+                    ras_protocol::codec::frame(expected),
+                    "message mismatch under chunking (seed {seed})"
+                );
+            }
+            writer.await.unwrap();
+        }
+    }
+
+    /// An oversized length prefix doesn't just error once — it leaves the stream permanently refused
+    /// (the guard never consumes the bad prefix), so every later `recv` re-errors without blocking on
+    /// a body or resyncing. This is the "a garbage length kills the connection" posture; the caller
+    /// drops the session rather than trying to recover a desynced attacker-controlled stream.
+    #[tokio::test]
+    async fn oversized_prefix_leaves_stream_permanently_refused() {
+        let (a, b) = tokio::io::duplex(8192);
+        let (ar, aw) = split(a);
+        let (br, mut bw) = split(b);
+        drop(br);
+        let mut reader = FramedControlChannel::new(ar, aw);
+
+        let oversized = u32::try_from(MAX_CONTROL_FRAME + 1).unwrap();
+        bw.write_all(&oversized.to_be_bytes()).await.unwrap();
+        // Deliberately do NOT close the stream — an attacker keeps it open after the bad prefix.
+
+        for _ in 0..3 {
+            let err = reader.recv().await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidMessage);
+        }
+    }
 }
