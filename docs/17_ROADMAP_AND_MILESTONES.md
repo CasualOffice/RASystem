@@ -143,6 +143,10 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   `set_bitrate` and emitting `ConnectionQuality` (control law stays spike-tunable).
 - ☑ `UI`/`CORE` Frame-Channel codec (`ras-core::frame_channel`) — the 24-byte header contract shared
   with the future TS decoder worker.
+- ☑ `NET`/`CORE` Real protobuf control-channel wire codec (`ras-protocol::codec`, offline `protox`
+  codegen) + a generic async `FramedControlChannel` (`ras-transport-iroh`) that runs it over any
+  `AsyncRead`/`AsyncWrite` (iroh's stream shape) — length-prefixed, `MAX_CONTROL_FRAME` DoS-guarded,
+  tested over an in-memory duplex (round-trip, reassembly, split reads, oversized, peer-close).
 
 *Real backends behind the seams — **gated on the Phase-S go/no-go / hardware**:*
 - ☐ `MED` **macOS-lead:** ScreenCaptureKit capture + VideoToolbox encode behind the trait (Windows

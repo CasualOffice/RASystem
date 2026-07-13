@@ -7,8 +7,10 @@
 //! `iroh` dependency is added then. Newtypes wrap `[u8; 32]` so downstream crates never depend on
 //! `iroh` directly.
 
+use bytes::BytesMut;
 use ras_media::{EncodedFrame, FrameId};
-use ras_protocol::{ControlMsg, ErrorCode};
+use ras_protocol::{ControlMsg, ErrorCode, RasError};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// This crate's error alias over the shared taxonomy.
 pub type TransportError = ras_protocol::RasError;
@@ -79,7 +81,9 @@ pub struct ConnHealth {
 pub use ras_protocol::MAX_CONTROL_FRAME;
 
 /// Reliable, ordered control channel over one bidi QUIC stream (loss-intolerant → never datagrams).
-/// Framed as `u32-BE length | protobuf(ControlMsg)`.
+/// The iroh-specific handle; its send/recv delegate to a [`FramedControlChannel`] over the iroh
+/// `SendStream`/`RecvStream` once the endpoint is wired. Kept as a distinct type so the iroh
+/// dependency stays quarantined here.
 #[derive(Clone)]
 pub struct ControlChannel;
 
@@ -87,12 +91,76 @@ impl ControlChannel {
     /// Send one control message.
     pub async fn send(&self, msg: ControlMsg) -> Result<(), TransportError> {
         let _ = msg;
-        todo!("length-prefix + protobuf encode over the bidi stream")
+        todo!("delegate to FramedControlChannel over the iroh bidi stream")
     }
 
     /// Await the next control message.
     pub async fn recv(&self) -> Result<ControlMsg, TransportError> {
-        todo!("read length-prefixed protobuf; reject > MAX_CONTROL_FRAME")
+        todo!("delegate to FramedControlChannel over the iroh bidi stream")
+    }
+}
+
+/// Reliable, ordered control channel that runs the `ras-protocol` framing codec
+/// (`u32-BE length | protobuf(ControlMsg)`) over **any** async byte streams. That is exactly the
+/// shape of iroh's `(RecvStream, SendStream)` pair, so wiring iroh is `FramedControlChannel::new(recv,
+/// send)` — and it is fully testable today over an in-memory duplex.
+///
+/// The read side buffers across calls so a frame split across multiple reads reassembles, and the
+/// codec's [`MAX_CONTROL_FRAME`] guard rejects an oversized length prefix **before** the body is
+/// buffered (DoS-safe). This channel carries no grant/lease payloads — those ride opaque in
+/// [`ControlMsg::AuthEnvelope`] (Invariant 9).
+pub struct FramedControlChannel<R, W> {
+    reader: R,
+    writer: W,
+    read_buf: BytesMut,
+}
+
+impl<R, W> FramedControlChannel<R, W>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    /// Build over a read half and a write half (e.g. iroh `RecvStream` + `SendStream`).
+    pub fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader,
+            writer,
+            read_buf: BytesMut::with_capacity(4096),
+        }
+    }
+
+    /// Frame and send one control message, flushing so the peer observes it promptly.
+    pub async fn send(&mut self, msg: &ControlMsg) -> Result<(), TransportError> {
+        let framed = ras_protocol::codec::frame(msg);
+        self.writer.write_all(&framed).await.map_err(|_| {
+            RasError::recoverable(ErrorCode::TransportError, "control write failed")
+        })?;
+        self.writer.flush().await.map_err(|_| {
+            RasError::recoverable(ErrorCode::TransportError, "control flush failed")
+        })?;
+        Ok(())
+    }
+
+    /// Await the next complete control message. Reads incrementally into the buffer; the codec's
+    /// `MAX_CONTROL_FRAME` guard fires on the length prefix before an oversized body is read. A clean
+    /// peer close (EOF with an empty buffer) and a truncated frame both surface as a typed error.
+    pub async fn recv(&mut self) -> Result<ControlMsg, TransportError> {
+        loop {
+            if let Some(msg) = ras_protocol::codec::try_read_frame(&mut self.read_buf)? {
+                return Ok(msg);
+            }
+            let mut chunk = [0u8; 4096];
+            let n = self.reader.read(&mut chunk).await.map_err(|_| {
+                RasError::recoverable(ErrorCode::TransportError, "control read failed")
+            })?;
+            if n == 0 {
+                return Err(RasError::recoverable(
+                    ErrorCode::TransportError,
+                    "control channel closed",
+                ));
+            }
+            self.read_buf.extend_from_slice(&chunk[..n]);
+        }
     }
 }
 
@@ -244,5 +312,127 @@ impl HealthObserver {
     /// Await the next health change (UI reactivity, not the hot path).
     pub async fn changed(&mut self) -> ConnHealth {
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod framed_control_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use tokio::io::{split, AsyncWriteExt};
+
+    /// Build a wired pair of `FramedControlChannel`s over one in-memory duplex — models iroh's two
+    /// crossed streams (what A writes, B reads).
+    fn pair() -> (
+        FramedControlChannel<impl AsyncRead + Unpin + Send, impl AsyncWrite + Unpin + Send>,
+        FramedControlChannel<impl AsyncRead + Unpin + Send, impl AsyncWrite + Unpin + Send>,
+    ) {
+        let (a, b) = tokio::io::duplex(8192);
+        let (ar, aw) = split(a);
+        let (br, bw) = split(b);
+        (
+            FramedControlChannel::new(ar, aw),
+            FramedControlChannel::new(br, bw),
+        )
+    }
+
+    #[tokio::test]
+    async fn round_trips_a_message_both_directions() {
+        let (mut a, mut b) = pair();
+        a.send(&ControlMsg::Hello {
+            protocol_version: 1,
+        })
+        .await
+        .unwrap();
+        let got = b.recv().await.unwrap();
+        assert!(matches!(
+            got,
+            ControlMsg::Hello {
+                protocol_version: 1
+            }
+        ));
+
+        // Reverse direction on the same pair.
+        b.send(&ControlMsg::Bye {
+            code: ErrorCode::SessionRevoked,
+        })
+        .await
+        .unwrap();
+        let got = a.recv().await.unwrap();
+        assert!(matches!(
+            got,
+            ControlMsg::Bye {
+                code: ErrorCode::SessionRevoked
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn reassembles_multiple_back_to_back_frames() {
+        let (mut a, mut b) = pair();
+        for v in [10u32, 20, 30] {
+            a.send(&ControlMsg::Hello {
+                protocol_version: v,
+            })
+            .await
+            .unwrap();
+        }
+        for v in [10u32, 20, 30] {
+            match b.recv().await.unwrap() {
+                ControlMsg::Hello { protocol_version } => assert_eq!(protocol_version, v),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reassembles_a_frame_split_across_reads() {
+        // Write a valid frame's bytes in two chunks with a gap, so recv must loop and reassemble.
+        let (a, b) = tokio::io::duplex(8192);
+        let (ar, aw) = split(a);
+        let (_br, mut bw) = split(b);
+        let mut chan = FramedControlChannel::new(ar, aw);
+
+        let framed = ras_protocol::codec::frame(&ControlMsg::KeyframeRequest(
+            ras_protocol::KeyframeRequest {
+                since_frame: 7,
+                reason: ras_protocol::KeyframeReason::DecoderReset,
+            },
+        ));
+        let (head, tail) = framed.split_at(3); // split mid-header
+        let head = head.to_vec();
+        let tail = tail.to_vec();
+        tokio::spawn(async move {
+            bw.write_all(&head).await.unwrap();
+            tokio::task::yield_now().await;
+            bw.write_all(&tail).await.unwrap();
+        });
+        match chan.recv().await.unwrap() {
+            ControlMsg::KeyframeRequest(k) => assert_eq!(k.since_frame, 7),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_length_prefix_is_rejected() {
+        let (a, b) = tokio::io::duplex(64);
+        let (ar, aw) = split(a);
+        let (_br, mut bw) = split(b);
+        let mut chan = FramedControlChannel::new(ar, aw);
+        // A length prefix beyond MAX_CONTROL_FRAME, no body — the DoS guard must fire.
+        let oversized = u32::try_from(MAX_CONTROL_FRAME + 1).unwrap();
+        bw.write_all(&oversized.to_be_bytes()).await.unwrap();
+        let err = chan.recv().await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+    }
+
+    #[tokio::test]
+    async fn peer_close_surfaces_as_error() {
+        let (a, b) = tokio::io::duplex(64);
+        drop(b); // peer gone
+        let (ar, aw) = split(a);
+        let mut chan = FramedControlChannel::new(ar, aw);
+        let err = chan.recv().await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::TransportError);
     }
 }
