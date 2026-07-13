@@ -52,6 +52,31 @@
   as a hardening phase. **Design the IPC + "which desktop am I on" boundary now** so the split is
   mechanical. *Consequence:* the MVP is blind on the secure desktop and to elevated windows — an
   honestly-documented cliff (`docs/11 §1`), not a shipping security posture.
+- **ADR-057 · Native Tauri controller first; browser/webapp controller via WebRTC as a later
+  integration track · Accepted (extends ADR-021/022, resolves the controller-form fork).** The
+  flagship MVP controller stays **native Tauri v2 + iroh P2P + WebCodecs-in-webview** (ADR-021/022,
+  S6 iroh unchanged): it keeps the direct, hole-punched, low-latency path (priority #2), imposes no
+  browser-transport constraints, and is the fastest route to the M2 reference that proves the
+  latency/security story end-to-end. A **browser/webapp controller** — the SDK-embeddable "drop into
+  any web product" form — is a **deliberately deferred second track**, carried by **WebRTC**, chosen
+  because it is the *only* browser transport that preserves true P2P (ICE/STUN, hole-punching);
+  WebTransport/WebSocket are rejected for that path because they require a browser-trusted TLS cert on
+  a publicly-reachable endpoint, i.e. a cloud gateway (server infra deferred to Phase 9) and the loss
+  of P2P. **Signalling/STUN/TURN:** bootstrap with public STUN (e.g. Google) for reflexive-address
+  discovery; add **TURN** (relay) only when direct fails, self-hosted for production privacy
+  (parallels ADR-034; public STUN leaks only reflexive-address metadata, never content).
+  - *Why this is affordable:* the whole core is transport-agnostic above the DI seams
+    (`SessionTransport`/`VideoSinkDyn`/`VideoSourceDyn`) — session state machine, control
+    protocol/codec, grants/auth seam, ABR, loss handling, frame-Channel header all survive unchanged;
+    the WebRTC track swaps only the transport adapter + render host. **Invariant 9 holds regardless of
+    transport** (the host enforces authorization), so adding a less-trusted browser controller does
+    not weaken the security foundation.
+  - *Consequences accepted, to revisit when the WebRTC track starts:* two transports to maintain
+    (iroh native↔native, WebRTC native↔browser) — reassess consolidating on WebRTC iff the browser
+    controller becomes primary; WebRTC media rides DTLS-SRTP with our signed grants layered on top
+    (host still issues/validates); a browser controller has **no TPM-backed key storage**, so it is
+    capped at assurance **Tier 0** (ADR-049 / Invariant 16); relayed (TURN) sessions will not match
+    native iroh glass-to-glass latency — an honest, documented trade for embedding reach.
 
 ## Media & transport
 

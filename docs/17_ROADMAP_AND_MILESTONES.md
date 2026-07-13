@@ -337,9 +337,16 @@ negotiation); N-API shape; React component/hook API (`docs/05`).
 - ☐ `SDK` React components/hooks (from the controller UI). ☐ `INF` Installer toolkit (WiX/MSI, silent
   install, service registration). ☐ `SDK` Reference host + controller apps + sample integration + API
   docs. ☐ `QA` ABI compatibility tests; external-dev integration dry-run.
+- ☐ `NET`/`UI`/`SDK` **Browser/webapp controller over WebRTC (ADR-057, deferred integration track).**
+  Second transport adapter behind `SessionTransport` — WebRTC data channels + DTLS-SRTP, ICE with
+  public STUN (self-hosted TURN when direct fails), grants validated host-side (Invariant 9) — plus a
+  JS/web controller SDK droppable into a customer's web product. Reuses the transport-agnostic core;
+  caps a pure-browser controller at assurance Tier 0 (no TPM). Kicks off only after the native
+  iroh MVP (M2) is proven; may prompt reassessing iroh-vs-WebRTC consolidation if it becomes primary.
 
 **③ Exit criteria:** external developer completes the sample in < 1 day · upgrade/uninstall tested ·
-ABI compat tests pass · signed test binaries available.
+ABI compat tests pass · signed test binaries available · (if the WebRTC track ships) a webapp
+controller embeds in a sample web app and connects to a native host.
 
 **Risks addressed:** A2. **Effort:** ~8–10 wks.
 
