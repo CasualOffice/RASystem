@@ -1,8 +1,9 @@
 //! Casual RAS — Phase-S media spike (throwaway).
 //!
 //! Runs a `FrameSource` and reports capture→encode timing (inter-frame interval, effective FPS,
-//! frame sizes). With the synthetic source it validates the loop anywhere; with the Windows
-//! DXGI+MF source (to implement in `frame_source.rs`) it measures real capture+encode latency.
+//! frame sizes). With the synthetic source it validates the loop anywhere; with the macOS
+//! ScreenCaptureKit+VideoToolbox source (to implement in `frame_source.rs`) it measures real
+//! capture+encode latency on the Mac.
 //!
 //! To measure true glass-to-glass, stream the emitted Annex-B frames to the WebCodecs harness
 //! (`web/index.html`) over a localhost WebSocket — left as a TODO so this stays dependency-light.
@@ -47,8 +48,8 @@ fn main() {
         total_bytes as f64 / (1024.0 * 1024.0)
     );
     print_interval_stats(&mut intervals_ms);
-    println!("(synthetic source has no real encode cost — implement the Windows DXGI+MF source in");
-    println!(" frame_source.rs for real capture→encode latency; see spike/README.md)");
+    println!("(synthetic source has no real encode cost — implement the macOS ScreenCaptureKit +");
+    println!(" VideoToolbox source in frame_source.rs for real capture→encode latency; see README)");
 }
 
 fn print_interval_stats(ms: &mut [f64]) {

@@ -6,9 +6,17 @@ license = "Apache-2.0"
 publish = false
 
 # Dependency-light on purpose: the synthetic source is std-only so this builds anywhere.
-# The Windows DXGI+MF FrameSource (to implement) adds `windows` behind a target gate.
+# The real FrameSource (to implement) adds platform capture/encode crates behind target gates.
 [dependencies]
 
+# macOS (development lead, ADR-054): ScreenCaptureKit + VideoToolbox. Verify licenses (ADR-051).
+# [target.'cfg(target_os = "macos")'.dependencies]
+# screencapturekit = "0.3"
+# objc2 = "0.5"
+# objc2-core-media = "0.2"
+# objc2-video-toolbox = "0.2"
+
+# Windows port (later): DXGI Desktop Duplication + Media Foundation.
 # [target.'cfg(windows)'.dependencies]
 # windows = { version = "0.58", features = [
 #   "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D11",

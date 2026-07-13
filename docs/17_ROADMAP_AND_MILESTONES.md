@@ -20,6 +20,15 @@
   sequence diagrams, open questions) reviewed against the invariants before code. This is the
   "design each phase-wise system, then execute" rule.
 
+## Platform lead (ADR-054)
+
+**Development leads on macOS** (ScreenCaptureKit / VideoToolbox / CGEvent) because that's the team's
+testable hardware; **Windows remains the production target**, ported when Windows hardware/CI is
+available. The host is platform-abstracted, so every phase below applies to whichever host backend
+is active — read "host capture/encode/input" as **macOS-first, Windows-port-later**. Windows-specific
+detail lives in `docs/11`; macOS detail in `docs/18` (host deep-dive). All non-host work
+(core/protocol/security/transport/controller/fraud-logic) is cross-platform and unaffected.
+
 ## Milestone ladder
 
 | M | Name | Demonstrable capability | Phase |
@@ -86,8 +95,9 @@ triggers (native-surface pivot / codec change).
 - ☑ `NET` Two-endpoint Iroh 1.x connect probe (`spike/iroh-probe`) — direct/relay + RTT under load.
 - ☐ `NET` **Run** across the network matrix (`docs/08 §3`): same-LAN, different NAT, **symmetric
   NAT**, **UDP-blocked/443-only**, relay-only, migration — record success + direct-vs-relay + RTT.
-- ◐ `MED` DXGI→MF capture skeleton (`spike/latency-probe`, `FrameSource` + synthetic; Windows DXGI+MF
-  source documented, to implement) — measures capture→encode once implemented.
+- ◐ `MED` Capture skeleton (`spike/latency-probe`, `FrameSource` + synthetic). **macOS-lead:**
+  ScreenCaptureKit → VideoToolbox source documented to implement (Windows DXGI+MF noted for the port)
+  — measures capture→encode on the Mac once implemented.
 - ☑ `MED`+`UI` **Turnkey WebCodecs loopback harness** (`spike/latency-probe/web/index.html`) —
   encode→decode→canvas latency, avcC/annexB, frame-close, compositor-frame toggle. Runs in WebView2.
 - ☐ `QA` **Run** the probes; compile the latency report; record the compositor-frame penalty.

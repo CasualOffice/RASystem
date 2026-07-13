@@ -9,6 +9,8 @@
 use std::time::Instant;
 
 /// One encoded frame handed to the transport / decoder.
+// `seq`/`is_keyframe` are consumed by the real transport + decoder wiring (not the synthetic loop).
+#[allow(dead_code)]
 pub struct EncodedFrame {
     pub seq: u64,
     /// Wall-clock capture instant, for measuring capture→encode latency.
@@ -64,21 +66,34 @@ impl FrameSource for SyntheticSource {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Windows DXGI capture → Media Foundation H.264 encode — TO IMPLEMENT for real capture numbers.
+// macOS (DEVELOPMENT LEAD, ADR-054): ScreenCaptureKit capture → VideoToolbox H.264 encode.
+// TO IMPLEMENT for real capture→encode numbers on the Mac. See docs/18 (macOS host deep-dive).
 //
-// Outline (see docs/10 §2-3 and docs/11 §2 for the exact APIs and caveats):
-//   1. Create D3D11 device; `IDXGIOutput1::DuplicateOutput` for the target monitor.
-//   2. Loop: `AcquireNextFrame` (nonzero timeout).
-//        - `DXGI_ERROR_WAIT_TIMEOUT` -> static screen; repeat last frame, continue.
-//        - `DXGI_ERROR_ACCESS_LOST`  -> release + re-`DuplicateOutput` (rebuild every transition).
-//      Pull separate cursor metadata via `GetFramePointerShape` (send out-of-band).
-//   3. Feed the GPU texture into an async hardware H.264 MFT (`MFTEnumEx` with
-//      HARDWARE|ASYNCMFT), D3D11 texture-in (zero copy via `IMFDXGIDeviceManager`).
-//      Config: B-frames off (`CODECAPI_AVEncMPVDefaultBPictureCount = 0`), Main profile, CBR,
-//      infinite GOP + `CODECAPI_AVEncVideoForceKeyFrame` on demand, `CODECAPI_AVLowLatencyMode`.
-//      Emit Annex-B (SPS/PPS in-band). Software fallback: OpenH264 via `libloading` (never x264).
-//   4. Wrap the encoder output in `EncodedFrame`; stamp `captured_at` at AcquireNextFrame time to
-//      measure capture→encode latency.
+// Outline:
+//   1. Request the Screen-Recording TCC permission (SCShareableContent triggers the prompt).
+//   2. Build an `SCStream` with `SCContentFilter` (target display) + `SCStreamConfiguration`
+//      (pixelFormat BGRA/NV12, minimumFrameInterval for target FPS, showsCursor as desired).
+//      Frames arrive as `CMSampleBuffer` wrapping a `CVPixelBuffer`/`IOSurface` (GPU, zero-copy).
+//   3. Feed the CVPixelBuffer into a `VTCompressionSession` configured for low latency:
+//        kVTCompressionPropertyKey_RealTime = true,
+//        AllowFrameReordering = false            (no B-frames — the real latency win),
+//        ProfileLevel = H264_Main_AutoLevel, AverageBitRate (CBR-ish),
+//        MaxKeyFrameInterval large + force IDR on demand via the per-frame frameProperties
+//        (kVTEncodeFrameOptionKey_ForceKeyFrame). Emit Annex-B (SPS/PPS in-band).
+//   4. In the VT output callback, wrap the sample into `EncodedFrame`; stamp `captured_at` at the
+//      SCStream frame time to measure capture→encode latency. Apple-Silicon media engine gives
+//      hardware encode for free.
+//
+// Rust crates to evaluate (verify licenses — must be permissive per ADR-051):
+//   screencapturekit, core-media/core-video (objc2/icrate family), VideoToolbox via objc2 or a
+//   bindgen shim. Accessibility (AXIsProcessTrusted) is only needed for INPUT injection, not capture.
+//
+// #[cfg(target_os = "macos")]
+// pub mod macos_sck { /* implement SckVtSource: FrameSource */ }
+//
+// WINDOWS PORT (later): DXGI Desktop Duplication → Media Foundation H.264 (see docs/11 §2):
+//   IDXGIOutput1::DuplicateOutput; AcquireNextFrame with WAIT_TIMEOUT/ACCESS_LOST handling;
+//   async HW MFT with D3D11 texture-in; B-frames off, Main, CBR, infinite-GOP + ForceKeyFrame.
 //
 // #[cfg(windows)]
 // pub mod windows_dxgi { /* implement DxgiMfSource: FrameSource */ }

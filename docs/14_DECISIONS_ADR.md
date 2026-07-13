@@ -36,6 +36,17 @@
 - **ADR-022 · Controller video path is WebCodecs → canvas for the MVP · Accepted.** Encoded H.264
   pushed to the webview via Tauri `Channel`+`Raw`; `VideoDecoder` decode; GPU-resident render.
   Native-surface fallback is the planned v2 / Linux path (`docs/10 §7`, `docs/12 §5`).
+- **ADR-054 · macOS is the development-lead host platform; Windows remains the production target ·
+  Accepted (amends ADR-010).** The team develops on Mac + Linux (no Windows hardware), and a Windows
+  VM on Apple Silicon gives unrepresentative GPU-capture latency. Because the host is
+  platform-abstracted (`ScreenCaptureBackend`/`InputBackend`), leading on **macOS**
+  (ScreenCaptureKit + VideoToolbox + CGEvent) is a *scheduling* choice, not an architecture change,
+  and yields a working end-to-end demo on hardware we can actually test. **Windows stays a
+  first-class supported/production target**, ported when Windows hardware/CI is available. ADR-010
+  ("Windows is the first host platform") is superseded for *development order* only; the market
+  priority is unchanged. Consequence: macOS host caveats (Screen-Recording & Accessibility TCC,
+  secure-input mode, LaunchDaemon-vs-Agent window-server access, notarization) become near-term;
+  Secure Enclave holds P-256 not Ed25519 (`docs/06 §6`).
 - **ADR-023 · Collapse the host process model for the MVP · Provisional.** One user-space process
   (capture+encode+Iroh+consent+input) for the MVP; split into service + session-agent + input-helper
   as a hardening phase. **Design the IPC + "which desktop am I on" boundary now** so the split is

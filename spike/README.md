@@ -10,10 +10,15 @@ Two decoupled probes:
 
 ---
 
+> **Platform note (ADR-054):** development leads on **macOS** (this Mac). Run everything below on
+> macOS/Linux; the Windows host is a later port. Test the WebCodecs harness in **both Safari (the
+> WKWebView engine Tauri uses on macOS) and Chrome** — Safari's result answers a real open question
+> (WKWebView WebCodecs H.264 reliability + the reported ~3 s decode bug).
+
 ## A. WebCodecs latency harness — RUN THIS FIRST (turnkey, no build)
 
-Open `latency-probe/web/index.html` in **Microsoft Edge** (or your WebView2 runtime) and click
-**Start**. It generates an animated frame, H.264-encodes it (no B-frames, realtime), decodes it with
+Open `latency-probe/web/index.html` in **Safari** and **Chrome** on your Mac and click **Start**. It
+generates an animated frame, H.264-encodes it (no B-frames, realtime), decodes it with
 `VideoDecoder`, renders to canvas, and reports **encode / decode / present / end-to-end** latency —
 validating the entire controller-side path, `avcC`-vs-`annexB` handling, and `VideoFrame.close()`
 discipline, decoupled from network and capture.
@@ -43,13 +48,14 @@ connect? direct or relayed? RTT distribution?
 > **Iroh 1.x API is young.** `cargo build -p iroh-probe` and reconcile any drift against
 > `cargo doc -p iroh --open` — the `// VERIFY:` comments mark the calls most likely to have changed.
 
-## C. Windows capture skeleton
+## C. Capture skeleton (macOS lead)
 
 `cargo run -p latency-probe` runs the `FrameSource` timing loop. It ships with a **synthetic** source
-(works anywhere, validates the harness) and a **Windows DXGI+MF** source to implement
-(`src/frame_source.rs`, `#[cfg(windows)]`) using the exact API sequence in `docs/10`/`docs/11`. Once
-it emits real Annex-B frames, feed them to harness **A** (via a localhost WebSocket — TODO in the
-file) to measure true glass-to-glass.
+(std-only, works anywhere, validates the harness) and a **macOS ScreenCaptureKit → VideoToolbox**
+source to implement (`src/frame_source.rs`, `#[cfg(target_os = "macos")]`) using the API sequence in
+`docs/18`. (The Windows DXGI+MF source is outlined for the later port.) Once it emits real Annex-B
+frames, feed them to harness **A** (via a localhost WebSocket — TODO in the file) to measure true
+glass-to-glass on your Mac.
 
 ---
 

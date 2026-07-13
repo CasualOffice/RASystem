@@ -72,7 +72,7 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
 | S2 | **Controller = Tauri v2** (Rust core + React/TS webview). | Core is already Rust; Tauri reuses the crates in-process with no ABI, fastest iteration. |
 | S3 | **Video render path = WebCodecs → canvas/WebGL** in the webview for the MVP. Rust pushes encoded H.264 chunks to JS via Tauri v2's binary `Channel`; `VideoDecoder` decodes; render to canvas. Native-surface fallback reserved for when latency won't close (notably macOS/WKWebView). | Single clean data path, fastest to a working demo. |
 | S4 | **Collapse the host process model for the MVP** into one user-space process (capture + encode + Iroh + consent + input). Re-separate into system service + session agent + privileged input helper as a dedicated hardening phase, once the end-to-end system works. | The 3-process split is production security hardening, not functionality. Separating later is mechanical, and we'll know the real boundary messages. **This is a temporary MVP posture — the security story is not complete until it is separated.** |
-| S5 | **Windows host first**, macOS second, Linux last. | Correct market + effort ordering; Linux/Wayland is the hardest capture story. |
+| S5 | **macOS is the development-lead host platform; Windows remains the production target** (Linux last). | Team is on Mac+Linux — lead on what's testable (ScreenCaptureKit/VideoToolbox/CGEvent); Windows is a port when hardware/CI is available. Architecture is platform-abstracted so this is a scheduling choice (ADR-054, amends ADR-010). |
 | S6 | **Rust shared core**, protobuf wire protocol for high-frequency channels, CBOR only for portable tickets. | Cross-platform, performant, versionable. |
 | S7 | **No arbitrary shell / no generic filesystem browsing.** Support actions are a signed catalogue with strict argument schemas. | Attack-surface reduction; enterprise/regulated buyers. |
 | S8 | **Fraud/harm-prevention is a first-class, on-device, privacy-safe subsystem** — friction + containment against coached-victim scams, strong prevention against remote attackers, honest about its limits. | Differentiator for regulated verticals; over-claiming is a liability. |
@@ -223,6 +223,7 @@ casual-ras/
 | `docs/15_FRAUD_AND_HARM_PREVENTION.md` | Anti-scam / harmful-action-blocking design + honest limits |
 | `docs/16_ACCESS_AND_ENROLLMENT_MODEL.md` | Per-device keys + authenticator security tiers |
 | `docs/17_ROADMAP_AND_MILESTONES.md` | Milestones + phase-wise task plan with per-phase design gates |
+| `docs/18_HOST_PLATFORM_MACOS.md` | macOS host deep-dive (dev-lead platform, ADR-054) — *in progress* |
 | `docs/design/phase-<n>-design.md` | Per-phase design notes (written at each phase's design gate) |
 
 ---
