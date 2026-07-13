@@ -125,6 +125,11 @@ clipboard heuristic; OCR.
 | Banking/financial URL | local signed category list → `sensitive_destination{category}` (raw URL discarded in-frame) | mask+banner / auto-pause | per-deployer allowlist by publisher+host pattern |
 | OTP / 2FA / seed | `IsPassword`+remote-origin composite (OCR off by default) | as above | OCR only by explicit policy, event-gated, ephemeral, disclosed by name |
 
+**Platform signal mapping:** the credential-field context is detected per-OS — Windows UIA
+`IsPassword` (`§2.1 S3`); **macOS uses secure keyboard entry / secure input mode**, which
+additionally *drops* synthetic keystrokes from our (unprivileged) agent into secure fields (`docs/18
+§0`, ADR-055) — a native reinforcement of the "remote peer can't drive credential entry" property.
+
 **Cross-cutting exception machinery (enterprise-configurable, all logged content-free):** controller
 allowlist (Ed25519 identity / signed publisher); protected-app/URL exceptions by Authenticode
 publisher + host pattern; **mandatory default accessibility allowlist** (screen readers, voice

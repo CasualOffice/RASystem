@@ -223,7 +223,7 @@ casual-ras/
 | `docs/15_FRAUD_AND_HARM_PREVENTION.md` | Anti-scam / harmful-action-blocking design + honest limits |
 | `docs/16_ACCESS_AND_ENROLLMENT_MODEL.md` | Per-device keys + authenticator security tiers |
 | `docs/17_ROADMAP_AND_MILESTONES.md` | Milestones + phase-wise task plan with per-phase design gates |
-| `docs/18_HOST_PLATFORM_MACOS.md` | macOS host deep-dive (dev-lead platform, ADR-054) — *in progress* |
+| `docs/18_HOST_PLATFORM_MACOS.md` | macOS host deep-dive — dev-lead platform (ADR-054/055) |
 | `docs/design/phase-<n>-design.md` | Per-phase design notes (written at each phase's design gate) |
 
 ---

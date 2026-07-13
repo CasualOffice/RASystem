@@ -96,6 +96,13 @@
   continues.
 - **ADR-048 · SAS-bound emergency stop · Accepted.** Panic path rides kernel-owned Ctrl+Alt+Del and
   overrides all grants.
+- **ADR-055 · macOS input injection lives in the unprivileged per-user agent, never root ·
+  Accepted.** On macOS a **root** process can *bypass secure keyboard entry* (typing into password
+  fields) — a power we explicitly do not want, since secure input is part of our harm-prevention
+  boundary (`docs/15`). It's also mandatory that the injecting/capturing process holds the TCC grants
+  *in the GUI session* (a root LaunchDaemon has no WindowServer). So capture + injection live in the
+  per-user **LaunchAgent**; any root daemon (identity/audit/update) delegates to it over XPC. Gate
+  injection on TCC **PostEvent** (`CGPreflightPostEventAccess`), not Accessibility (`docs/18 §0`).
 - **ADR-049 · Tiered enrollment composing with signed grants · Accepted.** Standard/Recommended/
   Hardened/Enterprise; TPM-sealed storage with attestation-gated tier advertising (software fallback
   capped at Tier 0); FIDO2 PRF may fuse to grant issuance; no phishable factor recovers a

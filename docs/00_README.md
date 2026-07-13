@@ -43,6 +43,7 @@ Priorities, in strict order: **1. Security → 2. Latency → 3. UX.**
 15. `15_FRAUD_AND_HARM_PREVENTION.md` — Anti-scam / harmful-action-blocking design.
 16. `16_ACCESS_AND_ENROLLMENT_MODEL.md` — Per-device keys + authenticator tiers.
 17. `17_ROADMAP_AND_MILESTONES.md` — Milestones + phase-wise task plan (design gate → build → verify).
+18. `18_HOST_PLATFORM_MACOS.md` — macOS host deep-dive (development-lead platform, ADR-054).
 
 ## Authority model (MVP)
 

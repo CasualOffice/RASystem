@@ -54,6 +54,11 @@ RTT; input-to-visible < 100 ms.
   RustDesk's FFmpeg-based `hwcodec`, MIT) when we need ultra-low-latency knobs (intra-refresh, LTR).
   `[verify]` no production-grade standalone NVENC Rust crate — the maintained routes are
   FFmpeg-based.
+- **macOS (dev-lead, `docs/18`):** VideoToolbox `VTCompressionSession` with
+  `EnableLowLatencyRateControl`, `AllowFrameReordering = false` (no B-frames / IPPP), Main,
+  force-IDR on demand, IOSurface zero-copy, Annex-B out. **No-B-frames is mandatory here** — it's
+  also the fix for the WKWebView ~3 s H.264 decode bug on the controller. Note ScreenCaptureKit has
+  **no separate-cursor API** (unlike DXGI), so out-of-band cursor is Windows-only for now.
 - **Software fallback = OpenH264 via the `openh264` crate's `libloading` feature** (loads Cisco's
   prebuilt royalty-free binary). **Do NOT use x264/libx264** — it's GPL and forces source release;
   fatal for a proprietary SDK. (H.264 itself carries MPEG-LA *patent* considerations — legal review.)
