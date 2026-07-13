@@ -28,14 +28,18 @@ high. Read `CLAUDE.md` first; it defines the priorities (**Security → Latency 
 
 Prerequisites (to be pinned precisely in `docs/` as we choose versions):
 
-- Rust (stable, edition set in the workspace `Cargo.toml`) with `rustfmt` and `clippy`.
-- Node.js LTS + a package manager (pnpm preferred) for the Tauri UIs.
-- Tauri v2 prerequisites for your OS (WebView2 on Windows, etc.).
-- `protoc` / the Prost build pipeline for protocol codegen.
-- Windows 10 22H2 or Windows 11 for host development.
-
-Setup and run commands will be documented here once the workspace exists. Until then, there is
-nothing to build.
+- Rust (stable, edition set in the workspace `Cargo.toml`) with `rustfmt` and `clippy`. **This is
+  all you need for the core crates** — `cargo build/clippy/test/deny` run with no OS/GPU/Node deps
+  (protocol codegen is pure-Rust `protox`, no system `protoc`).
+- **Controller (Tauri) only:** Node.js LTS + a package manager (pnpm preferred) + Tauri v2 OS
+  prerequisites (macOS/WKWebView here; WebView2 on Windows later).
+- **macOS host capture/encode (dev-lead, ADR-054):** a real GUI login session + **Screen Recording**
+  permission granted to the running binary (TCC) — capture cannot be verified headlessly/over SSH.
+  Input work additionally needs the **Accessibility/PostEvent** grant.
+- **Platform bring-up follows the spike pattern:** a throwaway probe under `spike/` is authored and
+  compile-verified, then **run on the target hardware by a developer** (as with `spike/iroh-probe`);
+  numbers/behaviour are recorded before the real backend lands. Author ≠ runtime-verified until a
+  developer runs it on-device.
 
 ---
 
@@ -75,6 +79,18 @@ nothing to build.
   (this is the core of the privilege-separation model).
 - Prefer `#![forbid(unsafe_code)]` per crate; where `unsafe` is unavoidable (FFI, platform APIs),
   isolate it, document the invariant it upholds, and review it explicitly.
+- **Platform FFI & the `unsafe_code = "deny"` workspace lint.** The workspace denies `unsafe` globally.
+  OS capture/encode/input (ScreenCaptureKit, VideoToolbox, CGEvent; later DXGI/MF/SendInput) needs FFI,
+  so those backends live in **dedicated platform crates** (e.g. `ras-media-macos`, `ras-input-macos`,
+  later `*-windows`) that opt back in with a crate-scoped override:
+  ```toml
+  [lints.rust]
+  unsafe_code = "allow"   # FFI backend crate; unsafe confined here, wrapped in a safe API
+  ```
+  Rules for such a crate: (1) it exposes only a **safe** public surface implementing the `ras-media`/
+  input traits — no raw pointers/handles escape; (2) every `unsafe` block carries a `// SAFETY:` note;
+  (3) it is a **security-sensitive area** (§4) → second reviewer; (4) core/protocol/policy crates keep
+  `unsafe` denied. This keeps the `unsafe` blast radius to the thin platform layer the traits abstract.
 - Constant-time comparison for secrets/signatures; use vetted crypto crates — **never roll your
   own crypto**.
 

@@ -1482,3 +1482,45 @@ not wait on the spike.
 13. **Q-STOP-TRANSPORT (`[verify]`, Invariant 4).** Benchmark `stop_session` command latency under
     max frame throughput. If frame-Channel bytes can starve command dispatch on shared IPC, move the
     frame stream to the localhost-WebSocket fallback so Stop is never behind video (≤250 ms target).
+
+---
+
+## 9. Execution sequence — macOS-lead desktop MVP (as-planned)
+
+The design above is complete; this is the **build order** we execute against, reconciled with one
+fact the roadmap didn't make explicit: **the media pipeline is independent of the iroh go/no-go.**
+Only the *cross-machine* transport waits on the two-machine iroh probe. So the local, real-hardware
+demo can be built before M1 closes.
+
+**Verification boundary (be honest in PRs):** the core crates are fully `cargo`-verifiable in CI
+(done). The macOS capture/encode backend and the Tauri controller can be *authored* off-device, but
+are **not** "done" until built + run on a Mac with a GUI session and Screen-Recording permission
+(capture) / the Tauri+Node toolchain (controller). Platform bring-up follows the **spike pattern**
+(`spike/`, authored + compile-checked here, run on-device by a developer — as with `spike/iroh-probe`).
+
+Ordered steps (each ends in a recorded result, not just code):
+
+0. **macOS capture→encode spike** *(next; also closes a Phase-S open item — `docs/18 §8` lists
+   ScreenCaptureKit→VideoToolbox capture→encode latency as unmeasured; the WebCodecs GO covered
+   *decode* only).* Throwaway `spike/macos-capture`: SCStream → VTCompressionSession → Annex-B
+   (no-B-frames, infinite-GOP, IDR-on-demand per §3.3), dump to a `.h264` file + print capture/encode
+   median/p95 latency and FPS. **Run on-device**, record numbers in `phase-S-design.md §4.1`. Proves
+   the zero-copy import + Annex-B conversion + recoverable-error taxonomy before the real backend.
+1. **`ras-media-macos` backend crate** (real, behind the traits): promote the spike's proven SCK/VT
+   code into `ScreenCaptureKitBackend`/`VideoToolboxEncoder`, in a dedicated FFI crate per the
+   `unsafe_code` policy (CONTRIBUTING §5) — safe public surface, `// SAFETY:` notes, second reviewer.
+2. **Tauri controller shell** (render tech is GO, not iroh-gated): Tauri v2 app + React/TS + the
+   `decoder.worker.ts` frame-Channel `parseHeader` (§6.1/§6.3) + WebCodecs `VideoDecoder` +
+   `OffscreenCanvas`; connection-state UI (§6.5); deny-by-default caps + strict CSP (§6.6). Commits
+   the Node/Tauri toolchain.
+3. **Local glass-to-glass** (no iroh): host (real capture/encode) → controller over the in-memory
+   loopback / same-machine, real H.264 decoded in the webview. Measure on-device glass-to-glass;
+   this is the first *visible* end-to-end demo and the media-pipeline proof.
+4. **iroh transport** (`ras-transport-iroh`, gated on the M1 go/no-go): real endpoint/ALPN/streams
+   behind `SessionTransport`, `Connection::stats()` → the existing ABR hook. Unlocks the
+   cross-machine session. → **M2.**
+5. **WebRTC webapp controller** — the deferred SDK/integration track (ADR-057), Phase 5.
+
+Steps 0–3 are macOS + toolchain work (verified on your Mac); step 4 is the only one that needs the
+two-laptop iroh result. Nothing here changes the wire protocol or the core traits — it fills bodies
+behind seams that already exist and are tested.
