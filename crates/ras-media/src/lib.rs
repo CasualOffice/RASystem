@@ -144,10 +144,78 @@ pub struct MonitorId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId(pub u64);
 
-/// Opaque, thread-affine handle to a GPU-resident surface (macOS: IOSurface-backed CVPixelBuffer;
-/// Windows: D3D11 texture). Only valid on the capture/encode thread; never crosses a crate
-/// boundary as a raw pointer.
-pub struct PlatformSurface<'a>(core::marker::PhantomData<&'a ()>);
+/// Discriminates what a [`PlatformSurface`] points at, so the paired platform encoder can refuse a
+/// surface it does not recognise (fail-closed) instead of blindly dereferencing. Additive per
+/// platform (ADR-058).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SurfaceKind {
+    /// No backing GPU surface (synthetic / test capture). The pointer is null.
+    None,
+    /// macOS: a borrowed `CVPixelBuffer` (`objc2_core_video::CVPixelBuffer`), IOSurface-backed.
+    MacCoreVideoPixelBuffer,
+}
+
+/// Opaque, thread-affine, **borrowed** handle to a GPU-resident surface (macOS: IOSurface-backed
+/// `CVPixelBuffer`; Windows: D3D11 texture). Produced by a capture backend and consumed by its
+/// **paired same-platform** encoder within one `encode` call (ADR-058).
+///
+/// The pointer is interpreted **only** inside the platform crate that produced it (macOS:
+/// `ras-media-macos`); it never crosses to `ras-core`/transport/controller and core never
+/// dereferences it. `HostSession` only ever pairs a capture backend with its matching encoder, so
+/// the encoder can trust the surface origin — the [`SurfaceKind`] tag is a fail-closed guard, not
+/// the primary safety mechanism. Constructing one is safe (storing a pointer is not `unsafe`); the
+/// dereference contract lives with the platform-crate consumer of [`PlatformSurface::as_ptr`].
+pub struct PlatformSurface<'a> {
+    ptr: *const core::ffi::c_void,
+    kind: SurfaceKind,
+    _marker: core::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> PlatformSurface<'a> {
+    /// A surface with no GPU backing (synthetic capture). An encoder that needs real pixels will get
+    /// `None` from [`Self::as_ptr`] and must error rather than fabricate — except the synthetic
+    /// encoder, which ignores the surface entirely.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            ptr: core::ptr::null(),
+            kind: SurfaceKind::None,
+            _marker: core::marker::PhantomData,
+        }
+    }
+
+    /// Wrap a borrowed platform-surface pointer with its `kind`. Safe to call: this only *stores* the
+    /// pointer. The caller must ensure `ptr` is a valid pointer to the surface type implied by `kind`
+    /// and outlives `'a` (the [`CapturedFrame`] that produced it); the dereference — and that
+    /// obligation — happens in the platform crate via [`Self::as_ptr`].
+    #[must_use]
+    pub fn from_ptr(ptr: *const core::ffi::c_void, kind: SurfaceKind) -> Self {
+        Self {
+            ptr,
+            kind,
+            _marker: core::marker::PhantomData,
+        }
+    }
+
+    /// The surface kind (what `ptr` points at).
+    #[must_use]
+    pub fn kind(&self) -> SurfaceKind {
+        self.kind
+    }
+
+    /// The raw pointer **iff** the surface matches `expect`, else `None` (fail-closed). The caller (a
+    /// platform encoder) casts the returned pointer to the concrete surface type for `expect` and is
+    /// responsible for the dereference safety contract in [`Self::from_ptr`].
+    #[must_use]
+    pub fn as_ptr(&self, expect: SurfaceKind) -> Option<core::ptr::NonNull<core::ffi::c_void>> {
+        if self.kind == expect {
+            core::ptr::NonNull::new(self.ptr as *mut core::ffi::c_void)
+        } else {
+            None
+        }
+    }
+}
 
 /// Options for a capture session.
 #[derive(Debug, Clone)]
@@ -279,6 +347,29 @@ mod tests {
             color: ColorSpace::Bt709Limited,
             video_transport: VideoTransportKind::PerFrameStream,
         }
+    }
+
+    #[test]
+    fn platform_surface_is_fail_closed_on_kind_mismatch() {
+        // Synthetic surface exposes no pointer to any kind.
+        let s = PlatformSurface::none();
+        assert_eq!(s.kind(), SurfaceKind::None);
+        assert!(s.as_ptr(SurfaceKind::MacCoreVideoPixelBuffer).is_none());
+
+        // A tagged surface hands its pointer back only for the matching kind.
+        let x = 0xABu8;
+        let ptr = core::ptr::from_ref(&x).cast::<core::ffi::c_void>();
+        let s = PlatformSurface::from_ptr(ptr, SurfaceKind::MacCoreVideoPixelBuffer);
+        assert!(
+            s.as_ptr(SurfaceKind::None).is_none(),
+            "wrong kind must not yield the pointer"
+        );
+        assert_eq!(
+            s.as_ptr(SurfaceKind::MacCoreVideoPixelBuffer)
+                .map(|p| p.as_ptr().cast_const()),
+            Some(ptr),
+            "matching kind yields the exact pointer"
+        );
     }
 
     #[test]

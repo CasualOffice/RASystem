@@ -38,7 +38,7 @@ impl CapturedFrame for SyntheticFrame {
     }
     fn platform_surface(&self) -> PlatformSurface<'_> {
         // No real GPU surface exists; the synthetic encoder never dereferences it.
-        PlatformSurface(core::marker::PhantomData)
+        PlatformSurface::none()
     }
 }
 

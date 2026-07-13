@@ -105,6 +105,23 @@
   `TransportLost → Suspended`** (honor the reconnect window). Non-breaking: the hand-rolled
   `ErrorCode` is `#[non_exhaustive]` and the protobuf mapping is wildcard-free, so the new variant is a
   compile-time forcing function across the codec, never a silent default.
+- **ADR-058 · `PlatformSurface` carries a tagged borrowed pointer so a real encoder can reach the
+  captured GPU surface · Accepted.** The Phase-1 `ras-media` seam left `PlatformSurface` as pure
+  `PhantomData`; the synthetic encoder works only because it *fabricates* Annex-B from frame metadata.
+  A real `VideoEncoderBackend::encode<F: CapturedFrame>` is generic over the frame, so through the
+  trait it can see only `width/height/captured_at` — never the actual `CVPixelBuffer`/D3D11 texture.
+  Fix: `PlatformSurface<'a>` now holds `{ ptr: *const c_void, kind: SurfaceKind }` (a borrowed handle
+  tied to the frame's lifetime) plus a `SurfaceKind` tag (`None`, `MacCoreVideoPixelBuffer`, Windows
+  variants later). The producing capture backend fills it via a **safe** `from_ptr` constructor
+  (storing a pointer is not `unsafe` — only dereferencing is), so **`ras-media` stays
+  `unsafe_code = deny`**; the consuming encoder recovers it via `as_ptr(expect: SurfaceKind)` which
+  returns the pointer **iff the tag matches** (fail-closed) and then dereferences it *inside the
+  platform crate* (`ras-media-macos`, `unsafe_code = allow`). This is sound because `HostSession<C,E>`
+  only ever pairs a capture backend with its matching same-platform encoder (`media_pump` feeds
+  `C::Frame` straight into `E::encode`), and the pointer never crosses to `ras-core`/transport/
+  controller — core never dereferences it. The `kind` tag is a defensive guard, not the primary safety
+  argument. Synthetic capture returns `PlatformSurface::none()` and the synthetic encoder ignores it
+  (unchanged behaviour). Additive/non-breaking: `SurfaceKind` is `#[non_exhaustive]`.
 
 ## Security, authorization, fraud
 
