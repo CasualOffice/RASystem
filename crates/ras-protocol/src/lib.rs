@@ -77,6 +77,10 @@ pub enum ErrorCode {
     PolicyChanged,
     /// Unexpected internal error.
     Internal,
+    /// Intentional, fault-free teardown (a clean `Bye`) — not an error. The canonical reason for a
+    /// graceful stop/disconnect; distinct from [`SessionRevoked`](Self::SessionRevoked) (emergency
+    /// stop) and from a missing `Bye` (transport loss). WebSocket-1000 / QUIC-app-error-0 analogue.
+    NormalClosure,
 }
 
 impl ErrorCode {
@@ -101,6 +105,7 @@ impl ErrorCode {
             ErrorCode::InputFailed => "INPUT_FAILED",
             ErrorCode::PolicyChanged => "POLICY_CHANGED",
             ErrorCode::Internal => "INTERNAL_ERROR",
+            ErrorCode::NormalClosure => "NORMAL_CLOSURE",
         }
     }
 }

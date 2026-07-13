@@ -388,7 +388,10 @@ where
     }
 
     /// Cooperative stop. Applies `LocalStop`, tears down, flushes `SessionEnded`. Idempotent.
-    /// Signals-and-returns: does not drain video.
+    /// Signals-and-returns: does not drain video. Unlike [`emergency_stop`](Self::emergency_stop),
+    /// this is a *clean* close: it flushes a `Bye{NormalClosure}` so the controller ends promptly on
+    /// `PeerClosed → Terminated` rather than mistaking the teardown for transport loss and waiting
+    /// out the reconnect window. Peer notification is best-effort and time-bounded.
     pub async fn stop(&self, reason: StopReason) {
         let inner = &self.inner;
         if inner.stop.swap(true, Ordering::SeqCst) {
@@ -403,14 +406,31 @@ where
         {
             sink.emit(LifecycleEvent::SessionEnded { reason });
         }
-        for slot in [&inner.control_task, &inner.stats_task] {
-            if let Some(t) = slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                t.abort();
-            }
+        // Flush a clean Bye and let the control loop exit on its own, bounded so a wedged peer can't
+        // stall us; the media pump was already halted by the stop flag above.
+        if let Some(tx) = inner
+            .bye_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            let _ = tx.try_send(ErrorCode::NormalClosure);
+        }
+        let control_task = inner
+            .control_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(t) = control_task {
+            let _ = tokio::time::timeout(BYE_FLUSH_GRACE, t).await;
+        }
+        if let Some(t) = inner
+            .stats_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            t.abort();
         }
         if let Some(h) = inner
             .media
@@ -624,6 +644,10 @@ async fn host_control_loop<C, E>(
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fb);
                 inner.feedback_count.fetch_add(1, Ordering::Relaxed);
             }
+            // Any Bye from the controller is a clean peer close — deliberately code-agnostic. A
+            // controller cannot revoke the host, so a controller-claimed `SessionRevoked` is treated
+            // as an ordinary close, never a privileged action (Invariants 1/15: never trust the
+            // controller's claimed scope). Host-side revoke goes through `emergency_stop`.
             Ok(ControlMsg::Bye { .. }) => {
                 inner.stop.store(true, Ordering::SeqCst);
                 apply(&inner.state, SessionEvent::PeerClosed);
@@ -946,7 +970,9 @@ async fn controller_control_loop(
                     if control.send(ControlMsg::Feedback(fb)).await.is_err() { break; }
                 }
                 Some(ControlCommand::Bye) => {
-                    let _ = control.send(ControlMsg::Bye { code: ErrorCode::SessionRevoked }).await;
+                    // A controller leaving is a clean peer close, never a revoke — a controller
+                    // cannot revoke the host (Invariants 1/13). Use the benign closure code.
+                    let _ = control.send(ControlMsg::Bye { code: ErrorCode::NormalClosure }).await;
                     break;
                 }
                 None => break,

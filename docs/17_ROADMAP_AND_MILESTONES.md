@@ -145,8 +145,15 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   best-effort, time-bounded `Bye{SessionRevoked}` so the controller ends `Revoked` (not a plain peer
   close). Loopback-tested: ≤250 ms local halt, no post-stop frames, idempotent/non-downgradable,
   revoke propagates to the controller.
+- ☑ `CORE`+`SEC` **Three distinct teardown paths (ADR-056)** — added `ErrorCode::NormalClosure` to the
+  wire so a clean stop is separable from a crash and from a revoke: **`Bye{NormalClosure}` →
+  `PeerClosed → Terminated`** (graceful `stop`/`disconnect`, prompt — no suspend); **`Bye{SessionRevoked}`
+  → `Revoke → Revoked`** (host emergency stop only; the host treats a *controller*-claimed revoke as an
+  ordinary close — Inv. 1/15); **missing `Bye` → `TransportLost → Suspended`** (reconnect window). Each
+  loopback-tested.
 - ☑ `MED` Synthetic capture/encode doubles (`ras-media::synthetic`) + loopback transport
-  (`ras-core::testkit`) + `webcodecs_string`.
+  (`ras-core::testkit`, now with a `LoopbackCut` fault handle that severs the link mid-session to
+  exercise the abrupt-loss/suspend path without abusing `stop`) + `webcodecs_string`.
 - ☑ `NET`/`CORE` Adaptive-bitrate hook wired: `LatencyFirstAbr` + a 250 ms stats/ABR tick driving
   `set_bitrate` and emitting `ConnectionQuality` (control law stays spike-tunable).
 - ☑ `UI`/`CORE` Frame-Channel codec (`ras-core::frame_channel`) — the 24-byte header contract shared

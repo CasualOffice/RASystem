@@ -71,7 +71,11 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     The **emergency-stop / revoke runtime path (Invariant 4)** is implemented and loopback-tested:
     `HostSession::emergency_stop` takes the audit-distinct `Revoke → Revoked` edge, halts the media
     pump before its next send (no post-revoke frame leak), and flushes a bounded `Bye{SessionRevoked}`
-    so the controller ends `Revoked` — verified ≤250 ms local, idempotent, non-downgradable.
+    so the controller ends `Revoked` — verified ≤250 ms local, idempotent, non-downgradable. Teardown
+    now has **three separable paths (ADR-056)** via the new `ErrorCode::NormalClosure` wire code:
+    clean `Bye{NormalClosure}` → `Terminated` (prompt), `Bye{SessionRevoked}` → `Revoked` (host only),
+    and a missing `Bye` → `Suspended` (transport loss). The testkit gained a `LoopbackCut` fault
+    handle to exercise the last path honestly.
   - Still stubbed behind traits (`todo!()`): the concrete iroh transport, ScreenCaptureKit/VideoToolbox
     (and the Windows DXGI/MF port), and the Tauri host/controller apps — they land as the spike clears.
 - **Build/verify commands** (all green as of M0):

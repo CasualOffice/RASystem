@@ -67,6 +67,19 @@
   (MIT).
 - **ADR-034 · Self-hosted production relays · Accepted.** Public n0 relays are dev/test only. Relay
   token-auth + allow-list; keeps connection-graph metadata in-house.
+- **ADR-056 · A benign `NormalClosure` code makes a clean `Bye` distinguishable from a crash and from
+  a revoke · Accepted.** The control-channel `Bye` carries an `ErrorCode` "reason," but Phase-1 had no
+  non-error closure reason — so a graceful stop either sent no `Bye` (indistinguishable from transport
+  death: the peer suspends and waits out the whole reconnect window before timing out) or would have
+  to borrow an error code. Add **`ErrorCode::NormalClosure`** (wire tag `ERROR_CODE_NORMAL_CLOSURE =
+  18`, append-only) as the canonical "intentional teardown, no fault" reason — analogous to WebSocket
+  1000 / QUIC application-error 0. This yields three distinct, audit-meaningful teardown paths, each
+  mapping to its own terminal edge: **clean `Bye{NormalClosure}` → `PeerClosed → Terminated`**
+  (immediately, no suspend), **`Bye{SessionRevoked}` → `Revoke → Revoked`** (host emergency stop only;
+  a controller can never revoke — Invariants 1/13), and **a *missing* `Bye` (channel death) →
+  `TransportLost → Suspended`** (honor the reconnect window). Non-breaking: the hand-rolled
+  `ErrorCode` is `#[non_exhaustive]` and the protobuf mapping is wildcard-free, so the new variant is a
+  compile-time forcing function across the codec, never a silent default.
 
 ## Security, authorization, fraud
 

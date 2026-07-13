@@ -454,7 +454,7 @@ mod e2e {
     use std::time::Duration;
 
     use crate::deps::AllowAllValidator;
-    use crate::testkit::{loopback_pair, CountingFrameSink};
+    use crate::testkit::{loopback_pair, loopback_pair_with_cut, CountingFrameSink};
     use crate::{
         ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig, LifecycleEvent,
         SessionState, StopReason,
@@ -559,7 +559,7 @@ mod e2e {
 
     #[tokio::test]
     async fn controller_suspends_then_terminates_when_transport_drops() {
-        let (host_tp, ctrl_tp) = loopback_pair();
+        let (host_tp, ctrl_tp, cut) = loopback_pair_with_cut();
         let host = HostSession::new(
             HostSessionConfig::new(MonitorId(0)),
             host_tp,
@@ -581,8 +581,8 @@ mod e2e {
             controller.state()
         );
 
-        // Abrupt transport loss: the host tears down without sending a clean Bye.
-        host.stop(StopReason::UserRequested).await;
+        // Abrupt transport loss: the peer's connection drops with NO clean Bye (QUIC conn death).
+        cut.cut();
 
         // The controller must freeze (Suspended) but keep its UI live, then terminate once the
         // reconnect window elapses (Phase 1 has no re-dial yet).
@@ -616,6 +616,59 @@ mod e2e {
         assert!(
             saw_timeout_end,
             "controller must end with Timeout after the window"
+        );
+    }
+
+    /// A *graceful* host stop flushes a clean `Bye{NormalClosure}`, so the controller ends promptly
+    /// on `PeerClosed → Terminated` — it must NOT mistake an intentional close for transport loss
+    /// (no `Suspended`, no waiting out the reconnect window). The complement of the `cut` test above.
+    #[tokio::test]
+    async fn graceful_host_stop_ends_controller_cleanly() {
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr {
+            id: EndpointId([0u8; 32]),
+        });
+        // Deliberately long: if the controller wrongly suspended, it would still be Suspended (not
+        // Terminated) for the whole test window, failing the prompt-termination assertion below.
+        cfg.reconnect_window = Duration::from_secs(30);
+        let controller = ControllerSession::new(cfg, ctrl_tp);
+
+        let _host_events = host.start().await.unwrap();
+        let mut ctrl_events = controller.connect().await.unwrap();
+        assert!(wait_until(|| controller.state() == SessionState::Active, 300).await);
+
+        host.stop(StopReason::UserRequested).await;
+
+        assert!(
+            wait_until(|| controller.state() == SessionState::Terminated, 300).await,
+            "controller should terminate promptly on a clean Bye, got {:?}",
+            controller.state()
+        );
+        let mut saw_suspended = false;
+        let mut ended_clean = false;
+        while let Ok(ev) = ctrl_events.try_recv() {
+            match ev {
+                LifecycleEvent::Suspended { .. } => saw_suspended = true,
+                LifecycleEvent::SessionEnded {
+                    reason: StopReason::PeerClosed,
+                } => ended_clean = true,
+                _ => {}
+            }
+        }
+        assert!(
+            !saw_suspended,
+            "a clean host stop must not suspend the controller"
+        );
+        assert!(
+            ended_clean,
+            "controller must end with PeerClosed on a clean Bye, not Timeout/Revoked"
         );
     }
 

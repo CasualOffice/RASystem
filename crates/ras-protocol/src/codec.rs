@@ -104,6 +104,7 @@ fn errorcode_to_pb(code: ErrorCode) -> pb::ErrorCodeProto {
         ErrorCode::InputFailed => pb::ErrorCodeProto::ErrorCodeInputFailed,
         ErrorCode::PolicyChanged => pb::ErrorCodeProto::ErrorCodePolicyChanged,
         ErrorCode::Internal => pb::ErrorCodeProto::ErrorCodeInternal,
+        ErrorCode::NormalClosure => pb::ErrorCodeProto::ErrorCodeNormalClosure,
     }
 }
 
@@ -127,6 +128,7 @@ fn errorcode_from_pb(raw: i32) -> Result<ErrorCode, RasError> {
         Ok(pb::ErrorCodeProto::ErrorCodeInputFailed) => Ok(ErrorCode::InputFailed),
         Ok(pb::ErrorCodeProto::ErrorCodePolicyChanged) => Ok(ErrorCode::PolicyChanged),
         Ok(pb::ErrorCodeProto::ErrorCodeInternal) => Ok(ErrorCode::Internal),
+        Ok(pb::ErrorCodeProto::ErrorCodeNormalClosure) => Ok(ErrorCode::NormalClosure),
         // ErrorCodeUnspecified (0) or any unrecognized number.
         _ => Err(RasError::fatal(
             ErrorCode::InvalidMessage,
@@ -337,7 +339,7 @@ mod tests {
         KeyframeReason::PeriodicRefresh,
     ];
 
-    const ALL_CODES: [ErrorCode; 17] = [
+    const ALL_CODES: [ErrorCode; 18] = [
         ErrorCode::InvalidMessage,
         ErrorCode::UnsupportedVersion,
         ErrorCode::IdentityMismatch,
@@ -355,6 +357,7 @@ mod tests {
         ErrorCode::InputFailed,
         ErrorCode::PolicyChanged,
         ErrorCode::Internal,
+        ErrorCode::NormalClosure,
     ];
 
     /// encode → decode is the identity for a message. Requires `ControlMsg: PartialEq` — provided
@@ -493,7 +496,7 @@ mod tests {
             let tag = i32::from(errorcode_to_pb(code));
             assert!(seen_tags.insert(tag), "duplicate wire tag for {code:?}");
         }
-        assert_eq!(seen_tags.len(), 17);
+        assert_eq!(seen_tags.len(), ALL_CODES.len());
     }
 
     #[test]

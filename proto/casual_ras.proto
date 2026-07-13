@@ -45,6 +45,7 @@ enum ErrorCodeProto {
   ERROR_CODE_INPUT_FAILED        = 15;
   ERROR_CODE_POLICY_CHANGED      = 16;
   ERROR_CODE_INTERNAL            = 17;
+  ERROR_CODE_NORMAL_CLOSURE      = 18; // intentional, fault-free teardown (WebSocket-1000-style)
 }
 
 // Why a controller needs a fresh IDR. Mirrors ras_protocol::KeyframeReason.
