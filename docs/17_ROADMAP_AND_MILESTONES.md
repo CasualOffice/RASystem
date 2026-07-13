@@ -139,6 +139,12 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   (`ras-core::event`), no-op auth seam (`AllowAllValidator`).
 - ☑ `CORE` Host + controller orchestrators (`ras-core::session`) — handshake, authorize gate, stream
   negotiation, droppable video, keyframe round-trip, suspend/reconnect, teardown.
+- ☑ `CORE`+`SEC` **Emergency-stop / revoke runtime path (Invariant 4)** — `HostSession::emergency_stop`
+  drives the audit-distinct `Revoke → Revoked` edge, halts the media pump before its next send (the
+  pump re-checks the stop flag between encode and send, so no frame leaks post-revoke), and flushes a
+  best-effort, time-bounded `Bye{SessionRevoked}` so the controller ends `Revoked` (not a plain peer
+  close). Loopback-tested: ≤250 ms local halt, no post-stop frames, idempotent/non-downgradable,
+  revoke propagates to the controller.
 - ☑ `MED` Synthetic capture/encode doubles (`ras-media::synthetic`) + loopback transport
   (`ras-core::testkit`) + `webcodecs_string`.
 - ☑ `NET`/`CORE` Adaptive-bitrate hook wired: `LatencyFirstAbr` + a 250 ms stats/ABR tick driving

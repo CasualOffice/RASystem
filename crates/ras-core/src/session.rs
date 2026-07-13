@@ -51,6 +51,12 @@ const STATS_TICK: Duration = Duration::from_millis(250);
 /// decode latency) back to the host, feeding the host's ABR (design §2.3). Cold path.
 const FEEDBACK_TICK: Duration = Duration::from_millis(200);
 
+/// Bounded grace an emergency stop gives the control loop to flush its final `Bye` to the peer
+/// before we stop waiting on it. Small by design: Invariant 4 requires the *local* stop to take
+/// effect within 250 ms, and the local media halt is already done (via the stop flag) before we
+/// wait here — so this budget only bounds the peer-notification courtesy, never the local halt.
+const BYE_FLUSH_GRACE: Duration = Duration::from_millis(50);
+
 /// Process-global session-id source (content-free, monotonic).
 fn next_session_id() -> SessionId {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -164,6 +170,10 @@ struct HostInner<C, E> {
     media: Mutex<Option<std::thread::JoinHandle<()>>>,
     control_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stats_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Set in `start()`. Lets `stop`/`emergency_stop` ask the control loop to flush a final `Bye`
+    /// to the controller (it owns the control channel). Best-effort — a wedged peer must never
+    /// delay the local teardown.
+    bye_tx: Mutex<Option<mpsc::Sender<ErrorCode>>>,
 }
 
 /// Host-side view-only session. Owns capture+encode+transmit on their own thread.
@@ -204,6 +214,7 @@ where
                 media: Mutex::new(None),
                 control_task: Mutex::new(None),
                 stats_task: Mutex::new(None),
+                bye_tx: Mutex::new(None),
             }),
         }
     }
@@ -346,9 +357,16 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
 
         // Control reader: turns inbound KeyframeRequest into a forced IDR; Bye stops the session.
+        // The `bye` channel lets a local teardown (graceful or emergency) flush a final Bye out the
+        // control channel this loop owns.
+        let (bye_tx, bye_rx) = mpsc::channel::<ErrorCode>(1);
+        *inner
+            .bye_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bye_tx);
         let ctrl_inner = inner.clone();
         let task = tokio::spawn(async move {
-            host_control_loop(&mut control, &ctrl_inner).await;
+            host_control_loop(&mut control, &ctrl_inner, bye_rx).await;
         });
         *inner
             .control_task
@@ -403,6 +421,71 @@ where
             let _ = h.join();
         }
     }
+
+    /// Emergency stop / mid-session revoke (Invariant 4). Overrides everything — grant, lease,
+    /// in-flight video — and takes effect **locally and immediately**: setting the stop flag halts
+    /// the media pump before its next `send_frame`, so no pixel leaves after this returns. Drives
+    /// the audit-distinct `Revoke → Revoked` edge (never the graceful `Terminated`).
+    ///
+    /// Notifying the controller (`Bye{code}`) is *best-effort and bounded*: a wedged or vanished
+    /// peer must never delay the local stop, so we give the control loop a short grace to flush and
+    /// otherwise leave it — the controller will also see frames cease and its channel drop. First
+    /// caller wins; later calls (and any concurrent graceful `stop`) are no-ops.
+    pub async fn emergency_stop(&self, code: ErrorCode) {
+        let inner = &self.inner;
+        if inner.stop.swap(true, Ordering::SeqCst) {
+            return; // already stopping/stopped — first caller wins, revoke can't be downgraded
+        }
+        // Audit-distinct terminal. Revoke overrides every non-terminal state.
+        apply(&inner.state, SessionEvent::Revoke { code });
+        if let Some(sink) = inner
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            sink.emit(LifecycleEvent::SessionEnded {
+                reason: StopReason::Revoked { code },
+            });
+        }
+        // Ask the control loop to flush a final Bye{code} to the peer (it owns the channel).
+        if let Some(tx) = inner
+            .bye_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            let _ = tx.try_send(code);
+        }
+        // Bounded flush: let the control loop send its Bye and exit, but never wait on it beyond the
+        // grace — the local media halt already happened via the stop flag above. Take the handle out
+        // (dropping the MutexGuard) *before* awaiting, so no lock is held across `.await`.
+        let control_task = inner
+            .control_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(t) = control_task {
+            // A timeout simply drops the join future; the stop already stands.
+            let _ = tokio::time::timeout(BYE_FLUSH_GRACE, t).await;
+        }
+        if let Some(t) = inner
+            .stats_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            t.abort();
+        }
+        if let Some(h) = inner
+            .media
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = h.join();
+        }
+    }
 }
 
 /// Lock-free signals shared between the async orchestrator and the blocking media thread.
@@ -442,6 +525,11 @@ fn media_pump<C, E>(
         match capture.next_frame(sig.frame_interval) {
             Ok(Some(frame)) => match encoder.encode(frame) {
                 Ok(Some(ef)) => {
+                    // Re-check stop between encode and send: an emergency stop set mid-pipeline must
+                    // not let this last frame escape to the controller (Invariant 4).
+                    if sig.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     if sink.send_frame(ef) == ras_transport_iroh::SendOutcome::Sent {
                         sig.frames_sent.fetch_add(1, Ordering::Relaxed);
                     }
@@ -512,9 +600,20 @@ async fn host_stats_loop<C, E>(inner: &HostInner<C, E>, config: StreamConfig) {
 async fn host_control_loop<C, E>(
     control: &mut Box<dyn ControlChannelDyn>,
     inner: &HostInner<C, E>,
+    mut bye_rx: mpsc::Receiver<ErrorCode>,
 ) {
     loop {
-        match control.recv().await {
+        tokio::select! {
+            // A local teardown asked us to notify the controller and exit. Emergency revoke uses
+            // this to flush `Bye{SessionRevoked}`; the media pump was already halted by the stop
+            // flag, so this send is purely the peer-facing courtesy.
+            signal = bye_rx.recv() => {
+                if let Some(code) = signal {
+                    let _ = control.send(ControlMsg::Bye { code }).await;
+                }
+                break;
+            }
+            msg = control.recv() => match msg {
             Ok(ControlMsg::KeyframeRequest(_)) => {
                 inner.keyframe.store(true, Ordering::Relaxed);
             }
@@ -563,7 +662,8 @@ async fn host_control_loop<C, E>(
                 }
                 break;
             }
-        }
+            } // end `match msg`
+        } // end tokio::select!
     }
 }
 
@@ -854,10 +954,20 @@ async fn controller_control_loop(
             msg = control.recv() => match msg {
                 Ok(ControlMsg::Bye { code }) => {
                     inner.stop.store(true, Ordering::SeqCst);
-                    apply(&inner.state, SessionEvent::PeerClosed);
+                    // A revoke Bye is the host emergency-stopping us: take the audit-distinct
+                    // `Revoke → Revoked` edge, not the graceful `PeerClosed → Terminated`. The
+                    // controller can never resume from this (Invariant 13); resume authority is the
+                    // local user's alone.
+                    let revoked = code == ErrorCode::SessionRevoked;
+                    let (event, reason) = if revoked {
+                        (SessionEvent::Revoke { code }, StopReason::Revoked { code })
+                    } else {
+                        (SessionEvent::PeerClosed, StopReason::PeerClosed)
+                    };
+                    apply(&inner.state, event);
                     if let Some(sink) = inner.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
                         sink.emit(LifecycleEvent::Disconnected { code });
-                        sink.emit(LifecycleEvent::SessionEnded { reason: StopReason::PeerClosed });
+                        sink.emit(LifecycleEvent::SessionEnded { reason });
                     }
                     break;
                 }

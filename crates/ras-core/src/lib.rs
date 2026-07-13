@@ -618,4 +618,146 @@ mod e2e {
             "controller must end with Timeout after the window"
         );
     }
+
+    /// Invariant 4: an emergency stop halts the host locally and immediately, on the audit-distinct
+    /// `Revoked` path, well inside the 250 ms budget — and no frame is sent afterward.
+    #[tokio::test]
+    async fn emergency_stop_halts_host_within_budget_on_revoked_path() {
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(1280, 720),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr {
+                id: EndpointId([0u8; 32]),
+            }),
+            ctrl_tp,
+        );
+
+        let _host_events = host.start().await.unwrap();
+        let _ctrl_events = controller.connect().await.unwrap();
+        let sink = CountingFrameSink::new();
+        controller
+            .attach_renderer(Arc::new(sink.clone()))
+            .await
+            .unwrap();
+        assert!(
+            wait_until(|| sink.pushed() >= 5, 300).await,
+            "expected frames to flow before the stop, got {}",
+            sink.pushed()
+        );
+
+        // Fire the emergency stop and measure how long it takes to return (local halt budget).
+        let t0 = std::time::Instant::now();
+        host.emergency_stop(ras_protocol::ErrorCode::SessionRevoked)
+            .await;
+        let elapsed = t0.elapsed();
+
+        assert_eq!(
+            host.state(),
+            SessionState::Revoked,
+            "emergency stop must drive the audit-distinct Revoked state, not Terminated"
+        );
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "emergency stop must take effect within 250 ms locally, took {elapsed:?}"
+        );
+
+        // No frames escape after the stop: once the flow has settled, the delivered count is frozen.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let a = sink.pushed();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let b = sink.pushed();
+        assert_eq!(
+            a, b,
+            "frames kept flowing after the emergency stop (a={a}, b={b})"
+        );
+    }
+
+    /// The revoke can never be downgraded: a graceful stop after an emergency stop is a no-op, and
+    /// the state stays `Revoked` (first caller wins, terminal is absorbing).
+    #[tokio::test]
+    async fn emergency_stop_is_idempotent_and_cannot_be_downgraded() {
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr {
+                id: EndpointId([0u8; 32]),
+            }),
+            ctrl_tp,
+        );
+        let _h = host.start().await.unwrap();
+        let _c = controller.connect().await.unwrap();
+        assert!(wait_until(|| host.state() == SessionState::Active, 300).await);
+
+        host.emergency_stop(ras_protocol::ErrorCode::SessionRevoked)
+            .await;
+        assert_eq!(host.state(), SessionState::Revoked);
+
+        // A late graceful stop and a second emergency stop are both no-ops.
+        host.stop(StopReason::UserRequested).await;
+        assert_eq!(
+            host.state(),
+            SessionState::Revoked,
+            "graceful stop downgraded a revoke"
+        );
+        host.emergency_stop(ras_protocol::ErrorCode::Internal).await;
+        assert_eq!(host.state(), SessionState::Revoked);
+    }
+
+    /// A host emergency stop reaches the controller as a *revoke* (audit-distinct from a clean peer
+    /// close), carried by the existing `Bye{SessionRevoked}` wire message.
+    #[tokio::test]
+    async fn revoke_propagates_to_controller_as_revoked() {
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(1280, 720),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr {
+                id: EndpointId([0u8; 32]),
+            }),
+            ctrl_tp,
+        );
+        let _host_events = host.start().await.unwrap();
+        let mut ctrl_events = controller.connect().await.unwrap();
+        assert!(wait_until(|| controller.state() == SessionState::Active, 300).await);
+
+        host.emergency_stop(ras_protocol::ErrorCode::SessionRevoked)
+            .await;
+
+        assert!(
+            wait_until(|| controller.state() == SessionState::Revoked, 300).await,
+            "controller should end Revoked, got {:?}",
+            controller.state()
+        );
+        let mut saw_revoked_end = false;
+        while let Ok(ev) = ctrl_events.try_recv() {
+            if let LifecycleEvent::SessionEnded {
+                reason: StopReason::Revoked { code },
+            } = ev
+            {
+                assert_eq!(code, ras_protocol::ErrorCode::SessionRevoked);
+                saw_revoked_end = true;
+            }
+        }
+        assert!(
+            saw_revoked_end,
+            "controller must surface a Revoked SessionEnded, not a plain PeerClosed"
+        );
+    }
 }

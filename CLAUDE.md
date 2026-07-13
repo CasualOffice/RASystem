@@ -68,6 +68,10 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     end-to-end by a synthetic capture/encode double (`ras-media::synthetic`) over an in-memory
     loopback transport (`ras-core::testkit`) in a `#[tokio::test]` (streaming + keyframe round-trip +
     teardown). `ras-core` now depends on `tokio` + `async-trait` (design-sanctioned, permissive).
+    The **emergency-stop / revoke runtime path (Invariant 4)** is implemented and loopback-tested:
+    `HostSession::emergency_stop` takes the audit-distinct `Revoke → Revoked` edge, halts the media
+    pump before its next send (no post-revoke frame leak), and flushes a bounded `Bye{SessionRevoked}`
+    so the controller ends `Revoked` — verified ≤250 ms local, idempotent, non-downgradable.
   - Still stubbed behind traits (`todo!()`): the concrete iroh transport, ScreenCaptureKit/VideoToolbox
     (and the Windows DXGI/MF port), and the Tauri host/controller apps — they land as the spike clears.
 - **Build/verify commands** (all green as of M0):

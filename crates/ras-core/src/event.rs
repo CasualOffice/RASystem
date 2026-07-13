@@ -28,6 +28,12 @@ pub enum StopReason {
     PeerClosed,
     /// The reconnect window elapsed without restore.
     Timeout,
+    /// Emergency stop / mid-session revoke (Invariant 4). Audit-distinct from a clean close: this
+    /// records that control was forcibly withdrawn, not that either side left gracefully.
+    Revoked {
+        /// Stable revoke reason (typically [`ErrorCode::SessionRevoked`]).
+        code: ErrorCode,
+    },
     /// Terminated by an error with a stable code.
     Error(ErrorCode),
 }
