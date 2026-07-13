@@ -61,8 +61,9 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   med / ~13 ms p95** at 60 fps with a cleanly-decoding Annex-B stream (`ffprobe`-verified). Uses the
   pure-Rust **`objc2`** bindings (no Swift bridge), the family the real `ras-media-macos` backend
   should adopt. **Still pending (blocks the M1 go/no-go ADR):** the iroh network-matrix probe (needs a
-  Mac↔Linux two-machine run) and the minor rVFC compositor-penalty delta. The concrete iroh transport
-  + platform capture backends stay stubbed behind traits until that go/no-go.
+  Mac↔Linux two-machine run) and the minor rVFC compositor-penalty delta. The media go/no-go is
+  independently cleared, so the **real macOS media backend has landed** (`ras-media-macos`, see below);
+  only the concrete **iroh transport** stays stubbed behind its trait until the network go/no-go.
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.
@@ -81,8 +82,17 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     clean `Bye{NormalClosure}` → `Terminated` (prompt), `Bye{SessionRevoked}` → `Revoked` (host only),
     and a missing `Bye` → `Suspended` (transport loss). The testkit gained a `LoopbackCut` fault
     handle to exercise the last path honestly.
-  - Still stubbed behind traits (`todo!()`): the concrete iroh transport, ScreenCaptureKit/VideoToolbox
-    (and the Windows DXGI/MF port), and the Tauri host/controller apps — they land as the spike clears.
+  - **Real macOS media backend (`ras-media-macos`), on-device verified.** Implements the `ras-media`
+    traits: `ScreenCaptureBackend` (ScreenCaptureKit push-delegate → latest-frame pull adapter) and
+    `VideoEncoderBackend` (VideoToolbox H.264 — realtime, no B-frames, Baseline, ∞-GOP with
+    forced-IDR-on-demand, ABR `set_bitrate`), through the real `PlatformSurface` seam (**ADR-058**:
+    a tagged borrowed GPU-surface pointer the paired same-platform encoder recovers fail-closed, so
+    `ras-media` stays `unsafe`-free while `unsafe` is confined to this FFI crate per CONTRIBUTING §5).
+    Pure-Rust `objc2` bindings (no Swift bridge); the crate is **empty on non-macOS** so Linux CI stays
+    green. Driven end-to-end through the traits by `--example capture_encode`: first-frame keyframe,
+    gap-free monotonic ids, Annex-B + in-band SPS/PPS on every IDR, `ffprobe`-clean h264, ~8 ms encode.
+  - Still stubbed behind traits (`todo!()`): the concrete iroh transport (and the Windows DXGI/MF media
+    port), and the Tauri host/controller apps — they land as the spike/network go/no-go clears.
 - **Build/verify commands** (all green as of M0):
   - `cargo build --workspace`
   - `cargo fmt --all -- --check`
@@ -217,6 +227,7 @@ casual-ras/
     ras-policy/           # capability intersection, local policy
     ras-control/          # control leases, generations, input routing
     ras-media/            # capture/encode/decode traits + pipeline
+    ras-media-macos/      # macOS backend: ScreenCaptureKit + VideoToolbox (FFI; unsafe confined here)
     ras-audit/            # hash-chained signed audit journal
     ras-transport-iroh/   # Iroh endpoint, ALPN routing, relay
     ras-ffi/              # C ABI (SDK phase only)

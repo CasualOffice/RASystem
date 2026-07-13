@@ -173,8 +173,15 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   generation stay gated below.)*
 
 *Real backends behind the seams — **gated on the Phase-S go/no-go / hardware**:*
-- ☐ `MED` **macOS-lead:** ScreenCaptureKit capture + VideoToolbox encode behind the trait (Windows
-  DXGI+MF is the later port). Cursor metadata out-of-band, dirty rects.
+- ◐ `MED` **macOS-lead:** ScreenCaptureKit capture + VideoToolbox encode behind the trait (Windows
+  DXGI+MF is the later port). **Landed + on-device verified:** the `ras-media-macos` crate implements
+  `ScreenCaptureBackend` (SCK push-delegate → latest-frame pull adapter) and `VideoEncoderBackend`
+  (VideoToolbox H.264: realtime, no B-frames, Baseline, ∞-GOP + forced-IDR-on-demand, ABR bitrate),
+  wired through the real `PlatformSurface` seam (ADR-058). Driven end-to-end through the `ras-media`
+  traits (`--example capture_encode`): first-frame keyframe, gap-free monotonic ids, Annex-B + in-band
+  SPS/PPS, `ffprobe`-clean h264, ~8 ms encode. Pure-Rust `objc2` (no Swift bridge); empty on non-macOS
+  so CI stays green. **Remaining:** cursor metadata out-of-band, dirty rects, `excluded_window_ids`
+  → `SCWindow` mapping, and pipelined (async) encode emission.
 - ☐ `MED` HW encoder abstraction + OpenH264 `libloading` software fallback (never x264).
 - ☐ `NET` `ras-transport-iroh`: real endpoint, versioned ALPN, channel plumbing over iroh 1.x
   (`Connection::stats()` feeds the existing ABR hook).

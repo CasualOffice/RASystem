@@ -1,0 +1,71 @@
+[package]
+name = "ras-media-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# macOS-lead host media backend (ADR-054): ScreenCaptureKit capture + VideoToolbox H.264 encode
+# behind the `ras-media` traits. FFI-bearing platform crate — `unsafe` is re-enabled here only
+# (CONTRIBUTING §5) and confined behind the safe trait surface. Uses the pure-Rust `objc2` bindings
+# (no Swift bridge), validated by `spike/macos-capture` (phase-S-design.md §4.1).
+
+[dependencies]
+ras-media = { path = "../ras-media" }
+ras-protocol = { path = "../ras-protocol" }
+bytes = "1"
+
+# objc2 framework bindings are macOS-only: on other targets this crate compiles to an empty lib so
+# `cargo build --workspace` stays green on Linux CI.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSError", "NSObject"] }
+objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFNumber", "CFDictionary"] }
+objc2-screen-capture-kit = { version = "0.3", features = [
+  "SCStream",
+  "SCShareableContent",
+  "SCError",
+  "objc2-core-media",
+  "objc2-core-graphics",
+  "objc2-core-foundation",
+  "block2",
+  "dispatch2",
+  "std",
+] }
+objc2-core-media = { version = "0.3", features = [
+  "CMSampleBuffer",
+  "CMTime",
+  "CMBase",
+  "CMFormatDescription",
+  "CMBlockBuffer",
+  "objc2-core-video",
+] }
+objc2-core-video = { version = "0.3", features = [
+  "CVPixelBuffer",
+  "CVImageBuffer",
+  "CVBuffer",
+  "CVReturn",
+  "CVBase",
+] }
+objc2-video-toolbox = { version = "0.3", features = [
+  "VTCompressionSession",
+  "VTSession",
+  "VTCompressionProperties",
+  "VTErrors",
+  "objc2-core-media",
+  "objc2-core-video",
+] }
+dispatch2 = "0.3"
+block2 = "0.6"
+
+# FFI backend crate: unsafe confined here, wrapped in the safe `ras-media` trait surface
+# (CONTRIBUTING §5). Re-declares the workspace lint set with `unsafe_code` relaxed.
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
