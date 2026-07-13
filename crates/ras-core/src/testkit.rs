@@ -30,7 +30,7 @@ enum Role {
     Controller,
 }
 
-/// Error a channel returns once the link has been [cut](LoopbackCut::cut) — models the peer's QUIC
+/// Error a channel returns once the link has been [cut](LoopbackFaults::cut) — models the peer's QUIC
 /// connection dropping *without* a clean `Bye`, which the orchestrators must treat as transport loss.
 fn severed() -> CoreError {
     CoreError::fatal(ErrorCode::TransportError, "loopback severed")
@@ -88,7 +88,7 @@ impl ControlChannelDyn for LoopbackControl {
 }
 
 struct LoopbackSink {
-    tx: mpsc::Sender<EncodedFrame>,
+    tx: mpsc::Sender<VideoEvent>,
     cut: watch::Receiver<bool>,
 }
 
@@ -97,8 +97,10 @@ impl VideoSinkDyn for LoopbackSink {
         if *self.cut.borrow() {
             return SendOutcome::DroppedStale; // link severed — nothing to send onto
         }
-        // Non-blocking, drop-on-full — the video path is droppable by design.
-        match self.tx.try_send(frame) {
+        // Non-blocking, drop-on-full — the video path is droppable by design. The loopback carries
+        // `VideoEvent` (not raw frames) to mirror the real transport, whose source yields both
+        // `Frame` and transport-generated `FrameDropped`.
+        match self.tx.try_send(VideoEvent::Frame(frame)) {
             Ok(()) => SendOutcome::Sent,
             Err(mpsc::error::TrySendError::Full(_)) => SendOutcome::DroppedCongested,
             Err(mpsc::error::TrySendError::Closed(_)) => SendOutcome::DroppedStale,
@@ -107,7 +109,7 @@ impl VideoSinkDyn for LoopbackSink {
 }
 
 struct LoopbackSource {
-    rx: mpsc::Receiver<EncodedFrame>,
+    rx: mpsc::Receiver<VideoEvent>,
     cut: watch::Receiver<bool>,
 }
 
@@ -126,27 +128,25 @@ impl VideoSourceDyn for LoopbackSource {
                 verdict = poll_cut(&mut self.cut) => match verdict {
                     CutPoll::Cut => return Err(severed()),
                     CutPoll::Continue => continue,
-                    CutPoll::SenderGone => {
-                        return self.rx.recv().await.map(VideoEvent::Frame).ok_or_else(video_closed)
-                    }
+                    CutPoll::SenderGone => return self.rx.recv().await.ok_or_else(video_closed),
                 },
-                f = self.rx.recv() => return f.map(VideoEvent::Frame).ok_or_else(video_closed),
+                ev = self.rx.recv() => return ev.ok_or_else(video_closed),
             }
         }
     }
 }
 
 /// One end of an in-memory session. Build a wired pair with [`loopback_pair`] (or
-/// [`loopback_pair_with_cut`] to also get a fault handle).
+/// [`loopback_pair_with_faults`] to also get a fault handle).
 pub struct LoopbackTransport {
     role: Role,
     control: Mutex<Option<LoopbackControl>>,
-    video_sink: Mutex<Option<mpsc::Sender<EncodedFrame>>>,
-    video_source: Mutex<Option<mpsc::Receiver<EncodedFrame>>>,
+    video_sink: Mutex<Option<mpsc::Sender<VideoEvent>>>,
+    video_source: Mutex<Option<mpsc::Receiver<VideoEvent>>>,
     /// Shared severed-link flag, cloned into every sink/source this transport hands out.
     cut: watch::Receiver<bool>,
     /// Keeps the cut `Sender` alive for a plain [`loopback_pair`] (so `changed()` never reports the
-    /// sender as gone). `None` when a [`LoopbackCut`] owns the sender instead.
+    /// sender as gone). `None` when a [`LoopbackFaults`] owns the sender instead.
     _cut_keepalive: Option<watch::Sender<bool>>,
 }
 
@@ -219,27 +219,42 @@ impl SessionTransport for LoopbackTransport {
     }
 }
 
-/// A fault handle for a wired pair: severs the link to model the peer's QUIC connection dropping
-/// **without** a clean `Bye`. After [`cut`](Self::cut), every control `recv`/`send` and video `next`
-/// on both ends returns a transport error — the orchestrators' transport-loss path (Active →
-/// Suspended → reconnect window), which a graceful `Bye` must *not* trigger.
-pub struct LoopbackCut {
-    tx: watch::Sender<bool>,
+/// A fault handle for a wired pair. Two independent injectors for the two failure modes the
+/// orchestrators must handle:
+/// - [`cut`](Self::cut) severs the link (models the peer's QUIC connection dropping **without** a
+///   clean `Bye`) → the transport-loss path (Active → Suspended → reconnect window), which a
+///   graceful `Bye` must *not* trigger.
+/// - [`inject_video`](Self::inject_video) pushes a [`VideoEvent`] straight into the controller's
+///   video source — notably a `FrameDropped`, which the real transport (not the host) generates on
+///   loss, to exercise the controller's loss handling (freeze-on-last-good + keyframe recovery).
+pub struct LoopbackFaults {
+    cut_tx: watch::Sender<bool>,
+    video_tx: mpsc::Sender<VideoEvent>,
 }
 
-impl LoopbackCut {
+impl LoopbackFaults {
     /// Sever the link. Idempotent.
     pub fn cut(&self) {
-        let _ = self.tx.send(true);
+        let _ = self.cut_tx.send(true);
+    }
+
+    /// Inject a video event into the controller's source (e.g. a transport-generated `FrameDropped`).
+    pub async fn inject_video(&self, ev: VideoEvent) {
+        let _ = self.video_tx.send(ev).await;
     }
 }
 
-/// Shared builder: wires both transports around one cut receiver. The caller decides who owns the
-/// cut `Sender` (a keepalive on the host transport for the plain pair, or a [`LoopbackCut`]).
+/// Shared builder: wires both transports around one cut receiver and one video channel. Returns the
+/// pair plus a spare clone of the video sender (the caller either drops it — plain pair — or hands
+/// it to a [`LoopbackFaults`] for injection). The caller likewise owns the cut `Sender`.
 fn build_pair(
     cut_rx: watch::Receiver<bool>,
     keepalive: Option<watch::Sender<bool>>,
-) -> (Arc<LoopbackTransport>, Arc<LoopbackTransport>) {
+) -> (
+    Arc<LoopbackTransport>,
+    Arc<LoopbackTransport>,
+    mpsc::Sender<VideoEvent>,
+) {
     let (h2c_tx, h2c_rx) = mpsc::channel(64); // host → controller control
     let (c2h_tx, c2h_rx) = mpsc::channel(64); // controller → host control
     let (vid_tx, vid_rx) = mpsc::channel(8); // host → controller video (bounded, droppable)
@@ -251,7 +266,7 @@ fn build_pair(
             rx: c2h_rx,
             cut: cut_rx.clone(),
         })),
-        video_sink: Mutex::new(Some(vid_tx)),
+        video_sink: Mutex::new(Some(vid_tx.clone())),
         video_source: Mutex::new(None),
         cut: cut_rx.clone(),
         _cut_keepalive: keepalive,
@@ -268,26 +283,31 @@ fn build_pair(
         cut: cut_rx,
         _cut_keepalive: None,
     };
-    (Arc::new(host), Arc::new(controller))
+    (Arc::new(host), Arc::new(controller), vid_tx)
 }
 
 /// Build a wired host/controller transport pair sharing in-memory channels. Returns
 /// `(host_transport, controller_transport)`. Video flows host → controller only. The link can never
-/// be severed (no fault handle); use [`loopback_pair_with_cut`] for that.
+/// be severed (no fault handle); use [`loopback_pair_with_faults`] for that.
 #[must_use]
 pub fn loopback_pair() -> (Arc<LoopbackTransport>, Arc<LoopbackTransport>) {
     let (cut_tx, cut_rx) = watch::channel(false);
     // Stash the sender on the host transport so `changed()` never reports it as gone.
-    build_pair(cut_rx, Some(cut_tx))
+    let (host, controller, _spare_video_tx) = build_pair(cut_rx, Some(cut_tx));
+    (host, controller)
 }
 
-/// Like [`loopback_pair`] but also returns a [`LoopbackCut`] that can sever the link mid-session to
-/// exercise the abrupt-transport-loss path. Returns `(host, controller, cut)`.
+/// Like [`loopback_pair`] but also returns a [`LoopbackFaults`] that can sever the link or inject
+/// video events mid-session. Returns `(host, controller, faults)`.
 #[must_use]
-pub fn loopback_pair_with_cut() -> (Arc<LoopbackTransport>, Arc<LoopbackTransport>, LoopbackCut) {
+pub fn loopback_pair_with_faults() -> (
+    Arc<LoopbackTransport>,
+    Arc<LoopbackTransport>,
+    LoopbackFaults,
+) {
     let (cut_tx, cut_rx) = watch::channel(false);
-    let (host, controller) = build_pair(cut_rx, None);
-    (host, controller, LoopbackCut { tx: cut_tx })
+    let (host, controller, video_tx) = build_pair(cut_rx, None);
+    (host, controller, LoopbackFaults { cut_tx, video_tx })
 }
 
 /// A content-free [`FrameSink`] that tallies delivery. Cheap to clone (shares its counters), so a

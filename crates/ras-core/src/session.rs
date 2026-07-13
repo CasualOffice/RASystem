@@ -34,7 +34,7 @@ use ras_media::{
     VideoEncoderBackend, VideoTransportKind,
 };
 use ras_protocol::{ControlMsg, DecoderFeedback, ErrorCode, KeyframeReason, StreamConfigWire};
-use ras_transport_iroh::{EndpointAddr, EndpointId, VideoEvent};
+use ras_transport_iroh::{DropReason, EndpointAddr, EndpointId, VideoEvent};
 
 /// Phase-1 host capture rate (no fps field on `HostSessionConfig` yet).
 pub const HOST_TARGET_FPS: u32 = 30;
@@ -1042,6 +1042,27 @@ async fn controller_control_loop(
     }
 }
 
+/// What the controller does on a dropped-frame notification (design §10 / docs/10 §4 loss handling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LossAction {
+    /// Benign: a newer frame superseded this one, so decoding continues uninterrupted.
+    Ignore,
+    /// A real gap the decoder can't bridge — freeze on the last good frame and request a fresh IDR.
+    RecoverWithKeyframe,
+}
+
+/// Pure decision: only an unrecoverable gap warrants freeze-on-last-good + an IDR request; a stale
+/// (superseded) drop is benign. Exhaustive match — a new [`DropReason`] variant is a compile error
+/// here, never a silent default, so recovery policy can't drift as the transport grows.
+fn loss_action(reason: DropReason) -> LossAction {
+    match reason {
+        DropReason::Stale => LossAction::Ignore,
+        DropReason::FecUnrecoverable | DropReason::StreamReset | DropReason::MissingFragments => {
+            LossAction::RecoverWithKeyframe
+        }
+    }
+}
+
 async fn controller_video_loop(inner: &ControllerInner) {
     let mut source = match inner.transport.video_source().await {
         Ok(s) => s,
@@ -1068,19 +1089,26 @@ async fn controller_video_loop(inner: &ControllerInner) {
                 }
                 inner.last_decoded_frame.store(fid, Ordering::Relaxed);
             }
-            Ok(VideoEvent::FrameDropped { .. }) => {
+            Ok(VideoEvent::FrameDropped { reason, .. }) => {
                 inner.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                // A run of drops → ask for a fresh IDR (never freezes; last-good frame stays).
-                // Clone the sender out from under the std mutex before awaiting (guards are !Send).
-                let tx = inner
-                    .command_tx
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                if let Some(tx) = tx {
-                    let _ = tx
-                        .send(ControlCommand::Keyframe(KeyframeReason::UnrecoverableLoss))
-                        .await;
+                // A merely *stale* (superseded) frame needs no recovery — the newer frame decodes
+                // fine, and requesting an IDR would spam the host for nothing. A real gap means the
+                // decoder can no longer use subsequent P-frames: freeze on the last good frame (stop
+                // feeding the renderer via the keyframe re-gate below) and request one fresh IDR;
+                // resume only once it arrives (docs/10 §4 freeze-on-last-good).
+                if loss_action(reason) == LossAction::RecoverWithKeyframe {
+                    seen_keyframe = false; // re-gate: gate out P-frames until the requested IDR
+                                           // Clone the sender out from under the std mutex before awaiting (guards !Send).
+                    let tx = inner
+                        .command_tx
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if let Some(tx) = tx {
+                        let _ = tx
+                            .send(ControlCommand::Keyframe(KeyframeReason::UnrecoverableLoss))
+                            .await;
+                    }
                 }
             }
             Err(_) => break,
@@ -1117,5 +1145,31 @@ async fn controller_feedback_loop(inner: &ControllerInner) {
             }
             None => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod loss_tests {
+    use super::{loss_action, LossAction};
+    use ras_transport_iroh::DropReason;
+
+    /// The recovery policy is exhaustive and correct: only a real gap freezes-and-recovers; a stale
+    /// (superseded) drop is benign. The exhaustive `match` in `loss_action` makes a new `DropReason`
+    /// a compile error, so this stays in lock-step with the transport.
+    #[test]
+    fn only_unrecoverable_gaps_request_recovery() {
+        assert_eq!(loss_action(DropReason::Stale), LossAction::Ignore);
+        assert_eq!(
+            loss_action(DropReason::FecUnrecoverable),
+            LossAction::RecoverWithKeyframe
+        );
+        assert_eq!(
+            loss_action(DropReason::StreamReset),
+            LossAction::RecoverWithKeyframe
+        );
+        assert_eq!(
+            loss_action(DropReason::MissingFragments),
+            LossAction::RecoverWithKeyframe
+        );
     }
 }

@@ -162,6 +162,12 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   codegen) + a generic async `FramedControlChannel` (`ras-transport-iroh`) that runs it over any
   `AsyncRead`/`AsyncWrite` (iroh's stream shape) — length-prefixed, `MAX_CONTROL_FRAME` DoS-guarded,
   tested over an in-memory duplex (round-trip, reassembly, split reads, oversized, peer-close).
+- ☑ `MED`/`CORE` **Controller loss-handling policy (docs/10 §4)** — `FrameDropped` handling is now
+  `DropReason`-aware via a pure, exhaustively-tested `loss_action`: a *stale* (superseded) drop is
+  benign (no IDR spam), while an unrecoverable gap freezes on the last good frame (re-gates P-frames
+  until the next IDR) and requests one fresh keyframe. Exercised end-to-end over the loopback with a
+  fault-injected drop (drop → keyframe request → host IDR → sink). *(The FEC codec + real drop
+  generation stay gated below.)*
 
 *Real backends behind the seams — **gated on the Phase-S go/no-go / hardware**:*
 - ☐ `MED` **macOS-lead:** ScreenCaptureKit capture + VideoToolbox encode behind the trait (Windows
@@ -169,11 +175,13 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
 - ☐ `MED` HW encoder abstraction + OpenH264 `libloading` software fallback (never x264).
 - ☐ `NET` `ras-transport-iroh`: real endpoint, versioned ALPN, channel plumbing over iroh 1.x
   (`Connection::stats()` feeds the existing ABR hook).
-- ☐ `MED` FEC (`nanors`) + loss handling (freeze-on-last-good, PLI/IDR request) per `docs/10 §4`.
+- ☐ `MED` FEC (`nanors`) + the *transport-side* loss detection that generates `FrameDropped` per
+  `docs/10 §4` (the controller-side reaction to those events is done + tested above).
 - ☐ `UI` Controller Tauri shell: Web Worker + `OffscreenCanvas` WebCodecs renderer over the
   frame-Channel codec; connection-state UI; **pin Tauri ≥ 2.11.1**, deny-by-default caps, strict CSP.
-- ◐ `QA` Reconnection behavior documented + tested (loopback, incl. the `LoopbackCut` abrupt-loss
-  path); **generative/fuzz property tests** over the untrusted-input surface: the control codec, frame
+- ◐ `QA` Reconnection behavior documented + tested (loopback; the `LoopbackFaults` handle injects both
+  an abrupt link cut and `FrameDropped` events, so suspend/reconnect *and* loss handling are exercised
+  without abusing `stop`); **generative/fuzz property tests** over the untrusted-input surface: the control codec, frame
   codec, and state machine (`proptest` — decode never panics on arbitrary bytes; round-trip identity;
   terminal-absorbing; revoke-always-wins), **and the `FramedControlChannel` reader** — the code that
   will parse bytes off iroh's streams — fuzzed for no-panic/no-hang on adversarial input, correct

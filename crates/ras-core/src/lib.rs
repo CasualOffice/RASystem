@@ -454,7 +454,7 @@ mod e2e {
     use std::time::Duration;
 
     use crate::deps::AllowAllValidator;
-    use crate::testkit::{loopback_pair, loopback_pair_with_cut, CountingFrameSink};
+    use crate::testkit::{loopback_pair, loopback_pair_with_faults, CountingFrameSink};
     use crate::{
         ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig, LifecycleEvent,
         SessionState, StopReason,
@@ -462,7 +462,7 @@ mod e2e {
     use ras_media::synthetic::{SyntheticCaptureBackend, SyntheticEncoder};
     use ras_media::MonitorId;
     use ras_protocol::KeyframeReason;
-    use ras_transport_iroh::{EndpointAddr, EndpointId};
+    use ras_transport_iroh::{DropReason, EndpointAddr, EndpointId, VideoEvent};
 
     /// Poll `cond` up to `tries` × 10 ms; returns whether it became true (never wall-clocks the CI).
     async fn wait_until<F: Fn() -> bool>(cond: F, tries: u32) -> bool {
@@ -559,7 +559,7 @@ mod e2e {
 
     #[tokio::test]
     async fn controller_suspends_then_terminates_when_transport_drops() {
-        let (host_tp, ctrl_tp, cut) = loopback_pair_with_cut();
+        let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
         let host = HostSession::new(
             HostSessionConfig::new(MonitorId(0)),
             host_tp,
@@ -582,7 +582,7 @@ mod e2e {
         );
 
         // Abrupt transport loss: the peer's connection drops with NO clean Bye (QUIC conn death).
-        cut.cut();
+        faults.cut();
 
         // The controller must freeze (Suspended) but keep its UI live, then terminate once the
         // reconnect window elapses (Phase 1 has no re-dial yet).
@@ -670,6 +670,59 @@ mod e2e {
             ended_clean,
             "controller must end with PeerClosed on a clean Bye, not Timeout/Revoked"
         );
+    }
+
+    /// Loss handling (docs/10 §4): an *unrecoverable* drop makes the controller request a fresh IDR
+    /// (and freeze on the last good frame until it arrives). The synthetic encoder only emits an IDR
+    /// on the first frame and on request, so a *new* keyframe at the sink is an unambiguous signal
+    /// that recovery fired end-to-end (drop event → keyframe request → host IDR → sink). The
+    /// stale-vs-unrecoverable discrimination itself is covered exhaustively by
+    /// `session::loss_tests` (host-side keyframe coalescing makes a count-based negative unreliable).
+    #[tokio::test]
+    async fn unrecoverable_drop_drives_end_to_end_keyframe_recovery() {
+        let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(1280, 720),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr {
+                id: EndpointId([0u8; 32]),
+            }),
+            ctrl_tp,
+        );
+        let _host_events = host.start().await.unwrap();
+        let _ctrl_events = controller.connect().await.unwrap();
+        let sink = CountingFrameSink::new();
+        controller
+            .attach_renderer(Arc::new(sink.clone()))
+            .await
+            .unwrap();
+
+        // Let the stream start on its first IDR and any startup keyframe requests settle.
+        assert!(wait_until(|| sink.keyframes() >= 1, 300).await);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let kf_baseline = sink.keyframes();
+
+        // A transport-generated unrecoverable gap → the controller must request a fresh IDR.
+        faults
+            .inject_video(VideoEvent::FrameDropped {
+                frame_id: 9_999,
+                reason: DropReason::FecUnrecoverable,
+            })
+            .await;
+
+        assert!(
+            wait_until(|| sink.keyframes() > kf_baseline, 300).await,
+            "an unrecoverable drop must drive a fresh IDR (baseline={kf_baseline}, now={})",
+            sink.keyframes()
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
     }
 
     /// Invariant 4: an emergency stop halts the host locally and immediately, on the audit-distinct
