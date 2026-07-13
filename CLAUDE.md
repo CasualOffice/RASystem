@@ -48,9 +48,16 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
 
 - **Phase 0 complete — Milestone M0 reached.** The design doc set is done and the Cargo workspace
   skeleton builds clean. **Phase 1 is in progress:** the design gate (`docs/design/phase-1-design.md`)
-  is written and the **spike-independent orchestration spine is implemented and green.** Still open:
-  **Phase S** (risk-validation spike, blocked on the developer's Mac + a two-machine network) whose
-  go/no-go gates the concrete iroh transport + platform capture backends.
+  is written and the **spike-independent orchestration spine is implemented and green.**
+- **Live progress tracker:** `docs/17_ROADMAP_AND_MILESTONES.md` (per-phase ☐/◐/☑ checkboxes) is the
+  single source of truth for what's done; spike measurements are recorded in
+  `docs/design/phase-S-design.md §4.1`. Keep both current as work lands.
+- **Phase S (risk spike) — half measured, half pending.** WebCodecs bet is **GO**: measured on Chrome
+  (e2e 7.1/10.5 ms) *and* Safari/WebKit (e2e 4.0/5.0 ms, 60 fps, 0 drops) — Safari is the WKWebView
+  engine, so the macOS-lead controller render path is validated and the native-surface PIVOT is off
+  the table. **Still pending (blocks the M1 go/no-go ADR):** the iroh network-matrix probe
+  (needs a Mac↔Linux two-machine run) and the minor rVFC compositor-penalty delta. The concrete iroh
+  transport + platform capture backends stay stubbed behind traits until that go/no-go.
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

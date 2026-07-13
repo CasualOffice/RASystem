@@ -51,38 +51,34 @@ blame. Decoupled probes localize the cost.
 
 ## 4.1 Recorded results
 
-### WebCodecs loopback (`spike/latency-probe/web`) — run 1
+### WebCodecs loopback (`spike/latency-probe/web`)
 
-Workload: synthetic 60 fps stream, in-browser `VideoEncoder`→`VideoDecoder` loopback, Annex-B.
-Browser/engine: **TBD (must confirm — see below).**
+Workload: synthetic 60 fps stream, in-browser `VideoEncoder`→`VideoDecoder` loopback, Annex-B. Two
+engines measured — **Chrome (Blink)** and **Safari (WebKit = the WKWebView engine Tauri embeds on
+macOS)**:
 
-| Metric | Median | p95 |
-|--------|--------|-----|
-| End-to-end (encode→decode) | **7.1 ms** | **10.5 ms** |
-| Decode (the controller's real cost) | **0.8 ms** | **1.6 ms** |
-| Encode (browser SW stand-in, *not* the host path) | 6.3 ms | 8.2 ms |
+| Metric | Chrome med / p95 | Safari med / p95 |
+|--------|------------------|------------------|
+| End-to-end (encode→decode) | 7.1 / 10.5 ms | **4.0 / 5.0 ms** |
+| Decode (the controller's real cost) | 0.8 / 1.6 ms | **1.0 / 1.0 ms** |
+| Encode (browser SW stand-in, *not* the host path) | 6.3 / 8.2 ms | 3.0 / 4.0 ms |
+| Frames enc/dec · drops · fps · chunk | 817/817 · 0 · 60.1 · 0.9 KB | 860/860 · 0 · 59.8 · 1.0 KB |
 | rVFC / compositor-present penalty (toggle delta) | *pending* | *pending* |
 
-Throughput: 817/817 frames enc+dec, **0 drops**, effective **60.1 fps**, avg chunk **0.9 KB**.
+**Assessment — WebCodecs bet is GO, on both engines including WKWebView.** Decode is ~1 ms at a
+sustained 60 fps with **zero drops** on both. Critically, **Safari/WebKit has WebCodecs present and
+is even faster end-to-end (4.0/5.0 ms)** — so the macOS-lead controller (ADR-054), which renders in
+WKWebView, is validated on the WebCodecs→canvas path. **The native-surface PIVOT is off the table**
+for macOS. The e2e figure over-counts vs the real controller anyway (it includes a browser SW encode
+the product doesn't do — the host uses hardware VideoToolbox), so the controller consumes ≈ decode
+(~1 ms) + present (rVFC delta, pending), leaving essentially the whole 120 ms glass-to-glass budget
+for network RTT (iroh probe, pending) + host capture/encode.
 
-**Assessment (WebCodecs bet → looking GO).** Decode is **sub-millisecond** (0.8 ms median / 1.6 ms
-p95) at a sustained 60 fps with zero drops — the controller's actual render-path cost is a rounding
-error against the 120 ms glass-to-glass budget. The 7.1/10.5 ms "e2e" here **over-counts** vs the
-real controller: it includes a *browser software encode* (6.3 ms) that the product does **not** do —
-the host encodes with hardware VideoToolbox (measured separately via the capture spike), and the
-controller only decodes. So the controller-side budget consumed is ≈ decode (~1 ms) + present
-(rVFC delta, pending), leaving essentially the whole budget for network RTT (iroh probe, pending) +
-host capture/encode.
-
-**Still needed to close this bet:**
-1. **Which browser/engine produced these numbers.** Tauri v2 on macOS renders in **WKWebView
-   (Safari's engine)** — so the go/no-go for the *macOS-lead* controller (ADR-054) hinges on the
-   **Safari** numbers specifically. Chrome numbers are reassuring but don't settle WKWebView. Re-run
-   (or confirm this run) in **Safari**; if WebCodecs is absent/slow there, that's the PIVOT trigger to
-   the native-surface path on macOS (`docs/12 §5`), not a project-wide No-Go.
-2. **The rVFC-toggle delta** — the extra latency of presenting each `VideoFrame` via
-   `requestVideoFrameCallback` vs an immediate `drawImage`. That delta ≈ the compositor-frame penalty
-   the design flagged (D4); record median & p95 with the toggle on vs off.
+**Still needed to fully close this bet:**
+- **The rVFC-toggle delta** — the extra latency of presenting each `VideoFrame` via
+  `requestVideoFrameCallback` vs an immediate `drawImage`. That delta ≈ the compositor-frame penalty
+  the design flagged (D4); record median & p95 with the toggle on vs off, per engine. (Small refinement
+  — it does not change the GO given the ~115 ms of headroom.)
 
 ### iroh transport (`spike/iroh-probe`) — *not yet run*
 

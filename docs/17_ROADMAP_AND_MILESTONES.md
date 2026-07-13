@@ -91,16 +91,22 @@ Code here is disposable.
 P4 (fixed workloads + network profiles); success thresholds from `docs/01 §11`; what a "no-go"
 triggers (native-surface pivot / codec change).
 
-**② Build — tasks** (spike scaffolded in `spike/`; **measurement runs on the user's Windows box**)
+**② Build — tasks** (spike scaffolded in `spike/`; **measurement runs on the user's Mac**)
 - ☑ `NET` Two-endpoint Iroh 1.x connect probe (`spike/iroh-probe`) — direct/relay + RTT under load.
 - ☐ `NET` **Run** across the network matrix (`docs/08 §3`): same-LAN, different NAT, **symmetric
   NAT**, **UDP-blocked/443-only**, relay-only, migration — record success + direct-vs-relay + RTT.
+  *(Blocked: needs a Mac↔Linux two-machine run.)*
 - ◐ `MED` Capture skeleton (`spike/latency-probe`, `FrameSource` + synthetic). **macOS-lead:**
   ScreenCaptureKit → VideoToolbox source documented to implement (Windows DXGI+MF noted for the port)
   — measures capture→encode on the Mac once implemented.
 - ☑ `MED`+`UI` **Turnkey WebCodecs loopback harness** (`spike/latency-probe/web/index.html`) —
-  encode→decode→canvas latency, avcC/annexB, frame-close, compositor-frame toggle. Runs in WebView2.
-- ☐ `QA` **Run** the probes; compile the latency report; record the compositor-frame penalty.
+  encode→decode→canvas latency, avcC/annexB, frame-close, compositor-frame toggle.
+- ◐ `QA` **Run** the probes; compile the latency report; record the compositor-frame penalty.
+  Results in `docs/design/phase-S-design.md §4.1`. **Done:** WebCodecs measured on **both Chrome
+  (e2e 7.1/10.5 ms) and Safari/WebKit (e2e 4.0/5.0 ms)** — 60 fps, 0 drops, decode ~1 ms. Safari =
+  the WKWebView engine ⇒ **the WebCodecs bet is GO including the macOS-lead path; native-surface
+  PIVOT is off the table.** **Pending:** the rVFC-toggle compositor penalty (refinement) and the
+  whole iroh network matrix (the deciding unknown for M1).
 
 **③ Exit criteria (go/no-go):** latency targets look achievable or we re-plan · direct+relay work on
 the matrix · WebCodecs path viable on WebView2 (or decision to go native-surface) · **written go/no-go
@@ -121,16 +127,32 @@ datagram+FEC, per spike result); frame framing + decoder-feedback protocol; `Vid
 (close discipline, `docs/10 §6`).
 
 **② Build — tasks**
-- ☐ `MED` Productionize DXGI capture (cursor metadata out-of-band, dirty rects) behind the trait.
-- ☐ `MED` HW encoder abstraction (MF MFT first) with runtime detection + OpenH264 `libloading`
-  software fallback (never x264).
-- ☐ `NET` `ras-transport-iroh`: endpoint, versioned ALPN, channel plumbing, adaptive-bitrate hook
-  from `Connection::stats()`.
+
+*Spike-independent spine — **done ahead of the transport/UI** (all green: build/clippy/test/deny),
+exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
+- ☑ `CORE` Session state machine (Created→…→Active) + security-terminal states, with the
+  suspend/reconnect path and exhaustive invariant tests (emergency-stop overrides, terminal finality).
+- ☑ `CORE` Canonical cross-crate types + DI seams (`ras-core::deps`), typed lifecycle events
+  (`ras-core::event`), no-op auth seam (`AllowAllValidator`).
+- ☑ `CORE` Host + controller orchestrators (`ras-core::session`) — handshake, authorize gate, stream
+  negotiation, droppable video, keyframe round-trip, suspend/reconnect, teardown.
+- ☑ `MED` Synthetic capture/encode doubles (`ras-media::synthetic`) + loopback transport
+  (`ras-core::testkit`) + `webcodecs_string`.
+- ☑ `NET`/`CORE` Adaptive-bitrate hook wired: `LatencyFirstAbr` + a 250 ms stats/ABR tick driving
+  `set_bitrate` and emitting `ConnectionQuality` (control law stays spike-tunable).
+- ☑ `UI`/`CORE` Frame-Channel codec (`ras-core::frame_channel`) — the 24-byte header contract shared
+  with the future TS decoder worker.
+
+*Real backends behind the seams — **gated on the Phase-S go/no-go / hardware**:*
+- ☐ `MED` **macOS-lead:** ScreenCaptureKit capture + VideoToolbox encode behind the trait (Windows
+  DXGI+MF is the later port). Cursor metadata out-of-band, dirty rects.
+- ☐ `MED` HW encoder abstraction + OpenH264 `libloading` software fallback (never x264).
+- ☐ `NET` `ras-transport-iroh`: real endpoint, versioned ALPN, channel plumbing over iroh 1.x
+  (`Connection::stats()` feeds the existing ABR hook).
 - ☐ `MED` FEC (`nanors`) + loss handling (freeze-on-last-good, PLI/IDR request) per `docs/10 §4`.
-- ☐ `UI` Controller Tauri shell: Web Worker + `OffscreenCanvas` WebCodecs renderer; connection-state
-  UI (direct vs relayed); **pin Tauri ≥ 2.11.1**, deny-by-default capabilities, strict CSP.
-- ☐ `CORE` Session state machine skeleton (Created→…→Active) without auth transitions.
-- ☐ `QA` Perf harness wired to CI; reconnection behavior documented.
+- ☐ `UI` Controller Tauri shell: Web Worker + `OffscreenCanvas` WebCodecs renderer over the
+  frame-Channel codec; connection-state UI; **pin Tauri ≥ 2.11.1**, deny-by-default caps, strict CSP.
+- ◐ `QA` Reconnection behavior documented + tested (loopback); perf harness in CI still to wire.
 
 **③ Exit criteria:** stable ~30 FPS on standard desktop workloads · direct + relay sessions work ·
 prototype latency targets measured · reconnection documented · local cursor stays responsive during
