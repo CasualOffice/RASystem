@@ -49,6 +49,46 @@ blame. Decoupled probes localize the cost.
 - **NO-GO / re-plan** if: Iroh can't achieve acceptable direct/relay success on the target networks →
   reconsider the transport bet.
 
+## 4.1 Recorded results
+
+### WebCodecs loopback (`spike/latency-probe/web`) — run 1
+
+Workload: synthetic 60 fps stream, in-browser `VideoEncoder`→`VideoDecoder` loopback, Annex-B.
+Browser/engine: **TBD (must confirm — see below).**
+
+| Metric | Median | p95 |
+|--------|--------|-----|
+| End-to-end (encode→decode) | **7.1 ms** | **10.5 ms** |
+| Decode (the controller's real cost) | **0.8 ms** | **1.6 ms** |
+| Encode (browser SW stand-in, *not* the host path) | 6.3 ms | 8.2 ms |
+| rVFC / compositor-present penalty (toggle delta) | *pending* | *pending* |
+
+Throughput: 817/817 frames enc+dec, **0 drops**, effective **60.1 fps**, avg chunk **0.9 KB**.
+
+**Assessment (WebCodecs bet → looking GO).** Decode is **sub-millisecond** (0.8 ms median / 1.6 ms
+p95) at a sustained 60 fps with zero drops — the controller's actual render-path cost is a rounding
+error against the 120 ms glass-to-glass budget. The 7.1/10.5 ms "e2e" here **over-counts** vs the
+real controller: it includes a *browser software encode* (6.3 ms) that the product does **not** do —
+the host encodes with hardware VideoToolbox (measured separately via the capture spike), and the
+controller only decodes. So the controller-side budget consumed is ≈ decode (~1 ms) + present
+(rVFC delta, pending), leaving essentially the whole budget for network RTT (iroh probe, pending) +
+host capture/encode.
+
+**Still needed to close this bet:**
+1. **Which browser/engine produced these numbers.** Tauri v2 on macOS renders in **WKWebView
+   (Safari's engine)** — so the go/no-go for the *macOS-lead* controller (ADR-054) hinges on the
+   **Safari** numbers specifically. Chrome numbers are reassuring but don't settle WKWebView. Re-run
+   (or confirm this run) in **Safari**; if WebCodecs is absent/slow there, that's the PIVOT trigger to
+   the native-surface path on macOS (`docs/12 §5`), not a project-wide No-Go.
+2. **The rVFC-toggle delta** — the extra latency of presenting each `VideoFrame` via
+   `requestVideoFrameCallback` vs an immediate `drawImage`. That delta ≈ the compositor-frame penalty
+   the design flagged (D4); record median & p95 with the toggle on vs off.
+
+### iroh transport (`spike/iroh-probe`) — *not yet run*
+
+Blocked on a two-machine (Mac↔Linux) run across the network matrix (§3). Direct/relay success + per-
+frame RTT feed the network half of the glass-to-glass budget and the `VideoTransport` choice.
+
 ## 5. Caveats for the implementer
 - **Iroh 1.x API is young** — `iroh-probe` is written against the documented 1.x surface
   (`EndpointId`, `Endpoint::builder()/connect()/accept()`, `conn_type`); `cargo build` on your pinned
