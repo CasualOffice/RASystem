@@ -3,10 +3,126 @@ syntax = "proto3";
 package casual_ras.v1;
 
 // Wire source of truth for Casual RAS. See docs/04_PROTOCOL_AND_TOKEN_SPEC.md.
-// Codegen (prost + a vendored protoc, so no system protoc is required) is wired in Phase 1.
-// This is a placeholder message set — never hand-edit generated code; edit this file and regenerate.
+//
+// Codegen is pure-Rust/offline (protox + prost-build in crates/ras-protocol/build.rs → OUT_DIR),
+// so NO system protoc is required. NEVER hand-edit generated code — edit this file and regenerate.
+// These types are an INTERNAL codec detail of ras-protocol; the ergonomic public API is the
+// hand-rolled `ras_protocol::ControlMsg` and friends, which the codec layer maps to/from these
+// messages losslessly.
+//
+// Numbering is STABLE and APPEND-ONLY: never renumber or repurpose an existing field or enum
+// value; only add new ones. (Non-Negotiable Invariant: stable wire mappings.)
 
-// Placeholder liveness message. Real bootstrap/session messages land in Phase 1/2.
+// Placeholder liveness message. Kept as-is for compatibility.
 message Ping {
   uint64 nonce = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+// Stable machine-readable error taxonomy. Mirrors ras_protocol::ErrorCode (docs/04 §14).
+// proto3 requires a zero default: ERROR_CODE_UNSPECIFIED is a sentinel that MUST NOT appear on
+// the wire for a well-formed Bye. The codec rejects UNSPECIFIED / unknown values with a typed
+// RasError(InvalidMessage) — it is never silently defaulted.
+enum ErrorCodeProto {
+  ERROR_CODE_UNSPECIFIED         = 0;
+  ERROR_CODE_INVALID_MESSAGE     = 1;
+  ERROR_CODE_UNSUPPORTED_VERSION = 2;
+  ERROR_CODE_IDENTITY_MISMATCH   = 3;
+  ERROR_CODE_SIGNATURE_INVALID   = 4;
+  ERROR_CODE_REQUEST_EXPIRED     = 5;
+  ERROR_CODE_REPLAY_DETECTED     = 6;
+  ERROR_CODE_CONSENT_DENIED      = 7;
+  ERROR_CODE_CAPABILITY_DENIED   = 8;
+  ERROR_CODE_GRANT_INVALID       = 9;
+  ERROR_CODE_LEASE_INVALID       = 10;
+  ERROR_CODE_SESSION_REVOKED     = 11;
+  ERROR_CODE_TRANSPORT_ERROR     = 12;
+  ERROR_CODE_CAPTURE_FAILED      = 13;
+  ERROR_CODE_ENCODER_FAILED      = 14;
+  ERROR_CODE_INPUT_FAILED        = 15;
+  ERROR_CODE_POLICY_CHANGED      = 16;
+  ERROR_CODE_INTERNAL            = 17;
+}
+
+// Why a controller needs a fresh IDR. Mirrors ras_protocol::KeyframeReason.
+// KEYFRAME_REASON_UNSPECIFIED is a proto3-default sentinel; the codec rejects it and unknown
+// values with RasError(InvalidMessage).
+enum KeyframeReasonProto {
+  KEYFRAME_REASON_UNSPECIFIED        = 0;
+  KEYFRAME_REASON_STREAM_START       = 1;
+  KEYFRAME_REASON_UNRECOVERABLE_LOSS = 2;
+  KEYFRAME_REASON_DECODER_RESET      = 3;
+  KEYFRAME_REASON_CONFIG_CHANGED     = 4;
+  KEYFRAME_REASON_PERIODIC_REFRESH   = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Supporting messages
+// ---------------------------------------------------------------------------
+
+// Wire projection of ras_media::StreamConfig (ras_protocol::StreamConfigWire).
+// `color` and `video_transport` are small integer tags (proto has no u8); the codec validates they
+// fit in u8 on decode and rejects out-of-range with RasError(InvalidMessage).
+message StreamConfig {
+  string codec              = 1; // e.g. "avc1.4D401F"
+  uint32 width              = 2;
+  uint32 height             = 3;
+  uint32 fps                = 4;
+  uint32 target_bitrate_bps = 5;
+  uint32 color              = 6; // u8 tag: 0 = BT.709 limited, 1 = BT.709 full
+  uint32 video_transport    = 7; // u8 tag: 0 = per-frame stream, 1 = datagram+FEC
+}
+
+// Canonical keyframe/IDR request (controller → host). Mirrors ras_protocol::KeyframeRequest.
+message KeyframeRequest {
+  uint64              since_frame = 1; // FrameId; last frame the controller holds
+  KeyframeReasonProto reason      = 2;
+}
+
+// Content-free decoder feedback (controller → host). Counters/timing only — never pixels.
+// Mirrors ras_protocol::DecoderFeedback.
+message DecoderFeedback {
+  uint64 last_decoded_frame = 1; // FrameId
+  uint32 frames_dropped     = 2;
+  uint32 decode_latency_us  = 3;
+  // Present ⇔ Rust Option<KeyframeRequest>::Some. proto3 `optional` gives explicit presence, so
+  // None (field absent) and Some(default-valued request) are distinguishable.
+  optional KeyframeRequest keyframe_request = 4;
+}
+
+// Session-open handshake payload.
+message Hello {
+  uint32 protocol_version = 1;
+}
+
+// Opaque access-request / consent bytes. Payload is round-tripped LOSSLESSLY and never interpreted
+// here (Phase-2 slot). Empty in Phase 1.
+message AuthEnvelope {
+  bytes payload = 1;
+}
+
+// Graceful teardown with a stable reason code.
+message Bye {
+  ErrorCodeProto code = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Top-level control-channel message
+// ---------------------------------------------------------------------------
+
+// Reliable control-channel message set. Exactly one variant is set (mirrors the Rust `ControlMsg`
+// enum). A ControlMsg with an unset oneof decodes to a RasError(InvalidMessage) in the codec —
+// there is no valid "empty" control message.
+message ControlMsg {
+  oneof kind {
+    Hello           hello            = 1;
+    StreamConfig    stream_config    = 2;
+    KeyframeRequest keyframe_request = 3;
+    DecoderFeedback feedback         = 4;
+    AuthEnvelope    auth_envelope    = 5;
+    Bye             bye              = 6;
+  }
 }

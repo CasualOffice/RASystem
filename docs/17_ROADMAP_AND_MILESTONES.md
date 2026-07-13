@@ -63,8 +63,9 @@ policy that forbids secrets (Invariant 8); CI matrix (Win 10 22H2 / Win 11 / mac
 - ☑ `INF` `cargo-deny` license gate (deny GPL/LGPL/AGPL/SSPL; allow MIT/Apache/BSD/ISC/Zlib/MPL) —
   wire into CI so a bad dep fails the build (ADR-051).
 - ☑ `INF` CI: fmt + clippy (deny warnings) + test + `cargo-deny` on ubuntu + Win + mac runners.
-- ◐ `CORE` `proto/` skeleton (placeholder committed) — **Prost codegen deferred to Phase 1** (no
-  system `protoc`); generated-code-never-hand-edited policy documented.
+- ☑ `CORE` `proto/casual_ras.proto` + **Prost codegen wired** (Phase 1) — offline via `protox` (no
+  system `protoc`), `ras-protocol::codec` maps `ControlMsg` ⇄ generated wire types with framing + a
+  `MAX_CONTROL_FRAME` DoS guard; generated code never committed/hand-edited. 20 round-trip + adversarial tests.
 - ☑ `CORE` Error taxonomy (`ras-protocol::ErrorCode`) mapping to the stable codes in `docs/04 §14`.
 - ◐ `CORE` `unsafe_code = "deny"` workspace lint in place; secret-free `tracing` setup pending
   (lands with the first real secret type, Phase 2).

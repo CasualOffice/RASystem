@@ -76,8 +76,12 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   - `cargo clippy --all-targets --all-features -- -D warnings`
   - `cargo test --all`
   - `cargo deny check` (license gate: allows MIT/Apache/BSD/ISC/Zlib/MPL; denies GPL/LGPL/AGPL/SSPL)
-- **Deviation on record** (`docs/design/phase-0-design.md §8`): protobuf codegen is deferred to
-  Phase 1 to keep the skeleton offline-buildable without a system `protoc`.
+- **Deviation resolved** (`docs/design/phase-0-design.md §8`): the deferred protobuf codegen is now
+  wired. `crates/ras-protocol/build.rs` compiles `proto/casual_ras.proto` with **`protox`** (pure-Rust,
+  no system `protoc`, no network, no vendored binary) + `prost-build` into `OUT_DIR`; `ras-protocol::codec`
+  maps `ControlMsg` ⇄ the generated wire types (non-breaking — the hand-rolled enum stays the public
+  API) with length-prefixed framing + a `MAX_CONTROL_FRAME` DoS guard. Generated code is never committed
+  or hand-edited.
 
 ---
 

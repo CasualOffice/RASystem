@@ -1,0 +1,654 @@
+//! Protobuf serialization layer for the control channel.
+//!
+//! This module bridges the ergonomic, hand-rolled public API ([`ControlMsg`] and friends in the
+//! crate root) to the generated prost wire types, which stay a private impl detail here (`mod pb`)
+//! and are **never** re-exported. It provides:
+//!
+//! * [`encode`] / [`decode`] — [`ControlMsg`] ⇄ protobuf bytes (no length prefix).
+//! * [`frame`] / [`try_read_frame`] — `u32-BE length | protobuf(ControlMsg)` framing with a
+//!   [`MAX_CONTROL_FRAME`] DoS guard that fires on the length prefix, before allocation.
+//!
+//! Everything here is synchronous (no tokio); async stream I/O lives in `ras-transport-iroh`.
+//!
+//! Security posture: every decode failure is a typed [`RasError`] with a stable [`ErrorCode`] —
+//! no panics, no `unwrap`/`expect` on the decode path. Error `context` is a static, content-free
+//! string; decoded bytes are never embedded in an error or logged (Invariant 8). The
+//! `AuthEnvelope` payload is opaque and round-trips losslessly. `ErrorCode`/`KeyframeReason` wire
+//! numbers are mapped by explicit `match` (never `as i32` on the Rust enum), so the wire numbering
+//! is append-only and cannot drift if the Rust enum is reordered.
+
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use prost::Message;
+
+use crate::{
+    ControlMsg, DecoderFeedback, ErrorCode, KeyframeReason, KeyframeRequest, RasError,
+    StreamConfigWire, MAX_CONTROL_FRAME,
+};
+
+/// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
+///
+/// DO NOT EDIT — produced at build time by `build.rs` (protox + prost-build) into `OUT_DIR`.
+/// Internal to the codec; never re-exported. Edit the `.proto` and rebuild instead.
+mod pb {
+    // Generated code: silence all clippy/rustc lints scoped to this module only (the workspace
+    // runs `-D warnings`). `dead_code` covers the unused `Ping` placeholder message.
+    #![allow(
+        clippy::all,
+        clippy::pedantic,
+        clippy::nursery,
+        missing_docs,
+        dead_code
+    )]
+    include!(concat!(env!("OUT_DIR"), "/casual_ras.v1.rs"));
+}
+
+// ---------------------------------------------------------------------------
+// Enum mappings — explicit, append-only, no numeric cast on the Rust enum.
+// ---------------------------------------------------------------------------
+
+/// Rust [`KeyframeReason`] → wire enum. Total and infallible.
+fn reason_to_pb(reason: KeyframeReason) -> pb::KeyframeReasonProto {
+    match reason {
+        KeyframeReason::StreamStart => pb::KeyframeReasonProto::KeyframeReasonStreamStart,
+        KeyframeReason::UnrecoverableLoss => {
+            pb::KeyframeReasonProto::KeyframeReasonUnrecoverableLoss
+        }
+        KeyframeReason::DecoderReset => pb::KeyframeReasonProto::KeyframeReasonDecoderReset,
+        KeyframeReason::ConfigChanged => pb::KeyframeReasonProto::KeyframeReasonConfigChanged,
+        KeyframeReason::PeriodicRefresh => pb::KeyframeReasonProto::KeyframeReasonPeriodicRefresh,
+    }
+}
+
+/// Wire enum number → Rust [`KeyframeReason`]. Rejects `UNSPECIFIED (0)` and any unknown number
+/// with a typed error — never a silent default.
+fn reason_from_pb(raw: i32) -> Result<KeyframeReason, RasError> {
+    match pb::KeyframeReasonProto::try_from(raw) {
+        Ok(pb::KeyframeReasonProto::KeyframeReasonStreamStart) => Ok(KeyframeReason::StreamStart),
+        Ok(pb::KeyframeReasonProto::KeyframeReasonUnrecoverableLoss) => {
+            Ok(KeyframeReason::UnrecoverableLoss)
+        }
+        Ok(pb::KeyframeReasonProto::KeyframeReasonDecoderReset) => Ok(KeyframeReason::DecoderReset),
+        Ok(pb::KeyframeReasonProto::KeyframeReasonConfigChanged) => {
+            Ok(KeyframeReason::ConfigChanged)
+        }
+        Ok(pb::KeyframeReasonProto::KeyframeReasonPeriodicRefresh) => {
+            Ok(KeyframeReason::PeriodicRefresh)
+        }
+        // KeyframeReasonUnspecified (0) or any unrecognized number.
+        _ => Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "unknown keyframe reason",
+        )),
+    }
+}
+
+/// Rust [`ErrorCode`] → wire enum. Exhaustive over today's variants with **no wildcard**: adding a
+/// new `ErrorCode` variant is a compile error here that forces the author to assign its stable wire
+/// number (append-only numbering).
+fn errorcode_to_pb(code: ErrorCode) -> pb::ErrorCodeProto {
+    match code {
+        ErrorCode::InvalidMessage => pb::ErrorCodeProto::ErrorCodeInvalidMessage,
+        ErrorCode::UnsupportedVersion => pb::ErrorCodeProto::ErrorCodeUnsupportedVersion,
+        ErrorCode::IdentityMismatch => pb::ErrorCodeProto::ErrorCodeIdentityMismatch,
+        ErrorCode::SignatureInvalid => pb::ErrorCodeProto::ErrorCodeSignatureInvalid,
+        ErrorCode::RequestExpired => pb::ErrorCodeProto::ErrorCodeRequestExpired,
+        ErrorCode::ReplayDetected => pb::ErrorCodeProto::ErrorCodeReplayDetected,
+        ErrorCode::ConsentDenied => pb::ErrorCodeProto::ErrorCodeConsentDenied,
+        ErrorCode::CapabilityDenied => pb::ErrorCodeProto::ErrorCodeCapabilityDenied,
+        ErrorCode::GrantInvalid => pb::ErrorCodeProto::ErrorCodeGrantInvalid,
+        ErrorCode::LeaseInvalid => pb::ErrorCodeProto::ErrorCodeLeaseInvalid,
+        ErrorCode::SessionRevoked => pb::ErrorCodeProto::ErrorCodeSessionRevoked,
+        ErrorCode::TransportError => pb::ErrorCodeProto::ErrorCodeTransportError,
+        ErrorCode::CaptureFailed => pb::ErrorCodeProto::ErrorCodeCaptureFailed,
+        ErrorCode::EncoderFailed => pb::ErrorCodeProto::ErrorCodeEncoderFailed,
+        ErrorCode::InputFailed => pb::ErrorCodeProto::ErrorCodeInputFailed,
+        ErrorCode::PolicyChanged => pb::ErrorCodeProto::ErrorCodePolicyChanged,
+        ErrorCode::Internal => pb::ErrorCodeProto::ErrorCodeInternal,
+    }
+}
+
+/// Wire enum number → Rust [`ErrorCode`]. Rejects `UNSPECIFIED (0)` and any unknown number.
+fn errorcode_from_pb(raw: i32) -> Result<ErrorCode, RasError> {
+    match pb::ErrorCodeProto::try_from(raw) {
+        Ok(pb::ErrorCodeProto::ErrorCodeInvalidMessage) => Ok(ErrorCode::InvalidMessage),
+        Ok(pb::ErrorCodeProto::ErrorCodeUnsupportedVersion) => Ok(ErrorCode::UnsupportedVersion),
+        Ok(pb::ErrorCodeProto::ErrorCodeIdentityMismatch) => Ok(ErrorCode::IdentityMismatch),
+        Ok(pb::ErrorCodeProto::ErrorCodeSignatureInvalid) => Ok(ErrorCode::SignatureInvalid),
+        Ok(pb::ErrorCodeProto::ErrorCodeRequestExpired) => Ok(ErrorCode::RequestExpired),
+        Ok(pb::ErrorCodeProto::ErrorCodeReplayDetected) => Ok(ErrorCode::ReplayDetected),
+        Ok(pb::ErrorCodeProto::ErrorCodeConsentDenied) => Ok(ErrorCode::ConsentDenied),
+        Ok(pb::ErrorCodeProto::ErrorCodeCapabilityDenied) => Ok(ErrorCode::CapabilityDenied),
+        Ok(pb::ErrorCodeProto::ErrorCodeGrantInvalid) => Ok(ErrorCode::GrantInvalid),
+        Ok(pb::ErrorCodeProto::ErrorCodeLeaseInvalid) => Ok(ErrorCode::LeaseInvalid),
+        Ok(pb::ErrorCodeProto::ErrorCodeSessionRevoked) => Ok(ErrorCode::SessionRevoked),
+        Ok(pb::ErrorCodeProto::ErrorCodeTransportError) => Ok(ErrorCode::TransportError),
+        Ok(pb::ErrorCodeProto::ErrorCodeCaptureFailed) => Ok(ErrorCode::CaptureFailed),
+        Ok(pb::ErrorCodeProto::ErrorCodeEncoderFailed) => Ok(ErrorCode::EncoderFailed),
+        Ok(pb::ErrorCodeProto::ErrorCodeInputFailed) => Ok(ErrorCode::InputFailed),
+        Ok(pb::ErrorCodeProto::ErrorCodePolicyChanged) => Ok(ErrorCode::PolicyChanged),
+        Ok(pb::ErrorCodeProto::ErrorCodeInternal) => Ok(ErrorCode::Internal),
+        // ErrorCodeUnspecified (0) or any unrecognized number.
+        _ => Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "unknown error code",
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Message mappings.
+// ---------------------------------------------------------------------------
+
+/// Rust [`KeyframeRequest`] → wire. Total.
+fn keyframe_to_pb(k: KeyframeRequest) -> pb::KeyframeRequest {
+    pb::KeyframeRequest {
+        since_frame: k.since_frame,
+        reason: i32::from(reason_to_pb(k.reason)),
+    }
+}
+
+/// Wire → Rust [`KeyframeRequest`]. Validates the reason enum.
+fn keyframe_from_pb(k: pb::KeyframeRequest) -> Result<KeyframeRequest, RasError> {
+    Ok(KeyframeRequest {
+        since_frame: k.since_frame,
+        reason: reason_from_pb(k.reason)?,
+    })
+}
+
+/// Rust [`StreamConfigWire`] → wire. Total; `u8` tags widen to `u32`.
+fn streamconfig_to_pb(s: StreamConfigWire) -> pb::StreamConfig {
+    pb::StreamConfig {
+        codec: s.codec,
+        width: s.width,
+        height: s.height,
+        fps: s.fps,
+        target_bitrate_bps: s.target_bitrate_bps,
+        color: u32::from(s.color),
+        video_transport: u32::from(s.video_transport),
+    }
+}
+
+/// Wire → Rust [`StreamConfigWire`]. Range-checks the `u8` tags; `> u8::MAX` is rejected.
+fn streamconfig_from_pb(s: pb::StreamConfig) -> Result<StreamConfigWire, RasError> {
+    let color = u8::try_from(s.color)
+        .map_err(|_| RasError::fatal(ErrorCode::InvalidMessage, "color tag out of u8 range"))?;
+    let video_transport = u8::try_from(s.video_transport).map_err(|_| {
+        RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "video_transport tag out of u8 range",
+        )
+    })?;
+    Ok(StreamConfigWire {
+        codec: s.codec,
+        width: s.width,
+        height: s.height,
+        fps: s.fps,
+        target_bitrate_bps: s.target_bitrate_bps,
+        color,
+        video_transport,
+    })
+}
+
+/// Rust [`DecoderFeedback`] → wire. Total; the `Option<KeyframeRequest>` maps 1:1.
+fn feedback_to_pb(f: DecoderFeedback) -> pb::DecoderFeedback {
+    pb::DecoderFeedback {
+        last_decoded_frame: f.last_decoded_frame,
+        frames_dropped: f.frames_dropped,
+        decode_latency_us: f.decode_latency_us,
+        keyframe_request: f.keyframe_request.map(keyframe_to_pb),
+    }
+}
+
+/// Wire → Rust [`DecoderFeedback`]. Preserves the `Option` (None ⇔ absent, Some ⇔ present) and
+/// validates the nested keyframe request's reason when present.
+fn feedback_from_pb(f: pb::DecoderFeedback) -> Result<DecoderFeedback, RasError> {
+    let keyframe_request = match f.keyframe_request {
+        Some(k) => Some(keyframe_from_pb(k)?),
+        None => None,
+    };
+    Ok(DecoderFeedback {
+        last_decoded_frame: f.last_decoded_frame,
+        frames_dropped: f.frames_dropped,
+        decode_latency_us: f.decode_latency_us,
+        keyframe_request,
+    })
+}
+
+/// Rust [`ControlMsg`] → wire. Total and infallible (every value has a valid wire form).
+fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
+    use pb::control_msg::Kind;
+    let kind = match msg {
+        ControlMsg::Hello { protocol_version } => Kind::Hello(pb::Hello { protocol_version }),
+        ControlMsg::StreamConfig(s) => Kind::StreamConfig(streamconfig_to_pb(s)),
+        ControlMsg::KeyframeRequest(k) => Kind::KeyframeRequest(keyframe_to_pb(k)),
+        ControlMsg::Feedback(f) => Kind::Feedback(feedback_to_pb(f)),
+        ControlMsg::AuthEnvelope { payload } => Kind::AuthEnvelope(pb::AuthEnvelope { payload }),
+        ControlMsg::Bye { code } => Kind::Bye(pb::Bye {
+            code: i32::from(errorcode_to_pb(code)),
+        }),
+    };
+    pb::ControlMsg { kind: Some(kind) }
+}
+
+/// Wire → Rust [`ControlMsg`]. Partial: an unset oneof or any invalid enum/range is a typed
+/// [`RasError`] with [`ErrorCode::InvalidMessage`].
+fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
+    use pb::control_msg::Kind;
+    match proto.kind {
+        Some(Kind::Hello(h)) => Ok(ControlMsg::Hello {
+            protocol_version: h.protocol_version,
+        }),
+        Some(Kind::StreamConfig(s)) => Ok(ControlMsg::StreamConfig(streamconfig_from_pb(s)?)),
+        Some(Kind::KeyframeRequest(k)) => Ok(ControlMsg::KeyframeRequest(keyframe_from_pb(k)?)),
+        Some(Kind::Feedback(f)) => Ok(ControlMsg::Feedback(feedback_from_pb(f)?)),
+        Some(Kind::AuthEnvelope(a)) => Ok(ControlMsg::AuthEnvelope { payload: a.payload }),
+        Some(Kind::Bye(b)) => Ok(ControlMsg::Bye {
+            code: errorcode_from_pb(b.code)?,
+        }),
+        // No valid empty control message: unset oneof (empty bytes, or a future variant an old
+        // build doesn't recognize) is rejected, never silently defaulted.
+        None => Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "empty control message",
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public codec API — synchronous.
+// ---------------------------------------------------------------------------
+
+/// Serialize one [`ControlMsg`] to protobuf bytes (no length prefix).
+///
+/// Infallible: `prost::Message::encode_to_vec` cannot fail, so there is no `unwrap`/`expect`.
+#[must_use]
+pub fn encode(msg: &ControlMsg) -> Bytes {
+    Bytes::from(control_to_pb(msg.clone()).encode_to_vec())
+}
+
+/// Decode one protobuf [`ControlMsg`] (no length prefix).
+///
+/// Every malformed input — bad protobuf, unset oneof, `UNSPECIFIED`/unknown enum, out-of-range
+/// `u8` tag — returns a typed [`RasError`] with [`ErrorCode::InvalidMessage`]. Never panics; the
+/// error `context` never embeds decoded bytes (Invariant 8).
+pub fn decode(bytes: &[u8]) -> Result<ControlMsg, RasError> {
+    let proto = pb::ControlMsg::decode(bytes)
+        .map_err(|_| RasError::fatal(ErrorCode::InvalidMessage, "control decode failed"))?;
+    control_from_pb(proto)
+}
+
+/// Frame one message: 4-byte big-endian length prefix + protobuf body.
+///
+/// Control messages are structurally tiny (config/feedback), so the body length always fits a
+/// `u32`; the receiver enforces [`MAX_CONTROL_FRAME`] on the way in.
+#[must_use]
+pub fn frame(msg: &ControlMsg) -> Bytes {
+    let body = encode(msg);
+    let mut out = BytesMut::with_capacity(4 + body.len());
+    // Lossless: control frames are KiB-scale, far below u32::MAX. Saturate defensively rather than
+    // wrap, so a pathological body can never encode a truncated length prefix.
+    let len = u32::try_from(body.len()).unwrap_or(u32::MAX);
+    out.put_u32(len);
+    out.put_slice(&body);
+    out.freeze()
+}
+
+/// Try to read one framed message from `buf`, consuming exactly one frame's bytes on success.
+///
+/// Returns:
+/// * `Ok(Some(msg))` — a full frame was present and consumed from `buf`.
+/// * `Ok(None)` — need more bytes (prefix or body incomplete); `buf` is left **untouched**.
+/// * `Err(RasError)` — the length prefix exceeds [`MAX_CONTROL_FRAME`] (DoS guard), or the framed
+///   body is malformed. Both carry [`ErrorCode::InvalidMessage`].
+///
+/// The DoS guard fires on the length prefix **before** waiting for or allocating the body, so a
+/// hostile header claiming gigabytes is rejected immediately.
+pub fn try_read_frame(buf: &mut BytesMut) -> Result<Option<ControlMsg>, RasError> {
+    if buf.len() < 4 {
+        return Ok(None); // not even a length prefix yet
+    }
+    // Peek the length without consuming, so a partial body doesn't lose the prefix.
+    let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if len > MAX_CONTROL_FRAME {
+        // DoS guard: reject BEFORE waiting for / allocating `len` bytes.
+        return Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "control frame too large",
+        ));
+    }
+    if buf.len() < 4 + len {
+        return Ok(None); // full body not yet buffered
+    }
+    buf.advance(4); // consume prefix
+    let body = buf.split_to(len); // consume body
+    decode(&body).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    const ALL_REASONS: [KeyframeReason; 5] = [
+        KeyframeReason::StreamStart,
+        KeyframeReason::UnrecoverableLoss,
+        KeyframeReason::DecoderReset,
+        KeyframeReason::ConfigChanged,
+        KeyframeReason::PeriodicRefresh,
+    ];
+
+    const ALL_CODES: [ErrorCode; 17] = [
+        ErrorCode::InvalidMessage,
+        ErrorCode::UnsupportedVersion,
+        ErrorCode::IdentityMismatch,
+        ErrorCode::SignatureInvalid,
+        ErrorCode::RequestExpired,
+        ErrorCode::ReplayDetected,
+        ErrorCode::ConsentDenied,
+        ErrorCode::CapabilityDenied,
+        ErrorCode::GrantInvalid,
+        ErrorCode::LeaseInvalid,
+        ErrorCode::SessionRevoked,
+        ErrorCode::TransportError,
+        ErrorCode::CaptureFailed,
+        ErrorCode::EncoderFailed,
+        ErrorCode::InputFailed,
+        ErrorCode::PolicyChanged,
+        ErrorCode::Internal,
+    ];
+
+    /// encode → decode is the identity for a message. Requires `ControlMsg: PartialEq` — provided
+    /// by comparing via re-encode where the enum isn't `PartialEq`.
+    fn assert_roundtrip(msg: &ControlMsg) {
+        let decoded = decode(&encode(msg)).expect("roundtrip decode");
+        // ControlMsg isn't PartialEq, so compare the canonical wire bytes both ways.
+        assert_eq!(
+            encode(&decoded).as_ref(),
+            encode(msg).as_ref(),
+            "re-encode mismatch"
+        );
+    }
+
+    #[test]
+    fn roundtrip_hello() {
+        for v in [0u32, 1, u32::MAX] {
+            assert_roundtrip(&ControlMsg::Hello {
+                protocol_version: v,
+            });
+        }
+    }
+
+    #[test]
+    fn roundtrip_stream_config() {
+        for (color, vt) in [(0u8, 0u8), (1, 1), (255, 255)] {
+            let m = ControlMsg::StreamConfig(StreamConfigWire {
+                codec: "avc1.4D401F—ünïcode".to_string(),
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                target_bitrate_bps: 8_000_000,
+                color,
+                video_transport: vt,
+            });
+            assert_roundtrip(&m);
+            // Also verify the decoded value matches field-by-field.
+            let decoded = decode(&encode(&m)).unwrap();
+            match decoded {
+                ControlMsg::StreamConfig(w) => {
+                    assert_eq!(w.color, color);
+                    assert_eq!(w.video_transport, vt);
+                    assert_eq!(w.width, 1920);
+                }
+                _ => panic!("wrong variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_keyframe_request() {
+        for reason in ALL_REASONS {
+            for since in [0u64, 41, u64::MAX] {
+                let m = ControlMsg::KeyframeRequest(KeyframeRequest {
+                    since_frame: since,
+                    reason,
+                });
+                assert_roundtrip(&m);
+                let decoded = decode(&encode(&m)).unwrap();
+                match decoded {
+                    ControlMsg::KeyframeRequest(k) => {
+                        assert_eq!(k.reason, reason);
+                        assert_eq!(k.since_frame, since);
+                    }
+                    _ => panic!("wrong variant"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_feedback_with_and_without_keyframe() {
+        let none = ControlMsg::Feedback(DecoderFeedback {
+            last_decoded_frame: 100,
+            frames_dropped: 2,
+            decode_latency_us: 5000,
+            keyframe_request: None,
+        });
+        assert_roundtrip(&none);
+        match decode(&encode(&none)).unwrap() {
+            ControlMsg::Feedback(f) => assert!(f.keyframe_request.is_none()),
+            _ => panic!("wrong variant"),
+        }
+
+        let some = ControlMsg::Feedback(DecoderFeedback {
+            last_decoded_frame: 200,
+            frames_dropped: 0,
+            decode_latency_us: 3000,
+            keyframe_request: Some(KeyframeRequest {
+                since_frame: 199,
+                reason: KeyframeReason::DecoderReset,
+            }),
+        });
+        assert_roundtrip(&some);
+        match decode(&encode(&some)).unwrap() {
+            ControlMsg::Feedback(f) => {
+                let k = f.keyframe_request.expect("Some survives");
+                assert_eq!(k.reason, KeyframeReason::DecoderReset);
+                assert_eq!(k.since_frame, 199);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_auth_envelope() {
+        for payload in [
+            Bytes::new(),
+            Bytes::from_static(&[0x00]),
+            Bytes::from((0u32..65536).map(|i| (i % 256) as u8).collect::<Vec<u8>>()),
+        ] {
+            let m = ControlMsg::AuthEnvelope {
+                payload: payload.clone(),
+            };
+            assert_roundtrip(&m);
+            // Empty-payload AuthEnvelope must decode back to the AuthEnvelope variant (proto3
+            // oneof discriminant survives a default inner scalar), byte-exact.
+            match decode(&encode(&m)).unwrap() {
+                ControlMsg::AuthEnvelope { payload: got } => assert_eq!(got, payload),
+                _ => panic!("wrong variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_bye_all_error_codes() {
+        let mut seen_tags = std::collections::HashSet::new();
+        for code in ALL_CODES {
+            let m = ControlMsg::Bye { code };
+            assert_roundtrip(&m);
+            match decode(&encode(&m)).unwrap() {
+                ControlMsg::Bye { code: got } => assert_eq!(got, code),
+                _ => panic!("wrong variant"),
+            }
+            // Each code maps to a distinct wire tag (guards accidental renumber/collision).
+            let tag = i32::from(errorcode_to_pb(code));
+            assert!(seen_tags.insert(tag), "duplicate wire tag for {code:?}");
+        }
+        assert_eq!(seen_tags.len(), 17);
+    }
+
+    #[test]
+    fn frame_roundtrip() {
+        let m = ControlMsg::Hello {
+            protocol_version: 7,
+        };
+        let framed = frame(&m);
+        let mut buf = BytesMut::from(framed.as_ref());
+        let got = try_read_frame(&mut buf).expect("ok").expect("some");
+        assert_eq!(encode(&got).as_ref(), encode(&m).as_ref());
+        assert!(buf.is_empty(), "frame fully consumed");
+    }
+
+    #[test]
+    fn frame_then_extra_bytes() {
+        let a = ControlMsg::Hello {
+            protocol_version: 1,
+        };
+        let b = ControlMsg::Bye {
+            code: ErrorCode::SessionRevoked,
+        };
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&frame(&a));
+        buf.extend_from_slice(&frame(&b));
+
+        let first = try_read_frame(&mut buf).expect("ok").expect("some");
+        assert_eq!(encode(&first).as_ref(), encode(&a).as_ref());
+        // The second frame remains buffered.
+        let second = try_read_frame(&mut buf).expect("ok").expect("some");
+        assert_eq!(encode(&second).as_ref(), encode(&b).as_ref());
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn decode_garbage_bytes() {
+        let err = decode(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+    }
+
+    #[test]
+    fn decode_empty_is_unset_oneof() {
+        // Empty bytes decode to a ControlMsg with an unset oneof → rejected.
+        let err = decode(&[]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+        assert_eq!(err.context, "empty control message");
+    }
+
+    #[test]
+    fn decode_unknown_oneof_field() {
+        // A ControlMsg whose only set field is an unknown tag (99). prost drops the unknown field,
+        // leaving an unset oneof → rejected as InvalidMessage.
+        let mut buf = BytesMut::new();
+        // field 99, wire type 0 (varint): tag = (99 << 3) | 0 = 792 => varint [0x98, 0x06]
+        buf.put_u8(0x98);
+        buf.put_u8(0x06);
+        buf.put_u8(0x01); // varint value
+        let err = decode(&buf).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+    }
+
+    #[test]
+    fn decode_unspecified_and_unknown_enum() {
+        // Bye with code = ERROR_CODE_UNSPECIFIED (0) → rejected.
+        let unspecified = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::Bye(pb::Bye { code: 0 })),
+        };
+        let err = decode(&unspecified.encode_to_vec()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+
+        // Bye with an out-of-range code (999) → rejected.
+        let unknown = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::Bye(pb::Bye { code: 999 })),
+        };
+        let err = decode(&unknown.encode_to_vec()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+
+        // KeyframeRequest with reason = 0 (UNSPECIFIED) → rejected.
+        let reason_unspec = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::KeyframeRequest(
+                pb::KeyframeRequest {
+                    since_frame: 1,
+                    reason: 0,
+                },
+            )),
+        };
+        let err = decode(&reason_unspec.encode_to_vec()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+    }
+
+    #[test]
+    fn decode_out_of_range_u8_tag() {
+        let m = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::StreamConfig(pb::StreamConfig {
+                codec: "avc1".to_string(),
+                width: 1,
+                height: 1,
+                fps: 1,
+                target_bitrate_bps: 1,
+                color: 256, // out of u8 range
+                video_transport: 0,
+            })),
+        };
+        let err = decode(&m.encode_to_vec()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+    }
+
+    #[test]
+    fn try_read_frame_oversized_rejected_on_header() {
+        // A length prefix of MAX_CONTROL_FRAME + 1 with NO body present → rejected on the header.
+        let mut buf = BytesMut::new();
+        let oversized = u32::try_from(MAX_CONTROL_FRAME + 1).unwrap();
+        buf.put_u32(oversized);
+        // Intentionally no body bytes.
+        let err = try_read_frame(&mut buf).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+        assert_eq!(err.context, "control frame too large");
+    }
+
+    #[test]
+    fn try_read_frame_partial_leaves_buf_intact() {
+        // < 4 bytes → Ok(None), buf untouched.
+        let mut buf = BytesMut::from(&[0x00, 0x00][..]);
+        let before = buf.len();
+        assert!(try_read_frame(&mut buf).unwrap().is_none());
+        assert_eq!(buf.len(), before);
+
+        // Valid prefix, short body → Ok(None), buf untouched (prefix not lost).
+        let mut buf = BytesMut::new();
+        buf.put_u32(10); // claims 10 bytes
+        buf.put_slice(&[1, 2, 3]); // only 3 present
+        let before = buf.len();
+        assert!(try_read_frame(&mut buf).unwrap().is_none());
+        assert_eq!(buf.len(), before);
+    }
+
+    #[test]
+    fn try_read_frame_truncated_body_consumes_and_errors() {
+        // Full-length prefix, body present but garbage → Err, and the frame is consumed.
+        let body = [0xFFu8, 0xFF, 0xFF, 0xFF];
+        let mut buf = BytesMut::new();
+        buf.put_u32(u32::try_from(body.len()).unwrap());
+        buf.put_slice(&body);
+        let err = try_read_frame(&mut buf).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+        assert!(buf.is_empty(), "malformed frame is consumed");
+    }
+
+    #[test]
+    fn wire_tags_are_stable() {
+        // Regression fence: exact wire numbers must never drift.
+        assert_eq!(i32::from(errorcode_to_pb(ErrorCode::InvalidMessage)), 1);
+        assert_eq!(i32::from(errorcode_to_pb(ErrorCode::SignatureInvalid)), 4);
+        assert_eq!(i32::from(errorcode_to_pb(ErrorCode::Internal)), 17);
+        assert_eq!(i32::from(reason_to_pb(KeyframeReason::StreamStart)), 1);
+        assert_eq!(i32::from(reason_to_pb(KeyframeReason::PeriodicRefresh)), 5);
+    }
+}

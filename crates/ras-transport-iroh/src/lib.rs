@@ -74,8 +74,9 @@ pub struct ConnHealth {
     pub state: LinkState,
 }
 
-/// DoS guard on hostile control input. 1 MiB is ample for config/feedback.
-pub const MAX_CONTROL_FRAME: usize = 1 << 20;
+/// DoS guard on hostile control input. Re-exported from `ras-protocol` (its single home) so the
+/// codec's framing guard and this crate's limit can never drift apart.
+pub use ras_protocol::MAX_CONTROL_FRAME;
 
 /// Reliable, ordered control channel over one bidi QUIC stream (loss-intolerant → never datagrams).
 /// Framed as `u32-BE length | protobuf(ControlMsg)`.

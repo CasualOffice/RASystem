@@ -12,8 +12,16 @@
 
 use bytes::Bytes;
 
+pub mod codec;
+
 /// Current bootstrap/session protocol major version. See `docs/04`.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// DoS guard on hostile control input: the length-prefixed control-frame decoder rejects any frame
+/// whose prefix claims more than this many bytes, **before** allocating or waiting for the body.
+/// 1 MiB is ample for config/feedback frames. Homed here (the wire crate); `ras-transport-iroh`
+/// re-exports it so `ras_transport_iroh::MAX_CONTROL_FRAME` keeps resolving.
+pub const MAX_CONTROL_FRAME: usize = 1 << 20;
 
 /// Monotonic per-stream frame id. Never wraps within a session; a gap implies loss.
 ///
