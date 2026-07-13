@@ -1392,6 +1392,19 @@ unvalidated bets to measured numbers. Carry the **numbers + the go/no-go ADR** i
 the spike code. These stubs stay `todo!()` until the spike decides them — and the table names the
 decision that flips each.
 
+> **Status — the spine is built (spike-independent).** The parts of Phase 1 that do **not** depend on
+> the spike are implemented and verified green (build/clippy/test/deny): the canonical cross-crate
+> types (§2), the pure state machine (§5.1), the DI seams (§5.4), the event model (§5.6), the no-op
+> auth seam (§5.5), and the **host + controller orchestrators** (§5.2/§5.3) — exercised end-to-end by
+> a `SyntheticCaptureBackend`+`SyntheticEncoder` (§3.4) over an in-memory `LoopbackTransport`
+> (`crates/ras-core/src/testkit.rs`). One `#[tokio::test]` drives host→controller streaming, the
+> keyframe-request round-trip, and clean terminal teardown with no iroh / OS / GPU. Reconciliations
+> made during execution: (a) `HostSession` is **generic** over capture/encoder (those traits aren't
+> object-safe — GAT + generic `encode`), `dyn` kept for transport/validator/sink; (b) `GrantValidator`
+> and the other DI seams use `#[async_trait]` for object safety (design §5.5's own signature), so the
+> earlier RPITIT `GrantValidator` was replaced; (c) `ras-core` now depends on `tokio` + `async-trait`
+> (both design-sanctioned, permissive). The table below is what **remains** stubbed behind the traits.
+
 | Stub (left `todo!()`)                                     | Spike bet / target that decides it                                    | Which way the decision flips the stub |
 |----------------------------------------------------------|-----------------------------------------------------------------------|---------------------------------------|
 | `VideoTransport` concrete impl (`PerFrameStream` vs `DatagramFec`) + `VideoFragHeader` FEC shaping | Transport latency overhead < 80 ms beyond RTT; per-frame RTT (`spike/iroh-probe`) | Picks which impl is built first and whether `VideoFragHeader`/FEC ships in P1 at all. `EncodedFrame.data: Bytes` supports both — only the impl behind the trait changes. |

@@ -1,0 +1,746 @@
+//! Host & controller session orchestrators (design §5.2 / §5.3).
+//!
+//! Each owns the session state machine and drives it over the injected [`SessionTransport`]. The
+//! media pump runs on its own task and **never touches the state machine or the control channel** —
+//! it only pushes droppable frames, so a stalled video path can never freeze lifecycle, the control
+//! channel, or `stop` (the load-bearing latency invariant).
+//!
+//! Reconciliation vs the design: `HostSession` is **generic** over the capture/encoder backends
+//! rather than taking `Arc<dyn ..>` — those traits carry a GAT + a generic `encode`, so they are not
+//! object-safe. Monomorphizing them is also the right call for the hot path. Transport, validator,
+//! and sinks stay `dyn` (see [`crate::deps`]). Phase-1 target fps is a constant ([`HOST_TARGET_FPS`])
+//! because `HostSessionConfig` carries no fps field yet.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::sync::mpsc;
+
+use crate::deps::{
+    ControlChannelDyn, DialTarget, FrameSink, GrantValidator, SessionAuthContext, SessionTransport,
+};
+use crate::event::{
+    LifecycleEvent, LifecycleSink, LifecycleStream, SessionId, StopReason, StreamDescriptor,
+};
+use crate::{deps::GrantDecision, transition, CoreError, SessionEvent, SessionState, Transition};
+use ras_media::{
+    CaptureOptions, ColorSpace, MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec,
+    VideoEncoderBackend, VideoTransportKind,
+};
+use ras_protocol::{ControlMsg, ErrorCode, KeyframeReason, StreamConfigWire};
+use ras_transport_iroh::{EndpointAddr, EndpointId, VideoEvent};
+
+/// Phase-1 host capture rate (no fps field on `HostSessionConfig` yet).
+pub const HOST_TARGET_FPS: u32 = 30;
+
+/// Bounded depth of the lifecycle event channel.
+const LIFECYCLE_DEPTH: usize = 32;
+
+/// Process-global session-id source (content-free, monotonic).
+fn next_session_id() -> SessionId {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    SessionId(COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+fn transport_err(context: &'static str) -> CoreError {
+    CoreError::fatal(ErrorCode::TransportError, context)
+}
+
+/// Apply an event to the shared state, returning the new state on a valid transition.
+fn apply(state: &Mutex<SessionState>, event: SessionEvent) -> Option<SessionState> {
+    let mut guard = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match transition(*guard, event) {
+        Transition::To(next) => {
+            *guard = next;
+            Some(next)
+        }
+        Transition::Invalid => None,
+    }
+}
+
+fn config_to_wire(c: &StreamConfig) -> StreamConfigWire {
+    StreamConfigWire {
+        codec: c.codec.webcodecs_string(c.width, c.height),
+        width: c.width,
+        height: c.height,
+        fps: c.fps,
+        target_bitrate_bps: c.target_bitrate_bps,
+        color: match c.color {
+            ColorSpace::Bt709Full => 1,
+            // Bt709Limited and any future variant default to the limited-range tag.
+            _ => 0,
+        },
+        video_transport: match c.video_transport {
+            VideoTransportKind::PerFrameStream => 0,
+            VideoTransportKind::DatagramFec => 1,
+        },
+    }
+}
+
+fn wire_to_config(w: &StreamConfigWire) -> StreamConfig {
+    StreamConfig {
+        codec: VideoCodec::H264AnnexB,
+        width: w.width,
+        height: w.height,
+        fps: w.fps,
+        target_bitrate_bps: w.target_bitrate_bps,
+        color: if w.color == 1 {
+            ColorSpace::Bt709Full
+        } else {
+            ColorSpace::Bt709Limited
+        },
+        video_transport: if w.video_transport == 1 {
+            VideoTransportKind::DatagramFec
+        } else {
+            VideoTransportKind::PerFrameStream
+        },
+    }
+}
+
+// =============================================================================================
+// Host
+// =============================================================================================
+
+/// Host-side session configuration.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct HostSessionConfig {
+    /// Single monitor in Phase 1; explicit so multi-monitor is additive.
+    pub monitor: MonitorId,
+    /// Negotiated ceiling; the encoder is capped to the measured path at runtime.
+    pub max_bitrate_bps: u32,
+    /// Reconnect window before `Suspended → Terminated`.
+    pub reconnect_window: Duration,
+}
+
+impl HostSessionConfig {
+    /// A reasonable single-monitor default.
+    #[must_use]
+    pub fn new(monitor: MonitorId) -> Self {
+        Self {
+            monitor,
+            max_bitrate_bps: 8_000_000,
+            reconnect_window: Duration::from_secs(10),
+        }
+    }
+}
+
+struct HostInner<C, E> {
+    config: HostSessionConfig,
+    transport: Arc<dyn SessionTransport>,
+    validator: Arc<dyn GrantValidator>,
+    backends: Mutex<Option<(C, E)>>,
+    state: Mutex<SessionState>,
+    stop: AtomicBool,
+    keyframe: Arc<AtomicBool>,
+    lifecycle: Mutex<Option<LifecycleSink>>,
+    session_id: SessionId,
+    media: Mutex<Option<std::thread::JoinHandle<()>>>,
+    control_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// Host-side view-only session. Owns capture+encode+transmit on their own thread.
+pub struct HostSession<C, E> {
+    inner: Arc<HostInner<C, E>>,
+}
+
+impl<C, E> HostSession<C, E>
+where
+    C: ScreenCaptureBackend + Send + 'static,
+    E: VideoEncoderBackend + Send + 'static,
+{
+    /// Build from injected backends. No I/O until [`Self::start`]. `validator` is a no-op in Phase 1
+    /// (the seam is present so Phase 2 adds consent without changing this signature).
+    #[must_use]
+    pub fn new(
+        config: HostSessionConfig,
+        transport: Arc<dyn SessionTransport>,
+        capture: C,
+        encoder: E,
+        validator: Arc<dyn GrantValidator>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(HostInner {
+                config,
+                transport,
+                validator,
+                backends: Mutex::new(Some((capture, encoder))),
+                state: Mutex::new(SessionState::Created),
+                stop: AtomicBool::new(false),
+                keyframe: Arc::new(AtomicBool::new(false)),
+                lifecycle: Mutex::new(None),
+                session_id: next_session_id(),
+                media: Mutex::new(None),
+                control_task: Mutex::new(None),
+            }),
+        }
+    }
+
+    /// Current session state.
+    #[must_use]
+    pub fn state(&self) -> SessionState {
+        *self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Accept a controller, negotiate, and start pushing frames. Returns the lifecycle stream. The
+    /// media thread never touches the state machine or the control channel.
+    pub async fn start(&self) -> Result<LifecycleStream, CoreError> {
+        let inner = &self.inner;
+        let (tx, rx) = mpsc::channel(LIFECYCLE_DEPTH);
+        let sink = LifecycleSink(tx);
+        *inner
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink.clone());
+
+        apply(&inner.state, SessionEvent::Start);
+        sink.emit(LifecycleEvent::Connecting);
+
+        // Identity (accept side): the target is unused by the host.
+        let target: DialTarget = EndpointAddr {
+            id: EndpointId([0u8; 32]),
+        };
+        let peer_identity = inner.transport.establish(&target).await?;
+        let mut control = inner.transport.control_channel().await?;
+
+        apply(&inner.state, SessionEvent::ControlUp);
+        sink.emit(LifecycleEvent::SessionReady {
+            session_id: inner.session_id,
+        });
+
+        // Handshake + Phase-1 no-op authorization.
+        control
+            .send(ControlMsg::Hello {
+                protocol_version: 1,
+            })
+            .await?;
+        let ctx = SessionAuthContext {
+            peer_identity,
+            access_request: bytes::Bytes::new(),
+        };
+        match inner.validator.authorize(&ctx).await? {
+            GrantDecision::Authorized => {
+                apply(&inner.state, SessionEvent::Authorized);
+            }
+            GrantDecision::Denied(code) => {
+                apply(&inner.state, SessionEvent::Reject { code });
+                sink.emit(LifecycleEvent::SessionEnded {
+                    reason: StopReason::Error(code),
+                });
+                return Err(CoreError::fatal(code, "authorization denied"));
+            }
+            // Phase-1 no-op never returns these; treat as a denial rather than silently hanging.
+            GrantDecision::NeedConsent | GrantDecision::Challenge(_) => {
+                let code = ErrorCode::ConsentDenied;
+                apply(&inner.state, SessionEvent::Reject { code });
+                return Err(CoreError::fatal(
+                    code,
+                    "interactive consent not supported in phase 1",
+                ));
+            }
+        }
+
+        // Start capture, negotiate the stream config, announce it to the controller.
+        let opts = CaptureOptions {
+            monitor: inner.config.monitor,
+            target_fps: HOST_TARGET_FPS,
+            excluded_window_ids: vec![],
+        };
+        let (mut capture, mut encoder) = inner
+            .backends
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| CoreError::fatal(ErrorCode::Internal, "backends already taken"))?;
+        let config = capture
+            .start(&opts)
+            .map_err(|_| transport_err("capture start failed"))?;
+        encoder
+            .configure(&config)
+            .map_err(|_| transport_err("encoder configure failed"))?;
+
+        control
+            .send(ControlMsg::StreamConfig(config_to_wire(&config)))
+            .await?;
+
+        apply(&inner.state, SessionEvent::StreamConfigured);
+        sink.emit(LifecycleEvent::StreamConfigured {
+            descriptor: StreamDescriptor::from_config(&config),
+        });
+
+        // Video egress + the media pump thread.
+        let video_sink = inner.transport.video_sink().await?;
+        let stop = inner.clone();
+        let keyframe = inner.keyframe.clone();
+        let frame_interval = Duration::from_micros(1_000_000 / u64::from(config.fps.max(1)));
+        let handle = std::thread::Builder::new()
+            .name("ras-host-media".into())
+            .spawn(move || {
+                media_pump(
+                    &mut capture,
+                    &mut encoder,
+                    video_sink.as_ref(),
+                    &stop.stop,
+                    &keyframe,
+                    &opts,
+                    frame_interval,
+                );
+            })
+            .map_err(|_| CoreError::fatal(ErrorCode::Internal, "spawn media thread"))?;
+        *inner
+            .media
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+
+        // Control reader: turns inbound KeyframeRequest into a forced IDR; Bye stops the session.
+        let ctrl_inner = inner.clone();
+        let task = tokio::spawn(async move {
+            host_control_loop(&mut control, &ctrl_inner).await;
+        });
+        *inner
+            .control_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+
+        Ok(rx)
+    }
+
+    /// Cooperative stop. Applies `LocalStop`, tears down, flushes `SessionEnded`. Idempotent.
+    /// Signals-and-returns: does not drain video.
+    pub async fn stop(&self, reason: StopReason) {
+        let inner = &self.inner;
+        if inner.stop.swap(true, Ordering::SeqCst) {
+            return; // already stopped
+        }
+        apply(&inner.state, SessionEvent::LocalStop);
+        if let Some(sink) = inner
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            sink.emit(LifecycleEvent::SessionEnded { reason });
+        }
+        if let Some(t) = inner
+            .control_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            t.abort();
+        }
+        if let Some(h) = inner
+            .media
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = h.join();
+        }
+    }
+}
+
+/// The media pump. Pure loop: pace → (force IDR if requested) → capture → encode → droppable send.
+/// Rebuilds capture on a recoverable error; exits on the stop flag or a fatal error.
+fn media_pump<C, E>(
+    capture: &mut C,
+    encoder: &mut E,
+    sink: &dyn crate::deps::VideoSinkDyn,
+    stop: &AtomicBool,
+    keyframe: &AtomicBool,
+    opts: &CaptureOptions,
+    frame_interval: Duration,
+) where
+    C: ScreenCaptureBackend,
+    E: VideoEncoderBackend,
+{
+    while !stop.load(Ordering::Relaxed) {
+        if keyframe.swap(false, Ordering::Relaxed) {
+            encoder.request_keyframe(KeyframeReason::UnrecoverableLoss);
+        }
+        // The captured frame borrows `capture` (GAT lifetime), so the borrow must end before any
+        // rebuild call. We resolve to a rebuild/stop flag inside the match and act after it.
+        let mut rebuild = false;
+        match capture.next_frame(frame_interval) {
+            Ok(Some(frame)) => match encoder.encode(frame) {
+                Ok(Some(ef)) => {
+                    let _ = sink.send_frame(ef);
+                }
+                Ok(None) => {}
+                Err(e) if e.recoverable => {}
+                Err(_) => break,
+            },
+            Ok(None) => {}
+            // Recoverable capture error (SCK restart / DXGI ACCESS_LOST): rebuild after the borrow.
+            Err(e) if e.recoverable => rebuild = true,
+            Err(_) => break,
+        }
+        if rebuild && capture.start(opts).is_err() {
+            break;
+        }
+        std::thread::sleep(frame_interval);
+    }
+    capture.stop();
+}
+
+async fn host_control_loop<C, E>(
+    control: &mut Box<dyn ControlChannelDyn>,
+    inner: &HostInner<C, E>,
+) {
+    loop {
+        match control.recv().await {
+            Ok(ControlMsg::KeyframeRequest(_)) => {
+                inner.keyframe.store(true, Ordering::Relaxed);
+            }
+            Ok(ControlMsg::Bye { .. }) => {
+                inner.stop.store(true, Ordering::SeqCst);
+                apply(&inner.state, SessionEvent::PeerClosed);
+                if let Some(sink) = inner
+                    .lifecycle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                {
+                    sink.emit(LifecycleEvent::SessionEnded {
+                        reason: StopReason::PeerClosed,
+                    });
+                }
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break, // channel closed
+        }
+    }
+}
+
+// =============================================================================================
+// Controller
+// =============================================================================================
+
+/// Controller-side session configuration.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ControllerSessionConfig {
+    /// How to reach the host. Phase 1: an `EndpointAddr`; Phase 2 replaces this with a validated
+    /// connection ticket (additive, not a rename).
+    pub target: DialTarget,
+    /// Local decode/render buffer target (~10–50 ms; WebCodecs has no jitter buffer).
+    pub target_buffer: Duration,
+}
+
+impl ControllerSessionConfig {
+    /// Dial the given target with a small default buffer.
+    #[must_use]
+    pub fn new(target: DialTarget) -> Self {
+        Self {
+            target,
+            target_buffer: Duration::from_millis(30),
+        }
+    }
+}
+
+/// Command sent from the public API into the single control-owning task (avoids splitting the
+/// bidi channel: one task both sends and receives via `select!`).
+enum ControlCommand {
+    Keyframe(KeyframeReason),
+    Bye,
+}
+
+struct ControllerInner {
+    config: ControllerSessionConfig,
+    transport: Arc<dyn SessionTransport>,
+    state: Mutex<SessionState>,
+    stop: AtomicBool,
+    lifecycle: Mutex<Option<LifecycleSink>>,
+    renderer: Mutex<Option<Arc<dyn FrameSink>>>,
+    stream_config: Mutex<Option<StreamConfig>>,
+    command_tx: Mutex<Option<mpsc::Sender<ControlCommand>>>,
+    session_id: SessionId,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+/// Controller-side view-only session. Owns receive+decode-feed; the renderer attaches separately so
+/// ingest runs before/independently of it (a stalled/absent renderer never blocks ingest).
+pub struct ControllerSession {
+    inner: Arc<ControllerInner>,
+}
+
+impl ControllerSession {
+    /// Build from an injected transport. No I/O until [`Self::connect`].
+    #[must_use]
+    pub fn new(config: ControllerSessionConfig, transport: Arc<dyn SessionTransport>) -> Self {
+        Self {
+            inner: Arc::new(ControllerInner {
+                config,
+                transport,
+                state: Mutex::new(SessionState::Created),
+                stop: AtomicBool::new(false),
+                lifecycle: Mutex::new(None),
+                renderer: Mutex::new(None),
+                stream_config: Mutex::new(None),
+                command_tx: Mutex::new(None),
+                session_id: next_session_id(),
+                tasks: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    /// Current session state.
+    #[must_use]
+    pub fn state(&self) -> SessionState {
+        *self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Dial, handshake control, negotiate the stream. Returns the lifecycle stream. Does not wait
+    /// for a renderer — video ingest starts immediately and drops frames until one attaches.
+    pub async fn connect(&self) -> Result<LifecycleStream, CoreError> {
+        let inner = &self.inner;
+        let (tx, rx) = mpsc::channel(LIFECYCLE_DEPTH);
+        let sink = LifecycleSink(tx);
+        *inner
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink.clone());
+
+        apply(&inner.state, SessionEvent::Start);
+        sink.emit(LifecycleEvent::Connecting);
+
+        let _peer = inner.transport.establish(&inner.config.target).await?;
+        let mut control = inner.transport.control_channel().await?;
+
+        apply(&inner.state, SessionEvent::ControlUp);
+        sink.emit(LifecycleEvent::SessionReady {
+            session_id: inner.session_id,
+        });
+
+        // Handshake: read control until the host announces the stream config.
+        let config = loop {
+            match control.recv().await? {
+                ControlMsg::StreamConfig(wire) => break wire_to_config(&wire),
+                ControlMsg::Bye { code } => {
+                    return Err(CoreError::fatal(code, "peer closed during handshake"));
+                }
+                _ => {} // Hello and others: ignore in Phase 1
+            }
+        };
+        *inner
+            .stream_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config);
+        // If a renderer is already attached, configure it now.
+        if let Some(r) = inner
+            .renderer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            let _ = r.configure(&config);
+        }
+
+        apply(&inner.state, SessionEvent::Authorized);
+        apply(&inner.state, SessionEvent::StreamConfigured);
+        sink.emit(LifecycleEvent::StreamConfigured {
+            descriptor: StreamDescriptor::from_config(&config),
+        });
+
+        // Single task owns the control channel: sends commands + receives peer messages via select.
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        *inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cmd_tx);
+        let ctrl_inner = inner.clone();
+        let ctrl_task =
+            tokio::spawn(
+                async move { controller_control_loop(control, cmd_rx, &ctrl_inner).await },
+            );
+
+        // Video ingest task: pulls frames and pushes to whatever renderer is attached; drops
+        // otherwise. Drops leading non-keyframes so the sink always starts on an IDR.
+        let vid_inner = inner.clone();
+        let vid_task = tokio::spawn(async move { controller_video_loop(&vid_inner).await });
+
+        let mut tasks = inner
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tasks.push(ctrl_task);
+        tasks.push(vid_task);
+
+        Ok(rx)
+    }
+
+    /// Attach/replace the frame sink. Decoupled from `connect` so video can flow (and be dropped)
+    /// before the canvas exists, and re-attach never stalls ingest.
+    pub async fn attach_renderer(&self, renderer: Arc<dyn FrameSink>) -> Result<(), CoreError> {
+        let inner = &self.inner;
+        if let Some(cfg) = *inner
+            .stream_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            renderer.configure(&cfg)?;
+        }
+        *inner
+            .renderer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(renderer);
+        // A freshly configured sink needs an IDR: ask the host.
+        self.request_keyframe(KeyframeReason::DecoderReset).await
+    }
+
+    /// Detach without ending the session; ingest continues and drops frames at the sink boundary.
+    pub async fn detach_renderer(&self) -> Result<(), CoreError> {
+        *self
+            .inner
+            .renderer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        Ok(())
+    }
+
+    /// Ask the host for a fresh IDR (PLI-style) over the reliable control channel. Never blocks
+    /// frames.
+    pub async fn request_keyframe(&self, reason: KeyframeReason) -> Result<(), CoreError> {
+        let tx = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match tx {
+            Some(tx) => tx
+                .send(ControlCommand::Keyframe(reason))
+                .await
+                .map_err(|_| transport_err("control task gone")),
+            None => Err(transport_err("not connected")),
+        }
+    }
+
+    /// Cooperative disconnect. Applies `LocalStop`, closes tasks, emits `SessionEnded`. Returns
+    /// promptly even mid-decode.
+    pub async fn disconnect(&self, reason: StopReason) {
+        let inner = &self.inner;
+        if inner.stop.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        apply(&inner.state, SessionEvent::LocalStop);
+        // Best-effort Bye to the host. Clone senders out from under the guard before awaiting.
+        let tx = inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let _ = tx.send(ControlCommand::Bye).await;
+        }
+        let lifecycle = inner
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(sink) = lifecycle {
+            sink.emit(LifecycleEvent::SessionEnded { reason });
+        }
+        for t in inner
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+        {
+            t.abort();
+        }
+    }
+}
+
+async fn controller_control_loop(
+    mut control: Box<dyn ControlChannelDyn>,
+    mut cmd_rx: mpsc::Receiver<ControlCommand>,
+    inner: &ControllerInner,
+) {
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => match cmd {
+                Some(ControlCommand::Keyframe(reason)) => {
+                    let msg = ControlMsg::KeyframeRequest(ras_protocol::KeyframeRequest {
+                        since_frame: 0,
+                        reason,
+                    });
+                    if control.send(msg).await.is_err() { break; }
+                }
+                Some(ControlCommand::Bye) => {
+                    let _ = control.send(ControlMsg::Bye { code: ErrorCode::SessionRevoked }).await;
+                    break;
+                }
+                None => break,
+            },
+            msg = control.recv() => match msg {
+                Ok(ControlMsg::Bye { code }) => {
+                    inner.stop.store(true, Ordering::SeqCst);
+                    apply(&inner.state, SessionEvent::PeerClosed);
+                    if let Some(sink) = inner.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+                        sink.emit(LifecycleEvent::Disconnected { code });
+                        sink.emit(LifecycleEvent::SessionEnded { reason: StopReason::PeerClosed });
+                    }
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            },
+        }
+    }
+}
+
+async fn controller_video_loop(inner: &ControllerInner) {
+    let mut source = match inner.transport.video_source().await {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut seen_keyframe = false;
+    while !inner.stop.load(Ordering::Relaxed) {
+        match source.next().await {
+            Ok(VideoEvent::Frame(ef)) => {
+                if !seen_keyframe {
+                    if !ef.is_keyframe {
+                        continue; // wait for the first IDR before feeding the sink
+                    }
+                    seen_keyframe = true;
+                }
+                if let Some(r) = inner
+                    .renderer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                {
+                    let _ = r.push(ef);
+                }
+            }
+            Ok(VideoEvent::FrameDropped { .. }) => {
+                // A run of drops → ask for a fresh IDR (never freezes; last-good frame stays).
+                // Clone the sender out from under the std mutex before awaiting (guards are !Send).
+                let tx = inner
+                    .command_tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(tx) = tx {
+                    let _ = tx
+                        .send(ControlCommand::Keyframe(KeyframeReason::UnrecoverableLoss))
+                        .await;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}

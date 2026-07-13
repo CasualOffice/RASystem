@@ -5,9 +5,22 @@
 //! subsystem crates so downstream consumers (and, later, the FFI/SDK layer) have one entry point.
 //!
 //! Phase 1 is **view-only, no-auth**: the session state machine (§[`transition`]) elides the auth
-//! *transition* states but keeps the security-*terminal* states, and the [`GrantValidator`] auth
-//! seam is a no-op ([`AllowAllValidator`], behind the `insecure-no-auth` feature). See
+//! *transition* states but keeps the security-*terminal* states, and the
+//! [`GrantValidator`](deps::GrantValidator) auth seam is a no-op
+//! ([`AllowAllValidator`](deps::AllowAllValidator), behind the `insecure-no-auth` feature). The DI
+//! seams (§5.4), the typed lifecycle events (§5.6), and the host/controller orchestrators
+//! (§5.2/§5.3) live in the [`deps`], [`event`], and [`session`] modules. See
 //! `docs/design/phase-1-design.md`.
+//!
+//! The orchestrators bring in `tokio` (task-owning media/control loops) and `async-trait` (the
+//! object-safe DI seams) — both design-sanctioned (§5.4 spells them out) and permissively licensed.
+
+pub mod deps;
+pub mod event;
+pub mod session;
+
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
 
 pub use ras_audit as audit;
 pub use ras_control as control;
@@ -17,6 +30,16 @@ pub use ras_media as media;
 pub use ras_policy as policy;
 pub use ras_protocol as protocol;
 pub use ras_transport_iroh as transport;
+
+// Ergonomic re-exports so downstream code can reach the Phase-1 surface from the crate root.
+#[cfg(feature = "insecure-no-auth")]
+pub use deps::AllowAllValidator;
+pub use deps::{
+    ControlChannelDyn, FrameSink, GrantDecision, GrantValidator, PushResult, SessionAuthContext,
+    SessionTransport, VideoSinkDyn, VideoSourceDyn,
+};
+pub use event::{LifecycleEvent, LifecycleStream, SessionId, StopReason, StreamDescriptor};
+pub use session::{ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig};
 
 use ras_protocol::{DecoderFeedback, ErrorCode, KeyframeReason};
 use ras_transport_iroh::ConnHealth;
@@ -161,28 +184,8 @@ pub fn transition(state: SessionState, event: SessionEvent) -> Transition {
     Transition::To(next)
 }
 
-/// Typed lifecycle events emitted to the embedding app (Phase-1 subset of `docs/05`).
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum LifecycleEvent {
-    /// Session is connecting.
-    Connecting,
-    /// Session became active; frames may flow.
-    SessionReady,
-    /// Stream (re)configured (projection of `ras_media::StreamConfig`).
-    StreamConfigured(ras_media::StreamConfig),
-    /// Connection quality update.
-    ConnectionQuality(ConnHealth),
-    /// Transport lost; within the reconnect window.
-    Suspended,
-    /// Transport restored.
-    Reconnected,
-    /// Session ended (clean or terminal) with a reason code.
-    SessionEnded {
-        /// Reason.
-        code: ErrorCode,
-    },
-}
+// The rich lifecycle event model lives in `event` (§5.6); the DI seams and the auth seam live in
+// `deps` (§5.4/§5.5); the orchestrators live in `session` (§5.2/§5.3).
 
 // ---------------------------------------------------------------------------------------------
 // Adaptive bitrate (homed here — next to session state + the ConnHealth feed; Q-ABR-HOME)
@@ -207,64 +210,6 @@ pub struct BitrateDecision {
     /// Last-resort resync (FEC in transport is the preferred loss response, since IDR spikes
     /// bitrate).
     pub force_keyframe: Option<KeyframeReason>,
-}
-
-// ---------------------------------------------------------------------------------------------
-// Phase-2 auth seam (no-op in Phase 1). Shaped so filling it in is additive, not breaking.
-// ---------------------------------------------------------------------------------------------
-
-/// The consent/authorization hook. No-op in Phase 1. Invoked after transport identity is
-/// established (`ControlEstablished`) but before `Active`. Multi-step so it can express interactive
-/// local consent.
-///
-/// Uses an explicit `-> impl Future + Send` (RPITIT) rather than `async fn` to avoid the
-/// `async_fn_in_trait` auto-trait-leakage lint on a public trait.
-pub trait GrantValidator: Send + Sync {
-    /// Called once (or iteratively via `Challenge`) per session before it may become `Active`.
-    fn authorize(
-        &self,
-        ctx: &SessionAuthContext,
-    ) -> impl core::future::Future<Output = Result<GrantDecision, CoreError>> + Send;
-}
-
-/// Content-free context handed to the validator. Phase 1 carries the transport-authenticated
-/// identity plus the (empty in Phase 1) opaque access-request bytes. `#[non_exhaustive]` — Phase 2
-/// adds capabilities/nonce additively.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct SessionAuthContext {
-    /// The identity iroh authenticated. Not authorization.
-    pub peer_identity: PeerIdentity,
-    /// Opaque access-request payload from `ControlMsg::AuthEnvelope`. Empty in Phase 1.
-    pub access_request: bytes::Bytes,
-}
-
-/// The validator's verdict.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum GrantDecision {
-    /// Proceed → orchestrator emits `SessionEvent::Authorized`.
-    Authorized,
-    /// Interactive consent pending (Phase 2): hold in `ControlEstablished` until re-driven.
-    NeedConsent,
-    /// Multi-step challenge/response (Phase 2 replay/nonce).
-    Challenge(bytes::Bytes),
-    /// Refused → `SessionEvent::Reject { code }`.
-    Denied(ErrorCode),
-}
-
-/// PHASE-1 ONLY. Returns `Authorized` unconditionally. Gated behind `insecure-no-auth` so it can
-/// never link into an auth build.
-#[cfg(feature = "insecure-no-auth")]
-pub struct AllowAllValidator;
-
-#[cfg(feature = "insecure-no-auth")]
-impl GrantValidator for AllowAllValidator {
-    // Implemented as a plain `async fn` (allowed in a trait impl; satisfies the trait's
-    // `-> impl Future + Send` declaration without tripping `manual_async_fn`).
-    async fn authorize(&self, _ctx: &SessionAuthContext) -> Result<GrantDecision, CoreError> {
-        Ok(GrantDecision::Authorized)
-    }
 }
 
 #[cfg(test)]
@@ -327,5 +272,98 @@ mod tests {
             transition(SessionState::Active, SessionEvent::ControlUp),
             Transition::Invalid
         );
+    }
+}
+
+/// End-to-end spine test: a host (synthetic capture+encode) and a controller wired through the
+/// in-memory loopback transport. Proves the state machine, control handshake, droppable video path,
+/// and keyframe-request plumbing all work together with no iroh / no OS / no GPU.
+#[cfg(test)]
+mod e2e {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::deps::AllowAllValidator;
+    use crate::testkit::{loopback_pair, CountingFrameSink};
+    use crate::{
+        ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig, SessionState,
+        StopReason,
+    };
+    use ras_media::synthetic::{SyntheticCaptureBackend, SyntheticEncoder};
+    use ras_media::MonitorId;
+    use ras_protocol::KeyframeReason;
+    use ras_transport_iroh::{EndpointAddr, EndpointId};
+
+    /// Poll `cond` up to `tries` × 10 ms; returns whether it became true (never wall-clocks the CI).
+    async fn wait_until<F: Fn() -> bool>(cond: F, tries: u32) -> bool {
+        for _ in 0..tries {
+            if cond() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        cond()
+    }
+
+    #[tokio::test]
+    async fn loopback_streams_frames_and_honors_keyframe_requests() {
+        let (host_tp, ctrl_tp) = loopback_pair();
+
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(1280, 720),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let target = EndpointAddr {
+            id: EndpointId([0u8; 32]),
+        };
+        let controller = ControllerSession::new(ControllerSessionConfig::new(target), ctrl_tp);
+
+        // Host accepts and starts pushing; controller dials and negotiates the stream.
+        let _host_events = host.start().await.unwrap();
+        let _ctrl_events = controller.connect().await.unwrap();
+
+        // Both reach Active purely via the state machine (Authorized gate included).
+        assert_eq!(host.state(), SessionState::Active);
+        assert_eq!(controller.state(), SessionState::Active);
+
+        // Attach a renderer; frames should start landing, beginning with a keyframe.
+        let sink = CountingFrameSink::new();
+        controller
+            .attach_renderer(Arc::new(sink.clone()))
+            .await
+            .unwrap();
+
+        assert!(
+            wait_until(|| sink.pushed() >= 5, 300).await,
+            "expected frames to flow, got {}",
+            sink.pushed()
+        );
+        assert!(
+            sink.is_configured(),
+            "renderer must be configured before frames"
+        );
+        assert!(sink.keyframes() >= 1, "the stream must start on a keyframe");
+
+        // A controller-initiated keyframe request must produce another IDR host-side.
+        let kf_before = sink.keyframes();
+        controller
+            .request_keyframe(KeyframeReason::UnrecoverableLoss)
+            .await
+            .unwrap();
+        assert!(
+            wait_until(|| sink.keyframes() > kf_before, 300).await,
+            "keyframe request did not yield a new IDR (before={kf_before}, after={})",
+            sink.keyframes()
+        );
+
+        // Clean teardown → both terminal.
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+        assert_eq!(controller.state(), SessionState::Terminated);
+        assert_eq!(host.state(), SessionState::Terminated);
     }
 }

@@ -7,6 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+# Deterministic, dependency-free capture+encode doubles (design §3.4) for CI and the ras-core
+# loopback harness. Off by default; ras-core enables it as a dev-dependency.
+synthetic = []
+
 [dependencies]
 bytes = "1"
 ras-protocol = { path = "../ras-protocol" }

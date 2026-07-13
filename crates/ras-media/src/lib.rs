@@ -67,12 +67,53 @@ pub enum VideoCodec {
 
 impl VideoCodec {
     /// Derive the fully-qualified WebCodecs codec string (e.g. `"avc1.4D401F"`) from the codec plus
-    /// dimensions/level. This projection lives only at the Tauri/JS boundary.
+    /// the H.264 level implied by the frame dimensions. This projection lives only at the Tauri/JS
+    /// boundary (the wire/in-memory type stays the enum).
+    ///
+    /// Format is `avc1.PPCCLL` — profile_idc, constraint-set flags, level_idc, each two hex digits.
+    /// We emit Main profile (`0x4D`) with constraint byte `0x40` (matches the desktop-encoder
+    /// output), and pick the smallest level whose `MaxFS` (macroblocks/frame, Table A-1 of the
+    /// H.264 spec) covers `ceil(w/16)·ceil(h/16)`. Level, not bitrate/fps, is what the decoder needs
+    /// to size its buffers; dimensions are the load-bearing input.
     #[must_use]
     pub fn webcodecs_string(self, width: u32, height: u32) -> String {
-        let _ = (width, height);
-        todo!("derive avc1.PPCCLL from level implied by dimensions")
+        match self {
+            VideoCodec::H264AnnexB => {
+                let mbs = width.div_ceil(16) as u64 * height.div_ceil(16) as u64;
+                format!("avc1.4D40{:02X}", h264_level_idc_for_mbs(mbs))
+            }
+        }
     }
+}
+
+/// Smallest H.264 `level_idc` whose `MaxFS` (frame size in macroblocks) covers `mbs`. Frame-size
+/// bound only (Phase 1 is single-monitor, moderate fps); the DPB/bitrate bounds of higher levels are
+/// not the binding constraint here. Saturates at 6.2 (`0x3E`) for anything larger.
+#[must_use]
+const fn h264_level_idc_for_mbs(mbs: u64) -> u8 {
+    // (level_idc, MaxFS) from Table A-1, ascending. level_idc = round(level * 10).
+    const LEVELS: [(u8, u64); 12] = [
+        (0x0A, 99),     // 1.0
+        (0x14, 396),    // 2.0
+        (0x15, 792),    // 2.1
+        (0x16, 1620),   // 2.2 / 3.0 share 1620; 0x1E chosen below
+        (0x1E, 1620),   // 3.0
+        (0x1F, 3600),   // 3.1
+        (0x20, 5120),   // 3.2
+        (0x28, 8192),   // 4.0 / 4.1
+        (0x2A, 8704),   // 4.2
+        (0x32, 22080),  // 5.0
+        (0x33, 36864),  // 5.1 / 5.2
+        (0x3E, 139264), // 6.0+ (saturating)
+    ];
+    let mut i = 0;
+    while i < LEVELS.len() {
+        if mbs <= LEVELS[i].1 {
+            return LEVELS[i].0;
+        }
+        i += 1;
+    }
+    0x3E
 }
 
 /// The one color-space enum. Limited-range BT.709 is the desktop-encoder default.
@@ -202,9 +243,31 @@ pub trait DecoderBackend: Send {
     fn reset(&mut self);
 }
 
+#[cfg(feature = "synthetic")]
+pub mod synthetic;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webcodecs_string_matches_level_by_dimensions() {
+        // 720p → 3600 MBs → level 3.1 (0x1F): the canonical "avc1.4D401F".
+        assert_eq!(
+            VideoCodec::H264AnnexB.webcodecs_string(1280, 720),
+            "avc1.4D401F"
+        );
+        // 1080p → 8160 MBs → level 4.0 (0x28).
+        assert_eq!(
+            VideoCodec::H264AnnexB.webcodecs_string(1920, 1080),
+            "avc1.4D4028"
+        );
+        // 4K → 32400 MBs → level 5.1 (0x33).
+        assert_eq!(
+            VideoCodec::H264AnnexB.webcodecs_string(3840, 2160),
+            "avc1.4D4033"
+        );
+    }
 
     fn sample_config() -> StreamConfig {
         StreamConfig {

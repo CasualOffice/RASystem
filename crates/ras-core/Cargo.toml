@@ -13,9 +13,14 @@ authors.workspace = true
 # the active phase — remove from `default` when the real GrantValidator lands.
 default = ["insecure-no-auth"]
 insecure-no-auth = []
+# In-memory paired transport + counting frame sink for exercising the orchestrators with no iroh /
+# no OS (design §5.4 "synthetic in-memory impl in tests"). Always available to ras-core's own tests.
+testkit = []
 
 [dependencies]
 bytes = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 ras-protocol = { path = "../ras-protocol" }
 ras-identity = { path = "../ras-identity" }
 ras-grant = { path = "../ras-grant" }
@@ -24,6 +29,10 @@ ras-control = { path = "../ras-control" }
 ras-audit = { path = "../ras-audit" }
 ras-media = { path = "../ras-media" }
 ras-transport-iroh = { path = "../ras-transport-iroh" }
+
+[dev-dependencies]
+# Tests build the synthetic capture/encode doubles and drive the loopback transport.
+ras-media = { path = "../ras-media", features = ["synthetic"] }
 
 [lints]
 workspace = true

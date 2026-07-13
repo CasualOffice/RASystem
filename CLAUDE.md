@@ -47,12 +47,22 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
 ## 3. Current status
 
 - **Phase 0 complete — Milestone M0 reached.** The design doc set is done and the Cargo workspace
-  skeleton builds clean. Next up: **Phase S** (risk-validation spike) per `docs/17`.
-- **What exists:** dependency-free crate skeletons under `crates/` (`ras-protocol` with the error
-  taxonomy, `ras-policy` with capability-intersection + invariant tests, `ras-core` wiring the
-  graph, and stubs for identity/grant/control/audit/media/transport-iroh); `deny.toml` license gate;
-  `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder. The Tauri host/controller apps
-  and real subsystem logic land from Phase 1 on.
+  skeleton builds clean. **Phase 1 is in progress:** the design gate (`docs/design/phase-1-design.md`)
+  is written and the **spike-independent orchestration spine is implemented and green.** Still open:
+  **Phase S** (risk-validation spike, blocked on the developer's Mac + a two-machine network) whose
+  go/no-go gates the concrete iroh transport + platform capture backends.
+- **What exists:**
+  - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
+    `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.
+  - Phase 1 spine (verified `cargo test`, no iroh/OS/GPU): canonical cross-crate types + error
+    taxonomy (`ras-protocol`/`ras-media`), the pure session state machine, DI seams (`ras-core::deps`),
+    typed lifecycle events (`ras-core::event`), the no-op auth seam (`AllowAllValidator` behind
+    `insecure-no-auth`), and the **host + controller orchestrators** (`ras-core::session`). Exercised
+    end-to-end by a synthetic capture/encode double (`ras-media::synthetic`) over an in-memory
+    loopback transport (`ras-core::testkit`) in a `#[tokio::test]` (streaming + keyframe round-trip +
+    teardown). `ras-core` now depends on `tokio` + `async-trait` (design-sanctioned, permissive).
+  - Still stubbed behind traits (`todo!()`): the concrete iroh transport, ScreenCaptureKit/VideoToolbox
+    (and the Windows DXGI/MF port), and the Tauri host/controller apps — they land as the spike clears.
 - **Build/verify commands** (all green as of M0):
   - `cargo build --workspace`
   - `cargo fmt --all -- --check`
