@@ -11,19 +11,24 @@
 //! and sinks stay `dyn` (see [`crate::deps`]). Phase-1 target fps is a constant ([`HOST_TARGET_FPS`])
 //! because `HostSessionConfig` carries no fps field yet.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use crate::abr::LatencyFirstAbr;
 use crate::deps::{
     ControlChannelDyn, DialTarget, FrameSink, GrantValidator, SessionAuthContext, SessionTransport,
 };
 use crate::event::{
-    LifecycleEvent, LifecycleSink, LifecycleStream, SessionId, StopReason, StreamDescriptor,
+    LifecycleEvent, LifecycleSink, LifecycleStream, QualitySample, SessionId, StopReason,
+    StreamDescriptor,
 };
-use crate::{deps::GrantDecision, transition, CoreError, SessionEvent, SessionState, Transition};
+use crate::{
+    deps::GrantDecision, transition, AdaptiveBitrateController, CoreError, SessionEvent,
+    SessionState, Transition,
+};
 use ras_media::{
     CaptureOptions, ColorSpace, MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec,
     VideoEncoderBackend, VideoTransportKind,
@@ -36,6 +41,11 @@ pub const HOST_TARGET_FPS: u32 = 30;
 
 /// Bounded depth of the lifecycle event channel.
 const LIFECYCLE_DEPTH: usize = 32;
+
+/// How often the host samples connection health → runs ABR → emits a `ConnectionQuality` event.
+/// Fast enough for a responsive quality badge and RTT-scale bitrate reactions, cheap enough to be
+/// off the frame path entirely.
+const STATS_TICK: Duration = Duration::from_millis(250);
 
 /// Process-global session-id source (content-free, monotonic).
 fn next_session_id() -> SessionId {
@@ -134,12 +144,17 @@ struct HostInner<C, E> {
     validator: Arc<dyn GrantValidator>,
     backends: Mutex<Option<(C, E)>>,
     state: Mutex<SessionState>,
-    stop: AtomicBool,
+    stop: Arc<AtomicBool>,
     keyframe: Arc<AtomicBool>,
+    /// ABR target the media thread applies via `set_bitrate` when it changes (lock-free hot path).
+    target_bitrate: Arc<AtomicU32>,
+    /// Frames actually handed to the transport since the last stats tick (delivered-fps signal).
+    frames_sent: Arc<AtomicU32>,
     lifecycle: Mutex<Option<LifecycleSink>>,
     session_id: SessionId,
     media: Mutex<Option<std::thread::JoinHandle<()>>>,
     control_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    stats_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Host-side view-only session. Owns capture+encode+transmit on their own thread.
@@ -169,12 +184,15 @@ where
                 validator,
                 backends: Mutex::new(Some((capture, encoder))),
                 state: Mutex::new(SessionState::Created),
-                stop: AtomicBool::new(false),
+                stop: Arc::new(AtomicBool::new(false)),
                 keyframe: Arc::new(AtomicBool::new(false)),
+                target_bitrate: Arc::new(AtomicU32::new(0)),
+                frames_sent: Arc::new(AtomicU32::new(0)),
                 lifecycle: Mutex::new(None),
                 session_id: next_session_id(),
                 media: Mutex::new(None),
                 control_task: Mutex::new(None),
+                stats_task: Mutex::new(None),
             }),
         }
     }
@@ -187,6 +205,13 @@ where
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The ABR's current target bitrate (bits/sec); `0` until the stream is negotiated. Advisory —
+    /// exposed for status UIs and tests.
+    #[must_use]
+    pub fn current_bitrate_bps(&self) -> u32 {
+        self.inner.target_bitrate.load(Ordering::Relaxed)
     }
 
     /// Accept a controller, negotiate, and start pushing frames. Returns the lifecycle stream. The
@@ -275,23 +300,26 @@ where
             descriptor: StreamDescriptor::from_config(&config),
         });
 
+        // Seed the ABR target with the negotiated bitrate before the media thread starts.
+        inner
+            .target_bitrate
+            .store(config.target_bitrate_bps, Ordering::Relaxed);
+
         // Video egress + the media pump thread.
         let video_sink = inner.transport.video_sink().await?;
-        let stop = inner.clone();
-        let keyframe = inner.keyframe.clone();
         let frame_interval = Duration::from_micros(1_000_000 / u64::from(config.fps.max(1)));
+        let signals = MediaSignals {
+            stop: inner.stop.clone(),
+            keyframe: inner.keyframe.clone(),
+            target_bitrate: inner.target_bitrate.clone(),
+            frames_sent: inner.frames_sent.clone(),
+            opts,
+            frame_interval,
+        };
         let handle = std::thread::Builder::new()
             .name("ras-host-media".into())
             .spawn(move || {
-                media_pump(
-                    &mut capture,
-                    &mut encoder,
-                    video_sink.as_ref(),
-                    &stop.stop,
-                    &keyframe,
-                    &opts,
-                    frame_interval,
-                );
+                media_pump(&mut capture, &mut encoder, video_sink.as_ref(), &signals);
             })
             .map_err(|_| CoreError::fatal(ErrorCode::Internal, "spawn media thread"))?;
         *inner
@@ -308,6 +336,17 @@ where
             .control_task
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+
+        // Stats/ABR tick: samples health → runs ABR → publishes the new bitrate + emits
+        // ConnectionQuality. Off the frame path, so a stalled video never delays a quality update.
+        let stats_inner = inner.clone();
+        let stats = tokio::spawn(async move {
+            host_stats_loop(&stats_inner, config).await;
+        });
+        *inner
+            .stats_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(stats);
 
         Ok(rx)
     }
@@ -328,13 +367,14 @@ where
         {
             sink.emit(LifecycleEvent::SessionEnded { reason });
         }
-        if let Some(t) = inner
-            .control_task
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            t.abort();
+        for slot in [&inner.control_task, &inner.stats_task] {
+            if let Some(t) = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                t.abort();
+            }
         }
         if let Some(h) = inner
             .media
@@ -347,31 +387,46 @@ where
     }
 }
 
-/// The media pump. Pure loop: pace → (force IDR if requested) → capture → encode → droppable send.
-/// Rebuilds capture on a recoverable error; exits on the stop flag or a fatal error.
+/// Lock-free signals shared between the async orchestrator and the blocking media thread.
+struct MediaSignals {
+    stop: Arc<AtomicBool>,
+    keyframe: Arc<AtomicBool>,
+    target_bitrate: Arc<AtomicU32>,
+    frames_sent: Arc<AtomicU32>,
+    opts: CaptureOptions,
+    frame_interval: Duration,
+}
+
+/// The media pump. Pure loop: apply ABR bitrate → (force IDR if requested) → capture → encode →
+/// droppable send. Rebuilds capture on a recoverable error; exits on the stop flag or a fatal error.
 fn media_pump<C, E>(
     capture: &mut C,
     encoder: &mut E,
     sink: &dyn crate::deps::VideoSinkDyn,
-    stop: &AtomicBool,
-    keyframe: &AtomicBool,
-    opts: &CaptureOptions,
-    frame_interval: Duration,
+    sig: &MediaSignals,
 ) where
     C: ScreenCaptureBackend,
     E: VideoEncoderBackend,
 {
-    while !stop.load(Ordering::Relaxed) {
-        if keyframe.swap(false, Ordering::Relaxed) {
+    let mut applied_bitrate = sig.target_bitrate.load(Ordering::Relaxed);
+    while !sig.stop.load(Ordering::Relaxed) {
+        // Retarget CBR mid-stream when ABR moved the target — keyframe-free (latency-first).
+        let want = sig.target_bitrate.load(Ordering::Relaxed);
+        if want != 0 && want != applied_bitrate && encoder.set_bitrate(want).is_ok() {
+            applied_bitrate = want;
+        }
+        if sig.keyframe.swap(false, Ordering::Relaxed) {
             encoder.request_keyframe(KeyframeReason::UnrecoverableLoss);
         }
         // The captured frame borrows `capture` (GAT lifetime), so the borrow must end before any
         // rebuild call. We resolve to a rebuild/stop flag inside the match and act after it.
         let mut rebuild = false;
-        match capture.next_frame(frame_interval) {
+        match capture.next_frame(sig.frame_interval) {
             Ok(Some(frame)) => match encoder.encode(frame) {
                 Ok(Some(ef)) => {
-                    let _ = sink.send_frame(ef);
+                    if sink.send_frame(ef) == ras_transport_iroh::SendOutcome::Sent {
+                        sig.frames_sent.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 Ok(None) => {}
                 Err(e) if e.recoverable => {}
@@ -382,12 +437,51 @@ fn media_pump<C, E>(
             Err(e) if e.recoverable => rebuild = true,
             Err(_) => break,
         }
-        if rebuild && capture.start(opts).is_err() {
+        if rebuild && capture.start(&sig.opts).is_err() {
             break;
         }
-        std::thread::sleep(frame_interval);
+        std::thread::sleep(sig.frame_interval);
     }
     capture.stop();
+}
+
+/// The stats/ABR tick. Runs off the frame path: sample health → ABR → publish bitrate + optional
+/// forced keyframe → emit `ConnectionQuality`. Exits on the stop flag.
+async fn host_stats_loop<C, E>(inner: &HostInner<C, E>, config: StreamConfig) {
+    let floor = (inner.config.max_bitrate_bps / 16).max(300_000);
+    let mut abr = LatencyFirstAbr::new(
+        floor,
+        inner.config.max_bitrate_bps,
+        config.target_bitrate_bps,
+    );
+    let tick_ms = STATS_TICK.as_millis() as u32;
+    while !inner.stop.load(Ordering::Relaxed) {
+        tokio::time::sleep(STATS_TICK).await;
+        if inner.stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let health = inner.transport.health();
+        let decision = abr.on_tick(&health, None);
+        inner
+            .target_bitrate
+            .store(decision.target_bitrate_bps, Ordering::Relaxed);
+        if decision.force_keyframe.is_some() {
+            inner.keyframe.store(true, Ordering::Relaxed);
+        }
+        // delivered fps over the tick window (frames_sent is reset each tick).
+        let sent = inner.frames_sent.swap(0, Ordering::Relaxed);
+        let delivered_fps = u16::try_from(sent * 1000 / tick_ms.max(1)).unwrap_or(u16::MAX);
+        let lifecycle = inner
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(sink) = lifecycle {
+            sink.emit(LifecycleEvent::ConnectionQuality {
+                sample: QualitySample::from_health(&health, delivered_fps),
+            });
+        }
+    }
 }
 
 async fn host_control_loop<C, E>(

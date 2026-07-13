@@ -1404,6 +1404,14 @@ decision that flips each.
 > and the other DI seams use `#[async_trait]` for object safety (design §5.5's own signature), so the
 > earlier RPITIT `GrantValidator` was replaced; (c) `ras-core` now depends on `tokio` + `async-trait`
 > (both design-sanctioned, permissive). The table below is what **remains** stubbed behind the traits.
+>
+> **Also landed (spike-independent):** a concrete `LatencyFirstAbr` (`ras-core::abr`) wired into the
+> host as a 250 ms stats/ABR tick — samples `transport.health()`, retargets CBR via the media
+> thread's `set_bitrate` (keyframe-free), and emits `LifecycleEvent::ConnectionQuality`; and the
+> controller frame-Channel codec (`ras-core::frame_channel`) — the exact 24-byte LE header contract
+> of §6.1 (`FRAME_MAGIC`/`FRAME_HEADER_LEN` shared with the future TS `decoder.worker.ts`), with
+> `u64` ids kept BigInt-safe. The ABR *control law* stays tunable by the spike numbers (table below);
+> the trait/DTO shapes are fixed.
 
 | Stub (left `todo!()`)                                     | Spike bet / target that decides it                                    | Which way the decision flips the stub |
 |----------------------------------------------------------|-----------------------------------------------------------------------|---------------------------------------|

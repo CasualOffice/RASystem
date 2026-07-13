@@ -15,8 +15,10 @@
 //! The orchestrators bring in `tokio` (task-owning media/control loops) and `async-trait` (the
 //! object-safe DI seams) — both design-sanctioned (§5.4 spells them out) and permissively licensed.
 
+pub mod abr;
 pub mod deps;
 pub mod event;
+pub mod frame_channel;
 pub mod session;
 
 #[cfg(any(test, feature = "testkit"))]
@@ -32,13 +34,19 @@ pub use ras_protocol as protocol;
 pub use ras_transport_iroh as transport;
 
 // Ergonomic re-exports so downstream code can reach the Phase-1 surface from the crate root.
+pub use abr::LatencyFirstAbr;
 #[cfg(feature = "insecure-no-auth")]
 pub use deps::AllowAllValidator;
 pub use deps::{
     ControlChannelDyn, FrameSink, GrantDecision, GrantValidator, PushResult, SessionAuthContext,
     SessionTransport, VideoSinkDyn, VideoSourceDyn,
 };
-pub use event::{LifecycleEvent, LifecycleStream, SessionId, StopReason, StreamDescriptor};
+pub use event::{
+    LifecycleEvent, LifecycleStream, QualitySample, SessionId, StopReason, StreamDescriptor,
+};
+pub use frame_channel::{
+    encode_frame_blob, parse_header, FrameHeader, FRAME_HEADER_LEN, FRAME_MAGIC,
+};
 pub use session::{ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig};
 
 use ras_protocol::{DecoderFeedback, ErrorCode, KeyframeReason};
@@ -287,8 +295,8 @@ mod e2e {
     use crate::deps::AllowAllValidator;
     use crate::testkit::{loopback_pair, CountingFrameSink};
     use crate::{
-        ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig, SessionState,
-        StopReason,
+        ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig, LifecycleEvent,
+        SessionState, StopReason,
     };
     use ras_media::synthetic::{SyntheticCaptureBackend, SyntheticEncoder};
     use ras_media::MonitorId;
@@ -323,7 +331,7 @@ mod e2e {
         let controller = ControllerSession::new(ControllerSessionConfig::new(target), ctrl_tp);
 
         // Host accepts and starts pushing; controller dials and negotiates the stream.
-        let _host_events = host.start().await.unwrap();
+        let mut host_events = host.start().await.unwrap();
         let _ctrl_events = controller.connect().await.unwrap();
 
         // Both reach Active purely via the state machine (Authorized gate included).
@@ -359,6 +367,21 @@ mod e2e {
             "keyframe request did not yield a new IDR (before={kf_before}, after={})",
             sink.keyframes()
         );
+
+        // The stats/ABR tick must raise the bitrate toward the ceiling (loopback health is a clean
+        // 50 Mbps / 0 loss path) and emit a content-free ConnectionQuality event.
+        assert!(
+            wait_until(|| host.current_bitrate_bps() > 6_000_000, 400).await,
+            "ABR should raise the bitrate toward the ceiling, got {}",
+            host.current_bitrate_bps()
+        );
+        let mut saw_quality = false;
+        while let Ok(ev) = host_events.try_recv() {
+            if matches!(ev, LifecycleEvent::ConnectionQuality { .. }) {
+                saw_quality = true;
+            }
+        }
+        assert!(saw_quality, "host should emit ConnectionQuality events");
 
         // Clean teardown → both terminal.
         controller.disconnect(StopReason::UserRequested).await;
