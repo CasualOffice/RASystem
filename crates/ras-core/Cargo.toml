@@ -7,7 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+# PHASE-1 ONLY. Enables the no-op AllowAllValidator (view-only, no auth). Mutually exclusive with
+# any future auth feature; a Phase-2 build must NOT enable this. Default-on only while Phase 1 is
+# the active phase — remove from `default` when the real GrantValidator lands.
+default = ["insecure-no-auth"]
+insecure-no-auth = []
+
 [dependencies]
+bytes = "1"
 ras-protocol = { path = "../ras-protocol" }
 ras-identity = { path = "../ras-identity" }
 ras-grant = { path = "../ras-grant" }

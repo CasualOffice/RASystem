@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "bytes"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
 name = "ras-audit"
 version = "0.0.0"
 
@@ -14,6 +20,7 @@ version = "0.0.0"
 name = "ras-core"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "ras-audit",
  "ras-control",
  "ras-grant",
@@ -35,6 +42,10 @@ version = "0.0.0"
 [[package]]
 name = "ras-media"
 version = "0.0.0"
+dependencies = [
+ "bytes",
+ "ras-protocol",
+]
 
 [[package]]
 name = "ras-policy"
@@ -43,7 +54,14 @@ version = "0.0.0"
 [[package]]
 name = "ras-protocol"
 version = "0.0.0"
+dependencies = [
+ "bytes",
+]
 
 [[package]]
 name = "ras-transport-iroh"
 version = "0.0.0"
+dependencies = [
+ "ras-media",
+ "ras-protocol",
+]

@@ -1,10 +1,32 @@
 //! Wire protocol types, framing, versioning, and the stable error taxonomy for Casual RAS.
 //!
 //! The protobuf message set (`proto/casual_ras.proto`) is the wire source of truth; codegen is
-//! wired in a later phase. This crate currently hosts the protocol version and [`ErrorCode`].
+//! wired in a later phase. This crate is the single home for: [`ErrorCode`] + [`RasError`] (the
+//! shared error taxonomy every crate aliases), the monotonic id aliases ([`FrameId`],
+//! [`CaptureTimestampUs`]), and the control-plane message set ([`ControlMsg`] and friends).
+//!
+//! Placement note (Phase-1 design, `docs/design/phase-1-design.md` §2): the `u64` id aliases live
+//! here — not in `ras-media` as the raw design drafted — because [`ControlMsg`] references
+//! [`FrameId`] and `ras-media` already depends on this crate; homing them here breaks the cycle.
+//! `ras-media` re-exports them so downstream code can still say `ras_media::FrameId`.
+
+use bytes::Bytes;
 
 /// Current bootstrap/session protocol major version. See `docs/04`.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Monotonic per-stream frame id. Never wraps within a session; a gap implies loss.
+///
+/// Crosses to JS as a BigInt (`DataView.getBigUint64`), never a JS `number` (would corrupt past
+/// 2^53 and trigger spurious keyframe requests).
+pub type FrameId = u64;
+
+/// Capture time in microseconds on the host **monotonic** clock, sampled at capture.
+///
+/// Not wall-clock; used only for pacing/ordering/jitter, never for authorization. Because B-frames
+/// are off, capture order == decode order == presentation order, so this doubles as the WebCodecs
+/// `EncodedVideoChunk.timestamp`.
+pub type CaptureTimestampUs = u64;
 
 /// Stable, machine-readable error codes exposed across SDK and wire boundaries.
 ///
@@ -81,6 +103,143 @@ impl core::fmt::Display for ErrorCode {
     }
 }
 
+/// The one canonical error struct; every crate aliases it (`MediaError`, `TransportError`,
+/// `CoreError`, `SessionError`) so `?` needs no `From` impls.
+///
+/// `recoverable` is load-bearing: it drives the capture-rebuild loop (SCK restart / DXGI
+/// `ACCESS_LOST`) and the reconnect window. `context` is operator-facing and **content-free** —
+/// never pixels, paths, tokens, or typed text (Invariant 8).
+#[derive(Debug, Clone)]
+pub struct RasError {
+    /// Stable machine code from the shared taxonomy.
+    pub code: ErrorCode,
+    /// `true` ⇒ rebuild-and-continue; `false` ⇒ fatal stop. Never contradicts `code`.
+    pub recoverable: bool,
+    /// Operator-facing, content-free detail.
+    pub context: &'static str,
+}
+
+impl RasError {
+    /// Construct a recoverable error.
+    #[must_use]
+    pub const fn recoverable(code: ErrorCode, context: &'static str) -> Self {
+        Self {
+            code,
+            recoverable: true,
+            context,
+        }
+    }
+
+    /// Construct a fatal error.
+    #[must_use]
+    pub const fn fatal(code: ErrorCode, context: &'static str) -> Self {
+        Self {
+            code,
+            recoverable: false,
+            context,
+        }
+    }
+}
+
+impl core::fmt::Display for RasError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{} ({})", self.code, self.context)
+    }
+}
+
+impl std::error::Error for RasError {}
+
+/// Reliable control-channel message set (a protobuf `oneof` once codegen lands).
+///
+/// Transport-scoped only — no grant/lease payloads live here; those ride as opaque bytes in
+/// [`ControlMsg::AuthEnvelope`]. Feedback is content-free (counters/timing, never pixels).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ControlMsg {
+    /// Session-open handshake: agreed protocol version + feature flags.
+    Hello {
+        /// Negotiated protocol version.
+        protocol_version: u32,
+    },
+    /// Host → controller: active stream parameters (wire projection of `ras_media::StreamConfig`).
+    StreamConfig(StreamConfigWire),
+    /// Controller → host: request a fresh IDR (PLI-style). Canonical keyframe request.
+    KeyframeRequest(KeyframeRequest),
+    /// Controller → host: periodic content-free decoder feedback feeding ABR + resync.
+    Feedback(DecoderFeedback),
+    /// Phase-2 slot: opaque access-request / consent bytes; empty in Phase 1.
+    AuthEnvelope {
+        /// Opaque payload; carries no meaning in Phase 1.
+        payload: Bytes,
+    },
+    /// Graceful teardown with a stable reason code.
+    Bye {
+        /// Reason.
+        code: ErrorCode,
+    },
+}
+
+/// Canonical keyframe/IDR request (controller → host).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyframeRequest {
+    /// Last `frame_id` the controller has, for host-side coalescing (avoid redundant IDRs).
+    pub since_frame: FrameId,
+    /// Why the controller needs a keyframe.
+    pub reason: KeyframeReason,
+}
+
+/// The one keyframe-reason enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KeyframeReason {
+    /// First frame of a new session / late-join subscriber.
+    StreamStart,
+    /// Gap in `frame_id`s beyond FEC recovery.
+    UnrecoverableLoss,
+    /// WebCodecs decoder went terminal; a new decoder needs an IDR.
+    DecoderReset,
+    /// Resolution/codec/monitor change enacted this frame.
+    ConfigChanged,
+    /// Optional bounded host safety refresh.
+    PeriodicRefresh,
+}
+
+/// The one content-free feedback message (controller → host, reliable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecoderFeedback {
+    /// Highest contiguous `frame_id` successfully decoded.
+    pub last_decoded_frame: FrameId,
+    /// Frames dropped since the last report (metrics + ABR).
+    pub frames_dropped: u32,
+    /// Controller-measured decode/presentation latency estimate (µs); trend only.
+    pub decode_latency_us: u32,
+    /// Present when the decoder needs a fresh IDR.
+    pub keyframe_request: Option<KeyframeRequest>,
+}
+
+/// Wire projection of `ras_media::StreamConfig` for the control channel (protobuf-encoded).
+///
+/// Structurally identical to the in-memory config; separate only because the codec is serialized
+/// as its derived string form while the in-memory type stays an enum. `color`/`video_transport`
+/// are encoded as small integer tags to avoid a dependency on `ras-media`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamConfigWire {
+    /// Fully-qualified WebCodecs codec string, e.g. `"avc1.4D401F"`.
+    pub codec: String,
+    /// Output width (px).
+    pub width: u32,
+    /// Output height (px).
+    pub height: u32,
+    /// Target frames/sec.
+    pub fps: u32,
+    /// Target average bitrate (bits/sec), CBR.
+    pub target_bitrate_bps: u32,
+    /// Color-space tag: 0 = BT.709 limited, 1 = BT.709 full.
+    pub color: u8,
+    /// Video-transport tag: 0 = per-frame stream, 1 = datagram+FEC.
+    pub video_transport: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +249,23 @@ mod tests {
         assert_eq!(ErrorCode::SignatureInvalid.as_str(), "SIGNATURE_INVALID");
         assert_eq!(ErrorCode::Internal.as_str(), "INTERNAL_ERROR");
         assert_eq!(ErrorCode::CapabilityDenied.to_string(), "CAPABILITY_DENIED");
+    }
+
+    #[test]
+    fn ras_error_carries_recoverability() {
+        let e = RasError::recoverable(ErrorCode::CaptureFailed, "sck restart");
+        assert!(e.recoverable);
+        assert_eq!(e.code, ErrorCode::CaptureFailed);
+        let f = RasError::fatal(ErrorCode::Internal, "bug");
+        assert!(!f.recoverable);
+    }
+
+    #[test]
+    fn control_msg_is_constructible() {
+        let m = ControlMsg::KeyframeRequest(KeyframeRequest {
+            since_frame: 41,
+            reason: KeyframeReason::UnrecoverableLoss,
+        });
+        assert!(matches!(m, ControlMsg::KeyframeRequest(_)));
     }
 }
