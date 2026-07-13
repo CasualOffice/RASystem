@@ -34,5 +34,11 @@ ras-transport-iroh = { path = "../ras-transport-iroh" }
 # Tests build the synthetic capture/encode doubles and drive the loopback transport.
 ras-media = { path = "../ras-media", features = ["synthetic"] }
 
+# The runnable demo needs the in-memory loopback transport; skip it unless `testkit` is on so
+# `cargo test --all` (default features) doesn't try to compile it.
+[[example]]
+name = "loopback_demo"
+required-features = ["testkit"]
+
 [lints]
 workspace = true

@@ -9,8 +9,14 @@ It is **not** primarily a standalone remote-desktop app. The deliverables are a 
 runtime**, a **controller app**, a shared **Rust core**, and — later — **SDKs** extracted from that
 core.
 
-> **Status: design phase.** This repository currently contains design documentation only. No
-> production code has been written yet — by design, we design first. See `CLAUDE.md §3`.
+> **Status: early execution (Phase 1).** Milestone **M0** is reached (design set complete, Cargo
+> workspace builds clean). The **spike-independent Phase-1 orchestration spine is implemented and
+> green** — the session state machine, DI seams, host/controller orchestrators, synthetic
+> capture/encode doubles, an in-memory loopback transport, adaptive-bitrate + connection-quality, and
+> the frame-Channel codec — all exercised end-to-end by a runnable demo and `cargo test` with **no
+> iroh, no OS, no GPU**. The real iroh transport, macOS/Windows capture backends, and the Tauri apps
+> stay stubbed behind traits until the **Phase-S risk spike** clears (WebCodecs half measured = GO;
+> the iroh network-matrix probe is the remaining gate). Live tracker: `docs/17`; status: `CLAUDE.md §3`.
 
 ## Priorities (in strict order)
 
@@ -42,16 +48,17 @@ decision rule enforced throughout the docs, not a slogan (`CLAUDE.md §2`).
 Controller app (Tauri v2: Rust core + React UI)
   └─ Iroh/QUIC (encrypted P2P, relay fallback) ─┐
                                                  ▼
-Host runtime (Windows first)                Host — the authorization authority
-  ├─ capture (DXGI) → H.264 encode (HW)      ├─ Ed25519 identity, signed grants, consent
-  ├─ input injection (SendInput)             ├─ capability policy + control leases
-  ├─ on-device fraud/harm-prevention         ├─ tamper-evident audit
-  └─ (MVP: one process; later: service +     └─ emergency stop (SAS-bound)
+Host runtime (macOS dev-lead, Windows prod)  Host — the authorization authority
+  ├─ capture (SCK/DXGI) → H.264 encode (HW)   ├─ Ed25519 identity, signed grants, consent
+  ├─ input injection (CGEvent/SendInput)      ├─ capability policy + control leases
+  ├─ on-device fraud/harm-prevention          ├─ tamper-evident audit
+  └─ (MVP: one process; later: service +      └─ emergency stop (SAS-bound)
        session-agent + privileged input-helper)
 ```
 
-The controller decodes H.264 with **WebCodecs** and renders to canvas (Windows-first; native-surface
-fallback planned for latency-critical use and Linux).
+The controller decodes H.264 with **WebCodecs** and renders to canvas. **macOS is the development-lead
+host platform; Windows remains the production target** (ADR-054). The WebCodecs bet is validated on
+both Blink and **WebKit/WKWebView** (the macOS Tauri engine) — decode ~1 ms at 60 fps, 0 drops.
 
 ## Build strategy
 
@@ -59,10 +66,36 @@ fallback planned for latency-critical use and Linux).
 directly, prove the hard parts (latency, NAT traversal, input correctness, authorization), then draw
 the SDK boundary around the proven crates. An SDK surface can't be validated without a real consumer.
 
-## Repository layout (target — not yet created)
+## Repository layout
 
-See `CLAUDE.md §7`. Core crates under `crates/`, host + controller Tauri apps, `proto/` as the wire
-source of truth.
+```text
+crates/                 # shared Rust core (the future SDK internals)
+  ras-protocol/         # error taxonomy, control-message set, wire ids
+  ras-media/            # capture/encode/decode traits + synthetic doubles
+  ras-transport-iroh/   # transport interfaces (iroh wiring lands post-spike)
+  ras-core/             # session state machine + orchestrators + ABR + frame codec
+  ras-{identity,grant,policy,control,audit}/  # subsystem stubs (Phase 2+)
+proto/                  # .proto wire source of truth (codegen wired in Phase 1)
+spike/                  # throwaway risk-validation probes (iroh + WebCodecs harness)
+docs/                   # architecture + design docs, ADRs, roadmap
+```
+
+Full target layout (incl. the Tauri `host/` + `controller/` apps) in `CLAUDE.md §7`.
+
+## Build, test & run the demo
+
+```bash
+cargo build --workspace                                   # builds clean
+cargo test --all                                          # unit + property + e2e (loopback)
+cargo clippy --all-targets --all-features -- -D warnings  # lint gate
+cargo deny check                                          # license gate (no GPL/AGPL/SSPL)
+
+# Watch the Phase-1 spine run end-to-end — synthetic capture → controller, no iroh/OS/GPU:
+cargo run -p ras-core --example loopback_demo --features testkit
+```
+
+The demo prints the handshake, stream negotiation (`avc1.4D401F`), droppable video, adaptive-bitrate
+ramp, a keyframe (PLI) round-trip, and clean teardown.
 
 ## Documentation
 
@@ -80,9 +113,12 @@ source of truth.
 | `docs/14_DECISIONS_ADR.md` | Architecture Decision Records (incl. licensing) |
 | `docs/15_FRAUD_AND_HARM_PREVENTION.md` | Anti-scam / harm-prevention design |
 | `docs/16_ACCESS_AND_ENROLLMENT_MODEL.md` | Per-device keys + security tiers |
+| `docs/17_ROADMAP_AND_MILESTONES.md` | **Live progress tracker** — milestones + per-phase ☐/◐/☑ tasks |
+| `docs/18_HOST_PLATFORM_MACOS.md` | macOS host deep-dive (dev-lead platform) |
+| `docs/design/phase-*.md` | Per-phase design gates + recorded spike results |
 
-New here? Read **`CLAUDE.md`** first, then `docs/02_ARCHITECTURE.md` and
-`docs/14_DECISIONS_ADR.md`.
+New here? Read **`CLAUDE.md`** first, then `docs/02_ARCHITECTURE.md`, `docs/14_DECISIONS_ADR.md`, and
+the live status in `docs/17`.
 
 ## Licensing
 
