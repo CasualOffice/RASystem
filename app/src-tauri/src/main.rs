@@ -273,7 +273,8 @@ fn stop_sharing(state: State<'_, AppState>) {
 
 /// Begin sharing this screen: bind an iroh endpoint, publish a ticket, and accept one viewer at a
 /// time behind the local consent gate. Returns immediately; the ticket/status arrive as events.
-#[cfg(target_os = "macos")]
+/// Supported on macOS (hardware) + Linux/Windows (scap + OpenH264), ADR-063.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 #[tauri::command]
 async fn start_sharing(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // Already sharing? No-op (the UI reflects the current ticket).
@@ -289,18 +290,42 @@ async fn start_sharing(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
     Ok(())
 }
 
-/// On non-macOS the Share role isn't wired yet (no capture backend). The Connect role still works.
-#[cfg(not(target_os = "macos"))]
+/// On platforms with no capture backend the Share role is unavailable. The Connect role still works.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[tauri::command]
 async fn start_sharing(app: tauri::AppHandle, _state: State<'_, AppState>) -> Result<(), String> {
     let _ = app.emit(
         "share-status",
-        "Screen sharing isn't available on this platform yet (macOS only in the alpha). You can still Connect to another machine.",
+        "Screen sharing isn't available on this platform. You can still Connect to another machine.",
     );
-    Err("screen sharing is macOS-only in the alpha".into())
+    Err("screen sharing is not available on this platform".into())
 }
 
+/// Construct the platform's capture + encoder pair for a share session (ADR-063). macOS uses the
+/// zero-copy hardware path; Linux/Windows use scap capture + the OpenH264 software encoder.
 #[cfg(target_os = "macos")]
+fn make_backends() -> (
+    ras_media_macos::MacScreenCapture,
+    ras_media_macos::VideoToolboxEncoder,
+) {
+    (
+        ras_media_macos::MacScreenCapture::new(),
+        ras_media_macos::VideoToolboxEncoder::new(),
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn make_backends() -> (
+    ras_media_scap::ScapCapture,
+    ras_media_openh264::OpenH264Encoder,
+) {
+    (
+        ras_media_scap::ScapCapture::new(),
+        ras_media_openh264::OpenH264Encoder::new(),
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn run_share(
     app: tauri::AppHandle,
     mut stop: tokio::sync::watch::Receiver<bool>,
@@ -348,7 +373,7 @@ async fn run_share(
     let _ = app.emit("share-status", "Sharing stopped.");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn serve_one(
     app: &tauri::AppHandle,
     endpoint: &Arc<ras_transport_iroh::Endpoint>,
@@ -360,16 +385,16 @@ async fn serve_one(
         HostSession, HostSessionConfig, IrohSessionTransport, LifecycleEvent, StopReason,
     };
     use ras_media::MonitorId;
-    use ras_media_macos::{MacScreenCapture, VideoToolboxEncoder};
 
     let _ = app.emit("share-status", "A viewer is requesting access…");
 
+    let (capture, encoder) = make_backends();
     let transport = Arc::new(IrohSessionTransport::new(endpoint.clone(), session));
     let host = HostSession::new(
         HostSessionConfig::new(MonitorId(0)),
         transport,
-        MacScreenCapture::new(),
-        VideoToolboxEncoder::new(),
+        capture,
+        encoder,
         // Real consent: no frame flows until the local user clicks Allow (Invariant 1).
         consent.clone(),
     );

@@ -34,11 +34,15 @@ ras-protocol = { path = "../../crates/ras-protocol" }
 ras-transport-iroh = { path = "../../crates/ras-transport-iroh" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
-# The only real capture/encode backend today. On Linux/Windows the app still builds and the Connect
-# (viewer) role works fully; the Share role reports "screen sharing isn't available on this platform
-# yet" until the Linux (PipeWire/VAAPI) and Windows (DXGI/MF) backends land.
+# Per-platform sharing backends (ADR-063). macOS uses the zero-copy hardware path
+# (ScreenCaptureKit + VideoToolbox); Linux (PipeWire) and Windows (WGC) capture via scap and encode
+# with the OpenH264 software encoder. The Connect (viewer) role is decode-only and works everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
 ras-media-macos = { path = "../../crates/ras-media-macos" }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+ras-media-scap = { path = "../../crates/ras-media-scap" }
+ras-media-openh264 = { path = "../../crates/ras-media-openh264" }
 
 [lints.clippy]
 unwrap_used = "warn"

@@ -1,0 +1,32 @@
+[package]
+name = "ras-media-scap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Cross-platform CPU screen capture behind `ras-media::ScreenCaptureBackend`, used by the Linux
+# (PipeWire/portal) and Windows (WGC) sharing paths (ADR-063). Wraps the permissive `scap` crate,
+# which selects PipeWire on Linux, Windows.Graphics.Capture on Windows, and ScreenCaptureKit on
+# macOS. Frames are CPU BGRA, handed to the OpenH264 software encoder via SurfaceKind::CpuBgra.
+# macOS production still uses the zero-copy ras-media-macos backend; scap builds here only so the
+# adapter is locally compile-checked.
+
+[dependencies]
+ras-media = { path = "../ras-media" }
+ras-protocol = { path = "../ras-protocol" }
+
+# scap covers linux/windows/macos; on any other target this crate is empty (keeps builds green).
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
+scap = "0.0.8"
+
+# FFI-adjacent (borrowed-surface pointer): relax the workspace unsafe deny here (CONTRIBUTING §5).
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
