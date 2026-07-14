@@ -95,11 +95,15 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     Rust pushes each encoded access unit as the canonical `ras_core::frame_channel` blob (24-byte
     `RAS1` header + Annex-B) over a **binary** Tauri `Channel`; the webview decodes with WebCodecs
     `VideoDecoder` → `<canvas>`, gates on the first IDR, and drives forced-IDR-on-demand
-    (`request_keyframe`). Fed by a **local mirror** (`ras-media-macos` in-process) so it runs
-    glass-to-glass on one Mac before iroh. Static frontend via `withGlobalTauri` (no bundler);
-    `core:default` capability; CSP set; always-visible LIVE indicator (Invariant 7). Kept **out of the
-    root workspace** (heavy WebView deps); the GUI run is an on-device step (login session +
-    Screen-Recording TCC). The real remote (iroh) source swaps in behind the same channel.
+    (`request_keyframe`). Frames flow through the **real `ras-core` spine** — a `HostSession` (real
+    `ras-media-macos` backends) + `ControllerSession` over the in-memory **loopback transport** (both
+    in one process), so each frame traverses handshake → authorize-gate (`AllowAllValidator` no-op
+    seam) → grant → media pump → teardown, and keyframe requests ride the control channel. Runs
+    glass-to-glass on one Mac before iroh; the loopback swaps for the concrete iroh transport behind
+    the same `SessionTransport` seam. Static frontend via `withGlobalTauri` (no bundler); `core:default`
+    capability; CSP set; always-visible LIVE indicator (Invariant 7). Kept **out of the root
+    workspace** (heavy WebView deps); the GUI run is an on-device step (login session +
+    Screen-Recording TCC).
   - Still stubbed behind traits (`todo!()`): the concrete iroh transport (and the Windows DXGI/MF media
     port), and the **host** Tauri app + consent UI — they land as the spike/network go/no-go clears.
 - **Build/verify commands** (all green as of M0):

@@ -6,9 +6,14 @@ WebCodecs `VideoDecoder` decodes each to a `VideoFrame`, and it renders to a `<c
 ever cross JSON IPC.
 
 For the MVP the frames come from a **local mirror** — this Mac's own screen, captured and encoded by
-`ras-media-macos` in the app's Rust process — so the whole path is runnable **glass-to-glass on one
-machine before the iroh transport lands** (step 4 / M2). The webview code is identical whichever
-source feeds the channel; the real remote (iroh) source swaps in behind the same `Channel`.
+`ras-media-macos` — but they flow through the **real `ras-core` session spine**: a `HostSession` and
+a `ControllerSession` are connected by the in-memory **loopback transport** (host + controller in one
+process), so each frame actually traverses handshake → authorize-gate (`AllowAllValidator`, the
+Phase-1 no-op seam) → grant → media pump → teardown, and the webview's keyframe requests ride the
+control channel. This is the same path the loopback e2e tests exercise, now with the real macOS
+backends and a live WebCodecs renderer. It runs **glass-to-glass on one machine before the iroh
+transport lands** (step 4 / M2); the loopback transport swaps for the concrete iroh one behind the
+same `SessionTransport` seam — no controller/webview change.
 
 ## Layout
 
@@ -47,7 +52,10 @@ not suppressible by the UI).
 
 ## What this is NOT yet
 
-- No transport: the feed is a local mirror, not a remote peer (iroh is step 4 / M2).
-- No session/auth/consent wiring yet (grant validation, leases, the host consent window) — that is
-  the host app + `ras-core::HostSession` integration, next.
-- Frontend is minimal static HTML/JS; the React/TS controller UI + strict CSP hardening land later.
+- No real transport: the two sessions share an in-process loopback, not a remote peer (iroh is
+  step 4 / M2). Because it's one process, this is a mirror, not a two-party session.
+- Auth/consent is a **no-op seam**: `AllowAllValidator` authorizes unconditionally (Phase-1,
+  `insecure-no-auth`). Real grant validation, leases, and the host **consent window** land with the
+  host app — the seam is present so that adds no signature churn.
+- Frontend is minimal static HTML/JS; the Web Worker + `OffscreenCanvas` renderer and the React/TS
+  controller UI + strict-CSP hardening land later.

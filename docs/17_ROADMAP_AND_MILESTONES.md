@@ -192,11 +192,15 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   `ras_core::frame_channel` blob (24-byte `RAS1` header + Annex-B) over a **binary** Tauri `Channel`;
   the webview decodes with a WebCodecs `VideoDecoder` and renders to a `<canvas>`, drops deltas until
   the first IDR, and drives forced-IDR-on-demand (`request_keyframe`) to cover the infinite-GOP
-  startup race + decoder reset. Fed by a **local mirror** (`ras-media-macos` capture→encode in-process)
-  so it's runnable **glass-to-glass on one Mac before iroh** (steps 2+3 collapsed). Static frontend via
-  `withGlobalTauri` (no bundler); `core:default` capability; CSP set; always-visible LIVE indicator
-  (Invariant 7). **Remaining:** Web Worker + `OffscreenCanvas` renderer, React/TS UI + strict-CSP
-  hardening, connection-state UI, and swapping the local mirror for the iroh `VideoSource` (step 4).
+  startup race + decoder reset. Frames flow through the **real `ras-core` spine** — a `HostSession`
+  (real `ras-media-macos` backends) + `ControllerSession` over the in-memory **loopback transport**, so
+  each frame traverses handshake → authorize-gate → grant → media pump → teardown and keyframe requests
+  ride the control channel (the loopback e2e path, now with real macOS media). Runnable **glass-to-glass
+  on one Mac before iroh** (steps 2+3 collapsed); the loopback swaps for the concrete iroh transport
+  behind the same `SessionTransport` seam. Static frontend via `withGlobalTauri` (no bundler);
+  `core:default` capability; CSP set; always-visible LIVE indicator (Invariant 7). **Remaining:** Web
+  Worker + `OffscreenCanvas` renderer, React/TS UI + strict-CSP hardening, connection-state UI, the
+  host **consent window** (replacing the `AllowAllValidator` no-op seam), and the iroh transport (step 4).
 - ◐ `QA` Reconnection behavior documented + tested (loopback; the `LoopbackFaults` handle injects both
   an abrupt link cut and `FrameDropped` events, so suspend/reconnect *and* loss handling are exercised
   without abusing `stop`); **generative/fuzz property tests** over the untrusted-input surface: the control codec, frame

@@ -1,153 +1,200 @@
 //! Casual RAS controller — Tauri v2 shell (ADR-021/022, S3).
 //!
-//! Proves the controller **video path**: encoded H.264 access units are pushed to the webview over
-//! a **binary** Tauri `Channel` (never JSON — CONTRIBUTING §5), where a WebCodecs `VideoDecoder`
-//! decodes to a `VideoFrame` and renders to a canvas. For the MVP shell the frames come from a
-//! **local mirror** (this Mac's screen via `ras-media-macos` capture→encode) so the whole path is
-//! runnable glass-to-glass on one machine *before* the iroh transport lands (step 4 / M2). The
-//! webview code is identical whichever source feeds it — the real remote source swaps in behind the
-//! same channel.
+//! Proves the controller **video path** *through the real session spine*: a `ras_core::HostSession`
+//! (real `ras-media-macos` capture→encode) and a `ras_core::ControllerSession` are connected by the
+//! in-memory **loopback transport**, so frames actually traverse handshake → authorize-gate
+//! (`AllowAllValidator`, Phase-1 no-op seam) → grant → media pump → teardown, and keyframe requests
+//! ride the control channel — exactly the path the loopback e2e tests exercise, but with the real
+//! macOS backends and a live WebCodecs renderer. This is a **local mirror** (host + controller in one
+//! process) so it runs glass-to-glass on one machine *before* the iroh transport lands (step 4 / M2);
+//! the loopback transport swaps for the concrete iroh one behind the same `SessionTransport` seam.
 //!
-//! Each frame crosses the channel as one binary blob via the canonical `ras_core::frame_channel`
-//! codec (the 24-byte `RAS1` header + Annex-B access unit) — the same contract the TS side parses,
-//! so the header layout lives in exactly one place.
+//! Frames reach the webview as `ras_core::frame_channel` blobs (24-byte `RAS1` header + Annex-B) over
+//! a **binary** Tauri `Channel`; the negotiated stream config rides the same channel once as an
+//! `RCFG` message. No pixels ever cross JSON IPC.
 
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
     windows_subsystem = "windows"
 )]
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
-/// Handle to a running mirror: flags the capture/encode thread reads.
-struct MirrorHandle {
-    stop: Arc<AtomicBool>,
-    force_keyframe: Arc<AtomicBool>,
-}
+/// Framing magic for the one-shot stream-config message (`"RCFG"` big-endian, sent little-endian).
+/// Distinguishes the JSON config blob from the `RAS1` frame blobs on the same channel.
+const CONFIG_MAGIC: u32 = u32::from_be_bytes(*b"RCFG");
 
 #[derive(Default)]
 struct MirrorState {
-    inner: Mutex<Option<MirrorHandle>>,
-}
-
-/// Negotiated stream descriptor returned to the webview so it can configure `VideoDecoder`.
-#[derive(Serialize)]
-struct StreamCfgDto {
-    /// WebCodecs codec string, e.g. `"avc1.4D4028"`.
-    codec: String,
-    width: u32,
-    height: u32,
-    fps: u32,
+    #[cfg(target_os = "macos")]
+    handles: Mutex<Option<mac::Handles>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Stop any running mirror (idempotent).
-#[tauri::command]
-fn stop_mirror(state: State<'_, MirrorState>) {
-    if let Some(h) = lock(&state.inner).take() {
-        h.stop.store(true, Ordering::SeqCst);
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::sync::Arc;
+
+    use ras_core::{
+        frame_channel::encode_frame_blob, CoreError, ControllerSession, FrameSink, HostSession,
+        LifecycleStream, PushResult,
+    };
+    use ras_media::{EncodedFrame, StreamConfig};
+    use ras_media_macos::{MacScreenCapture, VideoToolboxEncoder};
+    use tauri::ipc::{Channel, InvokeResponseBody};
+
+    use crate::CONFIG_MAGIC;
+
+    /// Live session handles, kept alive for the duration of a mirror (dropping them tears it down).
+    pub struct Handles {
+        pub host: HostSession<MacScreenCapture, VideoToolboxEncoder>,
+        pub controller: Arc<ControllerSession>,
+        // Lifecycle event streams: kept alive so the sessions keep running (events are drained by the
+        // core tasks; we only need to not drop the receivers).
+        pub _host_events: LifecycleStream,
+        pub _ctrl_events: LifecycleStream,
+    }
+
+    /// A [`FrameSink`] that forwards the decoded-stream config + each encoded access unit to the
+    /// webview over the binary Tauri channel. `configure` sends one `RCFG` JSON blob; `push` sends
+    /// `RAS1` frame blobs.
+    pub struct ChannelFrameSink {
+        pub channel: Channel<InvokeResponseBody>,
+    }
+
+    impl FrameSink for ChannelFrameSink {
+        fn configure(&self, config: &StreamConfig) -> Result<(), CoreError> {
+            let codec = config.codec.webcodecs_string(config.width, config.height);
+            let json = serde_json::json!({
+                "codec": codec,
+                "width": config.width,
+                "height": config.height,
+                "fps": config.fps,
+            })
+            .to_string();
+            let mut blob = Vec::with_capacity(4 + json.len());
+            blob.extend_from_slice(&CONFIG_MAGIC.to_le_bytes());
+            blob.extend_from_slice(json.as_bytes());
+            // A closed channel (webview gone) isn't fatal to the host; the session tears down via stop.
+            let _ = self.channel.send(InvokeResponseBody::Raw(blob));
+            Ok(())
+        }
+
+        fn push(&self, frame: EncodedFrame) -> PushResult {
+            match self
+                .channel
+                .send(InvokeResponseBody::Raw(encode_frame_blob(&frame)))
+            {
+                Ok(()) => PushResult::Sent,
+                Err(_) => PushResult::Dropped,
+            }
+        }
     }
 }
 
-/// Ask the encoder to emit a fresh IDR on its next frame — used by the webview once its decoder is
-/// configured (infinite-GOP means the lone startup keyframe may predate the decoder), and on any
-/// decoder reset. Exercises the real forced-IDR path.
+/// Stop any running mirror (idempotent). Tears the host + controller sessions down cleanly.
 #[tauri::command]
-fn request_keyframe(state: State<'_, MirrorState>) {
-    if let Some(h) = lock(&state.inner).as_ref() {
-        h.force_keyframe.store(true, Ordering::SeqCst);
+async fn stop_mirror(state: State<'_, MirrorState>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use ras_core::StopReason;
+        let handles = lock(&state.handles).take();
+        if let Some(h) = handles {
+            h.controller.disconnect(StopReason::UserRequested).await;
+            h.host.stop(StopReason::UserRequested).await;
+        }
     }
+    let _ = &state; // silence unused on non-macOS
+    Ok(())
+}
+
+/// Ask the encoder (via the control channel) to emit a fresh IDR — used by the webview once its
+/// decoder is configured (infinite-GOP means the lone startup keyframe may predate the decoder) and
+/// on any decoder reset. Exercises the real controller→host keyframe-request path.
+#[tauri::command]
+async fn request_keyframe(state: State<'_, MirrorState>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use ras_protocol::KeyframeReason;
+        let controller = lock(&state.handles)
+            .as_ref()
+            .map(|h| h.controller.clone());
+        if let Some(c) = controller {
+            let _ = c.request_keyframe(KeyframeReason::DecoderReset).await;
+        }
+    }
+    let _ = &state;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn start_mirror(
+async fn start_mirror(
     state: State<'_, MirrorState>,
     on_frame: Channel<InvokeResponseBody>,
-) -> Result<StreamCfgDto, String> {
-    use std::time::Duration;
+) -> Result<(), String> {
+    use std::sync::Arc;
 
-    use ras_core::frame_channel::encode_frame_blob;
-    use ras_media::{CaptureOptions, MonitorId, ScreenCaptureBackend, VideoEncoderBackend};
-    use ras_protocol::KeyframeReason;
+    use ras_core::testkit::loopback_pair;
+    use ras_core::transport::{EndpointAddr, EndpointId};
+    use ras_core::{
+        AllowAllValidator, ControllerSession, ControllerSessionConfig, HostSession,
+        HostSessionConfig,
+    };
+    use ras_media::MonitorId;
     use ras_media_macos::{MacScreenCapture, VideoToolboxEncoder};
 
-    // Stop any prior mirror before starting a new one.
-    if let Some(prev) = lock(&state.inner).take() {
-        prev.stop.store(true, Ordering::SeqCst);
-    }
+    // Tear down any prior mirror first.
+    stop_mirror(state.clone()).await?;
 
-    let mut capture = MacScreenCapture::new();
-    let cfg = capture
-        .start(&CaptureOptions {
-            monitor: MonitorId(0),
-            target_fps: 60,
-            excluded_window_ids: vec![],
-        })
-        .map_err(|e| e.to_string())?;
-    let mut encoder = VideoToolboxEncoder::new();
-    encoder.configure(&cfg).map_err(|e| e.to_string())?;
-
-    let dto = StreamCfgDto {
-        codec: cfg.codec.webcodecs_string(cfg.width, cfg.height),
-        width: cfg.width,
-        height: cfg.height,
-        fps: cfg.fps,
+    // Host and controller wired over the in-memory loopback transport (iroh swaps in at step 4).
+    let (host_tp, ctrl_tp) = loopback_pair();
+    let host = HostSession::new(
+        HostSessionConfig::new(MonitorId(0)),
+        host_tp,
+        MacScreenCapture::new(),
+        VideoToolboxEncoder::new(),
+        Arc::new(AllowAllValidator),
+    );
+    let target = EndpointAddr {
+        id: EndpointId([0u8; 32]),
     };
+    let controller = Arc::new(ControllerSession::new(
+        ControllerSessionConfig::new(target),
+        ctrl_tp,
+    ));
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let force_keyframe = Arc::new(AtomicBool::new(false));
-    *lock(&state.inner) = Some(MirrorHandle {
-        stop: stop.clone(),
-        force_keyframe: force_keyframe.clone(),
+    // Host accepts + starts capturing; controller dials + negotiates the stream.
+    let host_events = host.start().await.map_err(|e| e.to_string())?;
+    let ctrl_events = controller.connect().await.map_err(|e| e.to_string())?;
+
+    // Attach the renderer that forwards config + frames to the webview.
+    controller
+        .attach_renderer(Arc::new(mac::ChannelFrameSink { channel: on_frame }))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    *lock(&state.handles) = Some(mac::Handles {
+        host,
+        controller,
+        _host_events: host_events,
+        _ctrl_events: ctrl_events,
     });
-
-    // Capture→encode pull loop on its own thread; pushes each access unit over the binary channel.
-    std::thread::spawn(move || {
-        let poll = Duration::from_millis(100);
-        while !stop.load(Ordering::SeqCst) {
-            if force_keyframe.swap(false, Ordering::SeqCst) {
-                encoder.request_keyframe(KeyframeReason::DecoderReset);
-            }
-            let frame = match capture.next_frame(poll) {
-                Ok(Some(f)) => f,
-                Ok(None) => continue, // static screen (SCK coalesces); keep polling
-                Err(_) => break,      // stream stopped; a real controller would rebuild via start
-            };
-            match encoder.encode(frame) {
-                Ok(Some(ef)) => {
-                    // Canonical 24-byte RAS1 header + Annex-B payload (single source of truth).
-                    if on_frame
-                        .send(InvokeResponseBody::Raw(encode_frame_blob(&ef)))
-                        .is_err()
-                    {
-                        break; // webview closed the channel
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => break,
-            }
-        }
-        capture.stop();
-    });
-
-    Ok(dto)
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn start_mirror(
+async fn start_mirror(
     _state: State<'_, MirrorState>,
     _on_frame: Channel<InvokeResponseBody>,
-) -> Result<StreamCfgDto, String> {
+) -> Result<(), String> {
     Err("the local mirror feed is macOS-only in this build".into())
 }
 

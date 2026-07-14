@@ -11,7 +11,8 @@
 const { invoke, Channel } = window.__TAURI__.core;
 
 const HEADER_LEN = 24;
-const FRAME_MAGIC = 0x52415331; // "RAS1" big-endian
+const FRAME_MAGIC = 0x52415331; // "RAS1" big-endian — a frame blob
+const CONFIG_MAGIC = 0x52434647; // "RCFG" big-endian — the one-shot stream-config blob
 const FLAG_KEYFRAME = 0x01;
 const canvas = document.getElementById("screen");
 const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
@@ -66,12 +67,33 @@ function decoderConfig(cfg) {
   };
 }
 
-function onFrame(msg) {
-  received++;
+function onConfig(bytes) {
+  const json = new TextDecoder().decode(bytes.subarray(4));
+  const cfg = JSON.parse(json);
+  decoder = buildDecoder(cfg);
+  hud.textContent = `mirroring ${cfg.width}×${cfg.height} @ ${cfg.fps} · ${cfg.codec}`;
+  // Infinite-GOP: the lone startup IDR may predate this decoder. Ask for a fresh one now, and keep
+  // asking until we actually decode a frame (covers the startup race + a dropped first keyframe).
+  invoke("request_keyframe");
+  const kick = setInterval(() => {
+    if (decoded > 0) clearInterval(kick);
+    else invoke("request_keyframe");
+  }, 500);
+}
+
+function onMessage(msg) {
   const bytes = toBytes(msg);
+  if (bytes.byteLength < 4) return;
+  const magic = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true);
+  if (magic === CONFIG_MAGIC) return onConfig(bytes);
+  if (magic === FRAME_MAGIC) return onFrame(bytes);
+  // otherwise: desync/garbage — drop
+}
+
+function onFrame(bytes) {
+  received++;
   if (bytes.byteLength <= HEADER_LEN) return;
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (dv.getUint32(0, true) !== FRAME_MAGIC) return; // desync/garbage — drop
   const flags = bytes[4];
   const isKey = (flags & FLAG_KEYFRAME) === FLAG_KEYFRAME;
   const frameId = dv.getBigUint64(8, true);
@@ -116,31 +138,17 @@ async function main() {
     return;
   }
   const channel = new Channel();
-  channel.onmessage = onFrame;
+  channel.onmessage = onMessage;
+  window.addEventListener("beforeunload", () => invoke("stop_mirror"));
 
-  let cfg;
   try {
-    cfg = await invoke("start_mirror", { onFrame: channel });
+    // The negotiated stream config + frames arrive on the channel (RCFG then RAS1 blobs).
+    await invoke("start_mirror", { onFrame: channel });
   } catch (e) {
     hud.textContent = "start_mirror failed: " + e;
     return;
   }
-
-  decoder = buildDecoder(cfg);
-  hud.textContent = `mirroring ${cfg.width}×${cfg.height} @ ${cfg.fps} · ${cfg.codec}`;
-
-  // Infinite-GOP: the lone startup IDR may predate this decoder. Ask for a fresh one now, and keep
-  // asking until we actually decode a frame (covers the startup race + a dropped first keyframe).
-  invoke("request_keyframe");
-  const kick = setInterval(() => {
-    if (decoded > 0) {
-      clearInterval(kick);
-    } else {
-      invoke("request_keyframe");
-    }
-  }, 500);
-
-  window.addEventListener("beforeunload", () => invoke("stop_mirror"));
+  hud.textContent = "session up — waiting for stream config…";
 }
 
 main();

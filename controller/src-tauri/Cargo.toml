@@ -19,7 +19,9 @@ tauri-build = { version = "2.6", features = [] }
 tauri = { version = "2.11", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ras-core = { path = "../../crates/ras-core" }
+# testkit = the in-memory loopback transport (host↔controller in one process). Local-mirror only;
+# the concrete iroh transport replaces it at step 4 behind the same SessionTransport seam.
+ras-core = { path = "../../crates/ras-core", features = ["testkit"] }
 ras-media = { path = "../../crates/ras-media" }
 ras-protocol = { path = "../../crates/ras-protocol" }
 
