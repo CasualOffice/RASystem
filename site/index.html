@@ -4,129 +4,87 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Casual RAS — Embeddable, white-label remote access, built security-first</title>
+    <title>Casual RAS — Embeddable remote support inside your own product</title>
     <meta
       name="description"
-      content="Casual RAS is an embeddable, white-label remote-access platform. Software vendors add secure screen viewing, a remote pointer, and consent-gated support to their own apps — peer-to-peer over Iroh/QUIC, with a Rust core and Tauri apps. Apache-2.0."
+      content="Casual RAS is an embeddable remote-access engine: consent-based screen viewing and collaborative remote pointers, under your own brand, workflow and authorization model. Peer-to-peer over Iroh/QUIC. Rust + Tauri. Apache-2.0, open source."
     />
-    <meta name="keywords" content="embeddable remote access, white-label remote desktop SDK, screen sharing, peer-to-peer, Iroh, QUIC, Rust, Tauri, WebCodecs, secure remote support" />
+    <meta name="keywords" content="embeddable remote access, white-label remote desktop SDK, in-app remote support, screen sharing, peer-to-peer, Iroh, QUIC, Rust, Tauri, WebCodecs" />
     <meta name="author" content="Casual RAS" />
     <meta name="robots" content="index, follow, max-image-preview:large" />
     <meta name="theme-color" content="#0b0b0e" />
     <link rel="canonical" href="https://ras.casualoffice.org/" />
 
-    <!-- Icons -->
     <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png" />
     <link rel="icon" type="image/png" sizes="256x256" href="assets/favicon-256.png" />
     <link rel="apple-touch-icon" href="assets/favicon-256.png" />
 
-    <!-- Open Graph -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Casual RAS" />
-    <meta property="og:title" content="Casual RAS — Embeddable, white-label remote access, built security-first" />
-    <meta property="og:description" content="Add secure screen viewing, a remote pointer, and consent-gated support to your own app. Peer-to-peer over Iroh/QUIC. Rust core + Tauri. Apache-2.0." />
+    <meta property="og:title" content="Casual RAS — Embeddable remote support inside your own product" />
+    <meta property="og:description" content="Add consent-based screen viewing and collaborative remote pointers to your app — under your own brand and workflow. Peer-to-peer over Iroh/QUIC. Rust + Tauri. Apache-2.0." />
     <meta property="og:url" content="https://ras.casualoffice.org/" />
     <meta property="og:image" content="https://ras.casualoffice.org/assets/og-cover.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
 
-    <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Casual RAS — Embeddable, white-label remote access" />
-    <meta name="twitter:description" content="Consent-first remote screen access you embed in your own app. Peer-to-peer over Iroh/QUIC. Rust + Tauri. Apache-2.0." />
+    <meta name="twitter:title" content="Casual RAS — Embeddable remote support inside your product" />
+    <meta name="twitter:description" content="Consent-based remote screen viewing you embed in your own app. Peer-to-peer over Iroh/QUIC. Rust + Tauri. Apache-2.0." />
     <meta name="twitter:image" content="https://ras.casualoffice.org/assets/og-cover.png" />
 
     <link rel="stylesheet" href="styles.css" />
 
-    <!-- Structured data: helps search + answer/generative engines (AEO/GEO) understand the entity. -->
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
         "@graph": [
-          {
-            "@type": "Organization",
-            "@id": "https://ras.casualoffice.org/#org",
-            "name": "Casual RAS",
-            "url": "https://ras.casualoffice.org/",
-            "logo": "https://ras.casualoffice.org/assets/icon-1024.png",
-            "sameAs": ["https://github.com/CasualOffice/RASystem"]
-          },
-          {
-            "@type": "WebSite",
-            "@id": "https://ras.casualoffice.org/#site",
-            "url": "https://ras.casualoffice.org/",
-            "name": "Casual RAS",
-            "publisher": { "@id": "https://ras.casualoffice.org/#org" }
-          },
-          {
-            "@type": "SoftwareApplication",
-            "name": "Casual RAS",
-            "applicationCategory": "DeveloperApplication",
-            "operatingSystem": "macOS, Linux, Windows",
-            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-            "license": "https://www.apache.org/licenses/LICENSE-2.0",
-            "softwareVersion": "alpha",
-            "description": "An embeddable, white-label remote-access platform: secure screen viewing, a remote pointer, and consent-gated support actions, peer-to-peer over Iroh/QUIC, with a Rust core and Tauri apps.",
-            "url": "https://github.com/CasualOffice/RASystem"
-          },
-          {
-            "@type": "FAQPage",
-            "mainEntity": [
-              {
-                "@type": "Question",
-                "name": "What is Casual RAS?",
-                "acceptedAnswer": {
-                  "@type": "Answer",
-                  "text": "Casual RAS (Casual Remote Access System) is an embeddable, white-label remote-access platform. Software vendors embed it into their own apps to add secure screen viewing, a remote pointer, multi-user collaboration, and consent-gated support actions — without sending users to a separate branded remote-desktop product. Transport is peer-to-peer over Iroh/QUIC (encrypted, NAT-traversing, relay-fallback)."
-                }
-              },
-              {
-                "@type": "Question",
-                "name": "Is Casual RAS peer-to-peer, or does it need a server?",
-                "acceptedAnswer": {
-                  "@type": "Answer",
-                  "text": "It is peer-to-peer. The two machines connect directly over Iroh/QUIC (an encrypted, NAT-traversing transport with relay fallback). There is no central server in the MVP; a connection ticket carries the endpoint's identity and addresses so the viewer can dial the host directly."
-                }
-              },
-              {
-                "@type": "Question",
-                "name": "How does consent work?",
-                "acceptedAnswer": {
-                  "@type": "Answer",
-                  "text": "The local user is the final owner of the machine. A connecting viewer is held in the handshake — no pixels are sent — until the local user clicks Allow. Deny, or 90 seconds of silence, refuses the session fail-closed. A controller requests access; it never self-authorizes."
-                }
-              },
-              {
-                "@type": "Question",
-                "name": "Can someone control my keyboard and mouse with Casual RAS?",
-                "acceptedAnswer": {
-                  "@type": "Answer",
-                  "text": "Not in the current alpha. It is view-only: a viewer can see the shared screen and point at it with a remote cursor (a purely visual 'look here' pointer), but no clicks or keystrokes are ever injected into the shared machine's operating system."
-                }
-              },
-              {
-                "@type": "Question",
-                "name": "Which platforms are supported?",
-                "acceptedAnswer": {
-                  "@type": "Answer",
-                  "text": "Connecting to view another machine works on macOS, Linux, and Windows (the viewer only decodes video). Sharing your own screen is macOS-only in the alpha; Linux and Windows capture backends are on the roadmap. It ships as one app that does both roles."
-                }
-              },
-              {
-                "@type": "Question",
-                "name": "What license is Casual RAS under?",
-                "acceptedAnswer": {
-                  "@type": "Answer",
-                  "text": "Apache-2.0 across the whole repository, which includes a patent grant. This makes it safe to embed in proprietary applications. GPL/LGPL/AGPL/SSPL dependencies are rejected and blocked at build time."
-                }
-              }
-            ]
-          }
+          { "@type": "Organization", "@id": "https://ras.casualoffice.org/#org", "name": "Casual RAS", "url": "https://ras.casualoffice.org/", "logo": "https://ras.casualoffice.org/assets/icon-1024.png", "sameAs": ["https://github.com/CasualOffice/RASystem"] },
+          { "@type": "WebSite", "@id": "https://ras.casualoffice.org/#site", "url": "https://ras.casualoffice.org/", "name": "Casual RAS", "publisher": { "@id": "https://ras.casualoffice.org/#org" } },
+          { "@type": "SoftwareApplication", "name": "Casual RAS", "applicationCategory": "DeveloperApplication", "operatingSystem": "macOS, Linux, Windows", "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }, "license": "https://www.apache.org/licenses/LICENSE-2.0", "softwareVersion": "alpha", "description": "An embeddable remote-access engine for consent-based screen viewing and collaborative remote pointers, peer-to-peer over Iroh/QUIC, with a Rust core and Tauri apps.", "url": "https://github.com/CasualOffice/RASystem" },
+          { "@type": "FAQPage", "mainEntity": [
+            { "@type": "Question", "name": "What is Casual RAS?", "acceptedAnswer": { "@type": "Answer", "text": "Casual RAS is an embeddable remote-access engine. Software vendors embed it into their own apps to add consent-based screen viewing and collaborative remote pointers under their own brand, workflow and authorization model, without sending users to a separate remote-desktop product. Transport is peer-to-peer over Iroh/QUIC." } },
+            { "@type": "Question", "name": "Does it need a server?", "acceptedAnswer": { "@type": "Answer", "text": "No application backend is required for the MVP. Direct peer-to-peer connections are preferred; when direct connectivity is unavailable, an encrypted relay fallback carries the traffic. There is no central application server in the middle." } },
+            { "@type": "Question", "name": "How does consent work?", "acceptedAnswer": { "@type": "Answer", "text": "The local user is the final owner of the machine. A connecting viewer is held in the handshake — no pixels are sent — until the local user clicks Allow. Deny, or 90 seconds of silence, refuses the session fail-closed. A viewer requests access; it never self-authorizes." } },
+            { "@type": "Question", "name": "Can a viewer control my keyboard and mouse?", "acceptedAnswer": { "@type": "Answer", "text": "Not in the current alpha. It is view-only: a viewer can see the shared screen and point at it with a visual remote cursor, but no clicks or keystrokes are injected into the shared machine's operating system." } },
+            { "@type": "Question", "name": "Which platforms are supported?", "acceptedAnswer": { "@type": "Answer", "text": "Connecting to view another machine works on macOS, Linux and Windows. Sharing your own screen is macOS-only in the alpha; Linux and Windows sharing are planned. It ships as one application that does both." } },
+            { "@type": "Question", "name": "What license is it under?", "acceptedAnswer": { "@type": "Answer", "text": "Apache-2.0, including a patent grant, so it is safe to embed in proprietary applications. Copyleft (GPL/LGPL/AGPL/SSPL) dependencies are rejected and blocked at build time." } }
+          ] }
         ]
       }
     </script>
   </head>
   <body>
+    <!-- SVG icon sprite (line icons, currentColor). Emoji-free. -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h13M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-embed" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/></g></symbol>
+        <symbol id="i-consent" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/><path d="M9 12l2.2 2.2L15 10.4"/></g></symbol>
+        <symbol id="i-brand" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4 12 22l-9-9V3h10z"/><circle cx="7.5" cy="7.5" r="1.4"/></g></symbol>
+        <symbol id="i-p2p" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.4"/><circle cx="19" cy="6" r="2.4"/><circle cx="19" cy="18" r="2.4"/><path d="M7.3 11 16.7 6.9M7.3 13l9.4 4"/></g></symbol>
+        <symbol id="i-pointer" viewBox="0 0 24 24"><path d="M6 4l13 7.5-5.7 1.4L10 20z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+        <symbol id="i-share" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4M8.5 11.5a4 4 0 0 1 7 0M11 13.5a1.4 1.4 0 0 1 2 0"/></g></symbol>
+        <symbol id="i-view" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z"/><circle cx="12" cy="12" r="2.6"/></g></symbol>
+        <symbol id="i-users" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0M16 5.2a3 3 0 0 1 0 5.6M20.5 20a5.5 5.5 0 0 0-3.5-5.1"/></g></symbol>
+        <symbol id="i-building" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="1.5"/><path d="M8 7h2M14 7h2M8 11h2M14 11h2M10 21v-4h4v4"/></g></symbol>
+        <symbol id="i-health" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/><path d="M8 12h2l1.4-2.4L13.2 14l1-2h1.8"/></g></symbol>
+        <symbol id="i-device" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/></g></symbol>
+        <symbol id="i-saas" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M9.5 6.5h.01"/></g></symbol>
+        <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></g></symbol>
+        <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+        <symbol id="i-code" viewBox="0 0 24 24"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-stop" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><rect x="9" y="9" width="6" height="6" rx="1"/></g></symbol>
+        <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-x" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+        <symbol id="i-clock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></g></symbol>
+        <symbol id="i-apple" viewBox="0 0 24 24"><path fill="currentColor" d="M16.3 12.9c0-2 1.6-2.95 1.7-3-.93-1.36-2.38-1.55-2.9-1.57-1.23-.12-2.4.72-3.02.72-.62 0-1.58-.7-2.6-.68-1.34.02-2.57.78-3.26 1.98-1.39 2.42-.36 6 1 7.96.66.96 1.45 2.04 2.48 2 1-.04 1.37-.64 2.58-.64 1.2 0 1.54.64 2.6.62 1.07-.02 1.75-.98 2.4-1.94.76-1.1 1.07-2.17 1.09-2.23-.02-.01-2.08-.8-2.1-3.17zM14.4 6.6c.55-.66.92-1.58.82-2.5-.79.03-1.75.53-2.32 1.19-.5.58-.95 1.52-.83 2.42.88.07 1.78-.45 2.33-1.11z"/></symbol>
+        <symbol id="i-windows" viewBox="0 0 24 24"><path fill="currentColor" d="M3 5.6 10.6 4.5v7.05H3zM11.6 4.35 21 3v8.55h-9.4zM3 12.55h7.6v7.05L3 18.4zM11.6 12.55H21V21l-9.4-1.32z"/></symbol>
+        <symbol id="i-terminal" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13.5 15H17"/></g></symbol>
+        <symbol id="i-github" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"/></symbol>
+      </defs>
+    </svg>
+
     <a class="skip" href="#main">Skip to content</a>
 
     <header class="site-header">
@@ -135,257 +93,280 @@
           <img src="assets/favicon-256.png" alt="" width="30" height="30" />
           <span>Casual&nbsp;RAS</span>
         </a>
-        <button class="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle menu">☰</button>
+        <button class="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle menu">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
         <ul class="nav-links" id="nav-links">
-          <li><a href="#what">What it is</a></li>
-          <li><a href="#how">How it works</a></li>
-          <li><a href="#security">Security</a></li>
+          <li><a href="#product">Product</a></li>
+          <li><a href="#why">Why embed</a></li>
+          <li><a href="#consent">Consent</a></li>
+          <li><a href="#platforms">Platforms</a></li>
           <li><a href="#roadmap">Roadmap</a></li>
-          <li><a href="#download">Download</a></li>
           <li><a href="#faq">FAQ</a></li>
-          <li><a class="nav-cta" href="https://github.com/CasualOffice/RASystem" rel="noopener">GitHub ↗</a></li>
+          <li><a class="nav-cta" href="https://github.com/CasualOffice/RASystem" rel="noopener">GitHub</a></li>
         </ul>
       </div>
     </header>
 
     <main id="main">
-      <!-- Hero -->
+      <!-- Hero: benefit-led, product visual beside it -->
       <section class="hero" id="top" aria-labelledby="hero-title">
-        <div class="wrap">
-          <span class="badge"><span class="dot" aria-hidden="true"></span> Alpha · Phase 1 in progress · macOS-lead</span>
-          <h1 id="hero-title">
-            Embeddable, white-label remote access,
-            <span class="grad">built security-first.</span>
-          </h1>
-          <p class="lead">
-            Casual RAS lets software vendors add secure screen viewing, a remote pointer, and
-            consent-gated support to <em>their own</em> apps — peer-to-peer over Iroh/QUIC, with a
-            shared Rust core and Tauri apps. No separate branded remote-desktop product to send your
-            users to.
-          </p>
-          <div class="hero-cta">
-            <a class="btn btn-primary" href="#download">Download the alpha</a>
-            <a class="btn btn-ghost" href="https://github.com/CasualOffice/RASystem" rel="noopener">View the source ↗</a>
+        <div class="wrap hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow">Alpha · Open source · Apache-2.0</p>
+            <h1 id="hero-title">Add secure remote support directly inside your product.</h1>
+            <p class="lead">
+              Casual RAS is an embeddable remote-access engine for consent-based screen viewing and
+              collaborative remote pointers — under your own brand, workflow and authorization model.
+            </p>
+            <div class="hero-cta">
+              <a class="btn btn-primary" href="https://github.com/CasualOffice/RASystem" rel="noopener">
+                <svg class="ic" aria-hidden="true"><use href="#i-github" /></svg> View the source
+              </a>
+              <a class="btn btn-ghost" href="#get">Build the alpha</a>
+            </div>
+            <p class="hero-meta">macOS sharing · Cross-platform viewing · Rust · Tauri · Iroh/QUIC</p>
           </div>
-          <p class="hero-meta">Rust core · Tauri v2 · WebCodecs video · Apache-2.0 · no server required</p>
+          <div class="hero-visual">
+            <figure class="shot">
+              <img src="assets/app-home.png" width="1400" height="933" alt="The Casual RAS app home screen with two choices: Share this screen, and Connect to a screen." loading="eager" />
+              <figcaption>The app — one window to share or to view.</figcaption>
+            </figure>
+          </div>
         </div>
       </section>
 
-      <!-- What it is -->
-      <section id="what" aria-labelledby="what-title">
+      <!-- Product demonstration -->
+      <section id="product" aria-labelledby="product-title">
         <div class="wrap">
           <div class="section-head">
-            <p class="eyebrow">What it is</p>
-            <h2 id="what-title">A remote-access engine you embed, not a product you send users to</h2>
-            <p>
-              The end products are a native host runtime (embedded on the controlled machine), a
-              controller app for the support side, and a shared Rust core that later becomes the SDK.
-            </p>
+            <p class="eyebrow">See it working</p>
+            <h2 id="product-title">The two-machine flow works today</h2>
+            <p>Share a connection ticket, approve the viewer, and they see your screen — with your cursor guiding them. No account, no server in the middle.</p>
+          </div>
+          <div class="shots-2">
+            <figure class="shot">
+              <img src="assets/app-consent.png" width="1400" height="933" alt="The share screen showing a connection ticket and a consent prompt: a viewer with identity 8f2a1c09 wants to see your screen, with Deny and Allow buttons, and a red REMOTE VIEWING ACTIVE indicator." loading="lazy" />
+              <figcaption>No pixels leave the machine until the local user clicks <strong>Allow</strong>.</figcaption>
+            </figure>
+            <figure class="shot diagram">
+              <svg viewBox="0 0 520 300" role="img" aria-label="Two machines connect directly peer-to-peer over an encrypted QUIC link, with an encrypted relay as fallback when a direct path is unavailable." class="conn">
+                <!-- host -->
+                <g class="node">
+                  <rect x="24" y="150" width="150" height="96" rx="10" />
+                  <rect x="44" y="168" width="110" height="60" rx="5" class="screen" />
+                  <circle cx="72" cy="198" r="5" class="dot-teal" />
+                  <text x="99" y="266">Host · shares screen</text>
+                </g>
+                <!-- controller -->
+                <g class="node">
+                  <rect x="346" y="150" width="150" height="96" rx="10" />
+                  <rect x="366" y="168" width="110" height="60" rx="5" class="screen" />
+                  <path d="M430 190l18 10-7 2-2 8z" class="cursor" />
+                  <text x="421" y="266">Viewer · points here</text>
+                </g>
+                <!-- direct link -->
+                <path d="M180 186 H340" class="link-direct" />
+                <text x="260" y="176" class="lbl">direct P2P (QUIC)</text>
+                <!-- relay fallback -->
+                <g class="relay">
+                  <circle cx="260" cy="70" r="24" />
+                  <text x="260" y="40" class="lbl">encrypted relay</text>
+                  <text x="260" y="75" class="relay-t">↔</text>
+                </g>
+                <path d="M150 168 Q210 90 236 78" class="link-relay" />
+                <path d="M370 168 Q310 90 284 78" class="link-relay" />
+                <text x="260" y="228" class="sub">fallback when no direct path</text>
+              </svg>
+              <figcaption>Direct peer-to-peer first; encrypted relay only if a direct path isn’t available.</figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <!-- Why embed it -->
+      <section id="why" aria-labelledby="why-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow">Why embed it</p>
+            <h2 id="why-title">A remote-access engine, not a product you send users to</h2>
+            <p>Your users stay inside your product, under your brand and support workflow — no redirect to a third-party remote-desktop app.</p>
           </div>
           <div class="grid">
-            <article class="card">
-              <div class="ico" aria-hidden="true">🧩</div>
-              <h3>Embeddable &amp; white-label</h3>
-              <p>Drop it into your application. Your brand, your flow — not a redirect to a third-party remote-desktop app.</p>
-            </article>
-            <article class="card">
-              <div class="ico" aria-hidden="true">🔗</div>
-              <h3>Peer-to-peer over Iroh/QUIC</h3>
-              <p>Encrypted, NAT-traversing, relay-fallback transport. The two machines connect directly — no central server in the MVP.</p>
-            </article>
-            <article class="card">
-              <div class="ico" aria-hidden="true">🦀</div>
-              <h3>Rust core + Tauri</h3>
-              <p>One shared Rust core drives both ends; video renders through WebCodecs in a Tauri webview. The SDK is drawn around the proven crates later.</p>
-            </article>
-            <article class="card">
-              <div class="ico" aria-hidden="true">✅</div>
-              <h3>Consent-first by design</h3>
-              <p>The local user authorizes every session. No pixels leave the machine until they click Allow — and the stop control is always present.</p>
-            </article>
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-brand"/></svg></div><h3>Under your brand</h3><p>White-label by design. Your UI, your flow, your support workflow — Casual RAS is the engine underneath.</p></article>
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-consent"/></svg></div><h3>Consent-based sessions</h3><p>The local user approves every session before any pixels are sent, and can stop it at any moment.</p></article>
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-p2p"/></svg></div><h3>No application backend</h3><p>Direct peer-to-peer connections for the MVP, with an encrypted relay fallback. No server of yours in the path.</p></article>
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-embed"/></svg></div><h3>Built to embed</h3><p>A shared Rust core with clean seams; the SDK boundary (C ABI + Node.js) is drawn around the proven crates.</p></article>
           </div>
         </div>
       </section>
 
-      <!-- How it works -->
-      <section id="how" aria-labelledby="how-title">
+      <!-- How consent works (elevated) -->
+      <section id="consent" aria-labelledby="consent-title">
+        <div class="wrap split-2">
+          <figure class="shot">
+            <img src="assets/app-consent.png" width="1400" height="933" alt="Consent prompt: a viewer wants to see your screen, with Deny and Allow buttons." loading="lazy" />
+          </figure>
+          <div>
+            <p class="eyebrow">How consent works</p>
+            <h2 id="consent-title">The local user is always in control</h2>
+            <ol class="flow">
+              <li><span><svg aria-hidden="true"><use href="#i-lock"/></svg></span><div><strong>Held until Allow.</strong> A connecting viewer is paused in the handshake — no screen data is sent — until the local user approves.</div></li>
+              <li><span><svg aria-hidden="true"><use href="#i-consent"/></svg></span><div><strong>Approve or refuse.</strong> The prompt shows the peer’s identity. Deny, or 90 seconds of silence, refuses the session fail-closed.</div></li>
+              <li><span><svg aria-hidden="true"><use href="#i-view"/></svg></span><div><strong>Always visible.</strong> While viewing is active a “remote viewing active” indicator stays on screen — the interface can’t hide it.</div></li>
+              <li><span><svg aria-hidden="true"><use href="#i-stop"/></svg></span><div><strong>Stop anytime.</strong> The stop control is always present and ends the session immediately.</div></li>
+            </ol>
+          </div>
+        </div>
+      </section>
+
+      <!-- Built for -->
+      <section id="built-for" aria-labelledby="bf-title">
         <div class="wrap">
           <div class="section-head">
-            <p class="eyebrow">How it works</p>
-            <h2 id="how-title">One app, both roles</h2>
-            <p>The same download can <strong>share</strong> this screen or <strong>connect</strong> to another. Pick a role on the home screen.</p>
+            <p class="eyebrow">Built for</p>
+            <h2 id="bf-title">Where embedded remote access fits</h2>
           </div>
-          <div class="steps">
-            <div class="step">
-              <h3>Share a ticket</h3>
-              <p>The person sharing picks “Share this screen” and gets a connection ticket (<code>CASUALRAS1:…</code>) to send over any channel.</p>
-            </div>
-            <div class="step">
-              <h3>Connect &amp; approve</h3>
-              <p>The viewer pastes the ticket and connects. The sharer sees an Allow / Deny prompt with the peer’s identity — nothing streams until they approve.</p>
-            </div>
-            <div class="step">
-              <h3>View &amp; point</h3>
-              <p>The screen renders on the viewer. Their cursor shows on the sharer’s screen as a “look here” pointer — collaboration without remote control.</p>
-            </div>
-          </div>
-          <div class="split" style="margin-top:16px">
-            <article class="card">
-              <h3>🖥️ Share (agent)</h3>
-              <p>Captures this machine and streams it, behind local consent, with an always-visible “remote viewing active” indicator and a stop control. macOS today; Linux &amp; Windows on the roadmap.</p>
-            </article>
-            <article class="card">
-              <h3>👁️ Connect (viewer)</h3>
-              <p>Decodes the H.264 stream with WebCodecs to a canvas, adds annotation tools and a remote pointer. Decode-only, so it runs on macOS, Linux, and Windows today.</p>
-            </article>
+          <div class="grid">
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-saas"/></svg></div><h3>SaaS in-app support</h3><p>Let support agents see a customer’s screen without a screen-share tool switch.</p></article>
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-building"/></svg></div><h3>Enterprise IT &amp; MSPs</h3><p>Managed-service and internal-IT support with consent and a clear stop control.</p></article>
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-health"/></svg></div><h3>Regulated &amp; healthcare</h3><p>Local, explicit consent on every session for privacy-sensitive workflows.</p></article>
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-device"/></svg></div><h3>Device &amp; field support</h3><p>Guide a user through their own device with a visible remote pointer.</p></article>
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-users"/></svg></div><h3>Collaborative software</h3><p>Multiple visible pointers for pairing, review and walkthroughs (roadmap).</p></article>
           </div>
         </div>
       </section>
 
-      <!-- Security -->
+      <!-- Platforms + availability -->
+      <section id="platforms" aria-labelledby="plat-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow">Platform support</p>
+            <h2 id="plat-title">Where it runs today</h2>
+            <p>One app, both roles. Viewing works everywhere; sharing is macOS-first while the other capture backends are built.</p>
+          </div>
+          <div class="os-strip">
+            <div class="os"><svg aria-hidden="true"><use href="#i-apple"/></svg><b>macOS</b><span>Share + View</span></div>
+            <div class="os"><svg aria-hidden="true"><use href="#i-terminal"/></svg><b>Linux</b><span>View now · Share next</span></div>
+            <div class="os"><svg aria-hidden="true"><use href="#i-windows"/></svg><b>Windows</b><span>View now · Share next</span></div>
+          </div>
+          <div class="table-scroll">
+            <table class="avail">
+              <caption class="visually-hidden">Capability availability</caption>
+              <thead><tr><th scope="col">Capability</th><th scope="col">Status</th></tr></thead>
+              <tbody>
+                <tr><td>macOS screen sharing</td><td><span class="pill now"><svg aria-hidden="true"><use href="#i-check"/></svg> Alpha</span></td></tr>
+                <tr><td>macOS / Linux / Windows viewing</td><td><span class="pill now"><svg aria-hidden="true"><use href="#i-check"/></svg> Alpha</span></td></tr>
+                <tr><td>Remote visual pointer</td><td><span class="pill now"><svg aria-hidden="true"><use href="#i-check"/></svg> Alpha</span></td></tr>
+                <tr><td>Keyboard &amp; mouse control</td><td><span class="pill no"><svg aria-hidden="true"><use href="#i-x"/></svg> Not available</span></td></tr>
+                <tr><td>Linux &amp; Windows sharing</td><td><span class="pill next"><svg aria-hidden="true"><use href="#i-clock"/></svg> Planned</span></td></tr>
+                <tr><td>Signed grants &amp; capability leases</td><td><span class="pill next"><svg aria-hidden="true"><use href="#i-clock"/></svg> Planned</span></td></tr>
+                <tr><td>C ABI &amp; Node.js SDK</td><td><span class="pill next"><svg aria-hidden="true"><use href="#i-clock"/></svg> Planned</span></td></tr>
+                <tr><td>Tamper-evident audit</td><td><span class="pill next"><svg aria-hidden="true"><use href="#i-clock"/></svg> Planned</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Security model (condensed) -->
       <section id="security" aria-labelledby="sec-title">
         <div class="wrap">
           <div class="section-head">
-            <p class="eyebrow">Security</p>
-            <h2 id="sec-title">Security beats latency. Latency beats UX.</h2>
-            <p>That ordering is a decision rule, not a slogan. When two conflict, the higher one wins — every time.</p>
+            <p class="eyebrow">Security model</p>
+            <h2 id="sec-title">Secure by default, responsive under load, honest in the interface</h2>
+            <p>Our engineering priorities, in order: <strong>security first, responsiveness second, interface richness third</strong>. When they conflict, the higher one wins.</p>
           </div>
-          <div class="priorities" role="list">
-            <div class="prio" role="listitem"><span class="num">1</span><div><strong>Security</strong> — never skip consent, grant validation, or an audit write to save milliseconds.</div></div>
-            <div class="prio" role="listitem"><span class="num">2</span><div><strong>Latency</strong> — a stalled video must never freeze the controller’s own pointer or the stop button.</div></div>
-            <div class="prio" role="listitem"><span class="num">3</span><div><strong>UX</strong> — richer but slower loses to a responsive, honest interface.</div></div>
+          <div class="grid">
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-lock"/></svg></div><h3>Authorization at the host</h3><p>Encryption secures the pipe; permission is decided by the host, not the transport. A viewer requests — it never self-authorizes.</p></article>
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-bolt"/></svg></div><h3>Responsive under load</h3><p>A stalled video never freezes the viewer’s own pointer or the stop control. Latency beats interface richness by design.</p></article>
+            <article class="card"><div class="ico"><svg aria-hidden="true"><use href="#i-consent"/></svg></div><h3>Honest by construction</h3><p>Active viewing is always visible and the stop control is always present. The product build cannot even link a “skip consent” path.</p></article>
           </div>
-          <h3 style="margin:28px 0 14px; font-size:var(--f-h3)">Non-negotiable invariants (a sample)</h3>
-          <ul class="inv">
-            <li><strong>The local user is the final owner.</strong> A controller requests; it never self-authorizes.</li>
-            <li><strong>Emergency stop overrides everything</strong> — grant, lease, in-flight input — within the target time.</li>
-            <li><strong>Consent is honest and unspoofable.</strong> Active viewing is always visible; white-labeling may not hide it.</li>
-            <li><strong>Transport encryption is necessary, not sufficient.</strong> Authorization is enforced by the host, not the pipe.</li>
-            <li><strong>Secrets never touch logs</strong> — keys, tokens, clipboard, typed text, or screen pixels.</li>
-            <li><strong>No copyleft in the graph.</strong> GPL/LGPL/AGPL/SSPL are blocked at build time.</li>
-          </ul>
-          <p class="callout" style="margin-top:22px">
-            <strong>We’re honest about limits.</strong> This is an alpha. Authorization is still coarse
-            (real local Allow/Deny, but no signed grants or capability scoping yet), sharing is
-            macOS-only, and builds are unsigned. The planned on-device fraud-friction subsystem is
-            designed to <em>deter</em> coached-victim scams and <em>contain</em> remote attackers — it
-            will never claim to “prevent scams” or be tamper-resistant.
-          </p>
+          <p class="muted-line"><a href="#details">Read the full invariants &amp; dependency policy →</a></p>
         </div>
       </section>
 
-      <!-- Roadmap -->
+      <!-- Roadmap: public phase labels -->
       <section id="roadmap" aria-labelledby="road-title">
         <div class="wrap">
           <div class="section-head">
-            <p class="eyebrow">Where we are</p>
-            <h2 id="road-title">Roadmap &amp; pipeline</h2>
-            <p>Built in phases with a design gate on each. Here’s what’s done, what’s active, and what’s next.</p>
+            <p class="eyebrow">Roadmap</p>
+            <h2 id="road-title">Where we are, and what’s next</h2>
           </div>
           <div class="timeline">
-            <div class="phase">
-              <div class="when">Phase 0 · Foundations</div>
-              <div>
-                <span class="status done">Done</span>
-                <h3>Design set + workspace skeleton</h3>
-                <p>Full design docs, Cargo workspace, license gate (cargo-deny), CI matrix, and the protobuf wire codegen — all green.</p>
-              </div>
+            <div class="phase"><div><span class="status done">Completed</span></div><div><h3>Foundations &amp; validation</h3><p>The full design, the shared Rust core, and validation of the low-latency video path and macOS capture/encode.</p></div></div>
+            <div class="phase"><div><span class="status now">Current alpha</span></div><div><h3>Two-machine app: share, connect, point</h3><p>One app that shares or views over real peer-to-peer connections, with a connection-ticket flow, real local consent, and a remote pointer.</p></div></div>
+            <div class="phase"><div><span class="status next">Next</span></div><div><h3>Linux &amp; Windows sharing · signed authorization</h3><p>Screen-sharing backends for Linux and Windows, then signed grants and fine-grained capability leases.</p></div></div>
+            <div class="phase"><div><span class="status later">Later</span></div><div><h3>SDK, audit &amp; hardening</h3><p>The embeddable SDK (C ABI + Node.js), tamper-evident audit, an on-device fraud-friction subsystem, and signed release builds.</p></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Get it -->
+      <section id="get" aria-labelledby="get-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow">Get it</p>
+            <h2 id="get-title">Build the alpha</h2>
+            <p>Open source under Apache-2.0. Build from source today; tagged installers publish to GitHub Releases.</p>
+          </div>
+          <div class="get-grid">
+            <div class="card build">
+              <h3>Build from source</h3>
+              <pre><code>git clone https://github.com/CasualOffice/RASystem
+cd RASystem/app/src-tauri
+cargo run</code></pre>
+              <p class="note">Opens the app — choose <strong>Share this screen</strong> or <strong>Connect to a screen</strong>. macOS first-run asks for Screen Recording permission.</p>
             </div>
-            <div class="phase">
-              <div class="when">Phase S · Risk spikes</div>
-              <div>
-                <span class="status done">Mostly measured</span>
-                <h3>WebCodecs + macOS capture/encode validated</h3>
-                <p>Glass-to-glass render measured on Chrome and Safari; macOS capture→VideoToolbox H.264 encode at ~11&nbsp;ms. The two-machine iroh network probe is the one item still pending.</p>
-              </div>
-            </div>
-            <div class="phase">
-              <div class="when">Phase 1 · Alpha</div>
-              <div>
-                <span class="status now">In progress</span>
-                <h3>Two-machine app: share + connect + remote pointer</h3>
-                <p>Real session spine, concrete iroh transport (control + video + health), a connection-ticket flow, real local Allow/Deny consent, and one unified desktop app that does both roles. Releases are wired.</p>
-              </div>
-            </div>
-            <div class="phase">
-              <div class="when">Next</div>
-              <div>
-                <span class="status next">Planned</span>
-                <h3>Linux &amp; Windows capture · signed grants · fraud-friction</h3>
-                <p>Linux (PipeWire/VAAPI) and Windows (DXGI/Media Foundation) sharing backends; the Phase-2 grant/lease/capability model; an on-device, privacy-safe fraud-friction subsystem; then SDK extraction (C ABI + N-API) and EV code-signing.</p>
-              </div>
+            <div class="card build">
+              <h3>Prebuilt installers</h3>
+              <p>Tagged releases build macOS <code>.dmg</code>, Linux <code>.AppImage</code>/<code>.deb</code>, and Windows installers via CI. Builds are unsigned in the alpha (right-click → Open on macOS).</p>
+              <a class="btn btn-ghost" href="https://github.com/CasualOffice/RASystem/releases" rel="noopener"><svg class="ic" aria-hidden="true"><use href="#i-arrow"/></svg> View releases</a>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- Download -->
-      <section id="download" aria-labelledby="dl-title">
+      <!-- Details: invariants + dependency policy + FAQ (moved down) -->
+      <section id="details" class="faq" aria-labelledby="det-title">
         <div class="wrap">
           <div class="section-head">
-            <p class="eyebrow">Releases</p>
-            <h2 id="dl-title">Get the alpha</h2>
-            <p>
-              One app, both roles. Connecting to view works on all three platforms today; sharing your
-              own screen is macOS-only for now. Builds are unsigned in the alpha.
-            </p>
+            <p class="eyebrow">Technical details</p>
+            <h2 id="det-title">Invariants, dependencies &amp; FAQ</h2>
           </div>
-          <div class="dl">
-            <a class="card" href="https://github.com/CasualOffice/RASystem/releases" rel="noopener">
-              <div class="os" aria-hidden="true">🍎</div>
-              <h3>macOS</h3>
-              <div class="plat">.dmg · share + connect</div>
-            </a>
-            <a class="card" href="https://github.com/CasualOffice/RASystem/releases" rel="noopener">
-              <div class="os" aria-hidden="true">🐧</div>
-              <h3>Linux</h3>
-              <div class="plat">.AppImage / .deb · connect (view)</div>
-            </a>
-            <a class="card" href="https://github.com/CasualOffice/RASystem/releases" rel="noopener">
-              <div class="os" aria-hidden="true">🪟</div>
-              <h3>Windows</h3>
-              <div class="plat">.exe (NSIS) · connect (view)</div>
-            </a>
-          </div>
-          <p class="callout" style="margin-top:18px">
-            No published release yet? Builds are produced by GitHub Actions on each version tag —
-            check the <a href="https://github.com/CasualOffice/RASystem/releases" rel="noopener">Releases page</a>,
-            or build from source with <code>cargo run</code> in <code>app/src-tauri</code>. On macOS,
-            first launch: right-click → Open to bypass Gatekeeper on an unsigned build.
-          </p>
-        </div>
-      </section>
 
-      <!-- FAQ -->
-      <section id="faq" class="faq" aria-labelledby="faq-title">
-        <div class="wrap">
-          <div class="section-head">
-            <p class="eyebrow">Questions</p>
-            <h2 id="faq-title">Frequently asked</h2>
-          </div>
+          <details open>
+            <summary>Non-negotiable security invariants</summary>
+            <div>
+              <ul class="inv">
+                <li><strong>The local user is the final owner.</strong> A viewer requests; it never self-authorizes.</li>
+                <li><strong>Emergency stop overrides everything</strong> — grant, lease, in-flight state — within the target time.</li>
+                <li><strong>Consent is honest and unspoofable.</strong> Active viewing is always visible; branding may not hide it.</li>
+                <li><strong>Transport encryption is necessary, not sufficient.</strong> Authorization is enforced by the host.</li>
+                <li><strong>Secrets never touch logs</strong> — keys, tokens, clipboard, typed text or screen pixels.</li>
+                <li><strong>Capability scope is enforced host-side, per message</strong> — never trust a client’s claimed scope (roadmap).</li>
+              </ul>
+            </div>
+          </details>
           <details>
-            <summary>Is it really peer-to-peer?</summary>
-            <div>Yes. The two machines connect directly over Iroh/QUIC — an encrypted, NAT-traversing transport with relay fallback. A connection ticket carries the host’s identity and addresses so the viewer dials it directly; there is no central server in the MVP.</div>
+            <summary>Dependency &amp; license policy</summary>
+            <div>Apache-2.0 across the whole repository, including a patent grant, so it is safe to embed in proprietary applications. Copyleft licenses (GPL/LGPL/AGPL/SSPL) are rejected and blocked at build time by an automated license gate; permissive licenses (MIT/Apache/BSD/ISC/Zlib/MPL-2.0) are allowed.</div>
+          </details>
+          <details>
+            <summary>Does it need a server?</summary>
+            <div>No application backend is required for the MVP. Direct peer-to-peer connections are preferred; when a direct path is unavailable, an encrypted relay carries the traffic. There is no central application server in the middle.</div>
           </details>
           <details>
             <summary>Can a viewer control my keyboard and mouse?</summary>
-            <div>Not in the alpha. It is view-only: the viewer sees the shared screen and points at it with a visual “look here” cursor. No clicks or keystrokes are ever injected into the shared machine’s OS.</div>
+            <div>Not in the alpha. It is view-only: the viewer sees the shared screen and points at it with a visual cursor. No clicks or keystrokes are injected into the shared machine’s OS.</div>
           </details>
           <details>
-            <summary>How is consent enforced?</summary>
-            <div>The local user is the final owner. A connecting viewer is held in the handshake — no pixels are sent — until the local user clicks Allow; Deny or 90&nbsp;seconds of silence refuses fail-closed. The product build does not even link a “skip consent” path.</div>
+            <summary>Which platforms can share vs. view?</summary>
+            <div>Viewing works on macOS, Linux and Windows. Sharing is macOS-first in the alpha; Linux (PipeWire) and Windows (Desktop Duplication) sharing backends are next.</div>
           </details>
           <details>
-            <summary>Which platforms can share vs. connect?</summary>
-            <div>Connecting (viewing another machine) works on macOS, Linux, and Windows because the viewer only decodes video. Sharing your own screen is macOS-only in the alpha; Linux (PipeWire/VAAPI) and Windows (DXGI/Media Foundation) capture backends are on the roadmap.</div>
-          </details>
-          <details>
-            <summary>What license is it under, and can I embed it commercially?</summary>
-            <div>Apache-2.0 across the whole repository, including a patent grant — so you can embed it in proprietary apps. GPL/LGPL/AGPL/SSPL dependencies are rejected and blocked at build time.</div>
-          </details>
-          <details>
-            <summary>Is there an SDK?</summary>
-            <div>Not yet. The strategy is app-first: build two working reference roles that share Rust crates directly, then draw the SDK boundary (C ABI + N-API) around the proven crates. You can’t validate an SDK surface without a real consumer.</div>
+            <summary>Is there an SDK yet?</summary>
+            <div>Not yet. The approach is app-first: prove the roles in a real reference app, then draw the SDK boundary (C ABI + Node.js) around the proven crates. An SDK surface can’t be validated without a real consumer.</div>
           </details>
         </div>
       </section>
@@ -394,10 +375,7 @@
     <footer class="site-footer">
       <div class="wrap">
         <div class="foot-grid">
-          <a class="brand" href="#top">
-            <img src="assets/favicon-256.png" alt="" width="30" height="30" />
-            <span>Casual&nbsp;RAS</span>
-          </a>
+          <a class="brand" href="#top"><img src="assets/favicon-256.png" alt="" width="30" height="30" /><span>Casual&nbsp;RAS</span></a>
           <ul class="foot-links">
             <li><a href="https://github.com/CasualOffice/RASystem" rel="noopener">GitHub</a></li>
             <li><a href="https://github.com/CasualOffice/RASystem/releases" rel="noopener">Releases</a></li>
@@ -407,8 +385,8 @@
           </ul>
         </div>
         <p class="foot-note">
-          Casual RAS is pre-release software under active development. Screen sharing is macOS-only in
-          the alpha and builds are unsigned. Nothing here is a security guarantee; protection claims
+          Casual RAS is pre-release software under active development. Sharing is macOS-first in the
+          alpha and builds are unsigned. Nothing here is a security guarantee; protection claims
           distinguish what the system can prevent, deter, or cannot stop. © Casual RAS · Apache-2.0.
         </p>
       </div>

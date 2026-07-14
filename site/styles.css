@@ -40,6 +40,7 @@
 html {
   scroll-behavior: smooth;
   -webkit-text-size-adjust: 100%;
+  overflow-x: clip;
 }
 @media (prefers-reduced-motion: reduce) {
   html {
@@ -424,16 +425,20 @@ section {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
 }
 .inv li {
-  padding-left: 30px;
+  padding-left: 22px;
   position: relative;
   color: var(--text-2);
   font-size: 0.97rem;
 }
 .inv li::before {
-  content: "🛡";
+  content: "";
   position: absolute;
-  left: 0;
-  top: 0;
+  left: 2px;
+  top: 9px;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--teal);
 }
 .inv li strong {
   color: var(--text);
@@ -592,4 +597,319 @@ section {
   border-top: 1px solid var(--line);
   max-width: 70ch;
   line-height: 1.6;
+}
+
+/* ── SVG icons ─────────────────────────────────────────────────────────────── */
+svg {
+  display: block;
+}
+.ic {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+.btn .ic {
+  margin-right: -2px;
+}
+.card .ico svg {
+  width: 24px;
+  height: 24px;
+  color: var(--teal);
+}
+
+/* ── Hero (two-column) ─────────────────────────────────────────────────────── */
+.hero-grid {
+  display: grid;
+  grid-template-columns: 1.05fr 1fr;
+  gap: clamp(28px, 5vw, 60px);
+  align-items: center;
+}
+@media (max-width: 940px) {
+  .hero-grid {
+    grid-template-columns: 1fr;
+    gap: 32px;
+  }
+}
+.hero h1 {
+  max-width: 18ch;
+}
+
+/* ── Screenshots / product visuals ─────────────────────────────────────────── */
+.shot {
+  margin: 0;
+}
+.shot img {
+  width: 100%;
+  height: auto;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  background: var(--bg);
+}
+.shot figcaption {
+  margin-top: 12px;
+  color: var(--text-3);
+  font-size: 0.86rem;
+  text-align: center;
+}
+.shots-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 22px;
+  align-items: start;
+}
+@media (max-width: 820px) {
+  .shots-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Connection diagram */
+.conn {
+  width: 100%;
+  height: auto;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px;
+}
+.conn .node rect {
+  fill: var(--bg-2);
+  stroke: var(--line-2);
+  stroke-width: 1.5;
+}
+.conn .screen {
+  fill: #0a1a1f;
+}
+.conn text {
+  fill: var(--text-2);
+  font: 600 12px ui-sans-serif, system-ui, sans-serif;
+  text-anchor: middle;
+}
+.conn .lbl {
+  fill: var(--text-3);
+  font-weight: 500;
+  font-size: 11px;
+}
+.conn .sub {
+  fill: var(--text-3);
+  font-size: 10.5px;
+}
+.conn .link-direct {
+  stroke: var(--teal);
+  stroke-width: 2.5;
+  fill: none;
+}
+.conn .link-relay {
+  stroke: var(--indigo);
+  stroke-width: 1.6;
+  stroke-dasharray: 5 5;
+  fill: none;
+}
+.conn .relay circle {
+  fill: rgba(139, 140, 246, 0.12);
+  stroke: var(--indigo);
+  stroke-width: 1.5;
+}
+.conn .relay-t {
+  fill: var(--indigo);
+  font-size: 18px;
+}
+.conn .dot-teal {
+  fill: var(--teal);
+}
+.conn .cursor {
+  fill: var(--indigo);
+}
+
+/* ── Consent split ─────────────────────────────────────────────────────────── */
+.split-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(24px, 5vw, 48px);
+  align-items: center;
+}
+@media (max-width: 820px) {
+  .split-2 {
+    grid-template-columns: 1fr;
+  }
+}
+.flow {
+  list-style: none;
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+.flow li {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.flow li > span {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  color: var(--teal);
+}
+.flow li > span svg {
+  width: 20px;
+  height: 20px;
+}
+.flow li div {
+  color: var(--text-2);
+}
+.flow li strong {
+  color: var(--text);
+}
+
+/* ── OS strip ──────────────────────────────────────────────────────────────── */
+.os-strip {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+@media (max-width: 620px) {
+  .os-strip {
+    grid-template-columns: 1fr;
+  }
+}
+.os {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  text-align: center;
+}
+.os svg {
+  width: 34px;
+  height: 34px;
+  color: var(--text);
+}
+.os b {
+  font-size: 1.05rem;
+}
+.os span {
+  color: var(--text-3);
+  font-size: 0.85rem;
+}
+
+/* ── Availability table ────────────────────────────────────────────────────── */
+.table-scroll {
+  overflow-x: auto;
+}
+.avail {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 440px;
+}
+.avail th,
+.avail td {
+  text-align: left;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.avail th {
+  color: var(--text-3);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.avail td:first-child {
+  color: var(--text);
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border: 1px solid;
+}
+.pill svg {
+  width: 14px;
+  height: 14px;
+}
+.pill.now {
+  color: var(--ok);
+  border-color: rgba(87, 217, 138, 0.4);
+  background: rgba(87, 217, 138, 0.12);
+}
+.pill.no {
+  color: var(--text-3);
+  border-color: var(--line-2);
+  background: var(--bg-2);
+}
+.pill.next {
+  color: #b3b4fb;
+  border-color: rgba(139, 140, 246, 0.4);
+  background: rgba(139, 140, 246, 0.14);
+}
+
+/* Roadmap status */
+.status.later {
+  background: var(--bg-3);
+  color: var(--text-2);
+  border: 1px solid var(--line-2);
+}
+.phase .status {
+  margin-bottom: 0;
+}
+
+/* ── Get / build ───────────────────────────────────────────────────────────── */
+.get-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 760px) {
+  .get-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.card.build pre {
+  margin: 12px 0;
+  background: #07070a;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  overflow-x: auto;
+}
+.card.build code {
+  font: 0.85rem ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--teal);
+  white-space: pre;
+}
+.card.build .note {
+  color: var(--text-2);
+  font-size: 0.9rem;
+}
+
+/* ── Misc ──────────────────────────────────────────────────────────────────── */
+.muted-line {
+  margin-top: 22px;
+}
+.muted-line a {
+  color: var(--text-2);
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  border: 0;
 }
