@@ -13,16 +13,66 @@ body {
   background: #0b0b0e;
   overflow: hidden;
 }
+/* Top connect bar: paste a host ticket, connect/disconnect. */
+#connectbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 52px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 0 12px;
+  background: #16161c;
+  border-bottom: 1px solid #2a2a34;
+  z-index: 10;
+}
+#connectbar input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid #33333f;
+  background: #0b0b0e;
+  color: #e8e8ee;
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+#connectbar button {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 6px;
+  border: 1px solid #33333f;
+  background: #23232c;
+  color: #e8e8ee;
+  font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+#connectbar button:hover:not(:disabled) {
+  background: #2e2e3a;
+}
+#connectbar button#connect {
+  background: #2f6b34;
+  border-color: #3a8341;
+}
+#connectbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 #screen {
   display: block;
+  position: fixed;
+  top: 52px;
+  left: 0;
   width: 100vw;
-  height: 100vh;
+  height: calc(100vh - 52px);
   object-fit: contain;
   background: #0b0b0e;
 }
 #hud {
   position: fixed;
-  top: 10px;
+  top: 62px;
   left: 12px;
   padding: 4px 8px;
   border-radius: 6px;
@@ -36,7 +86,7 @@ body {
    real controller shows it whenever a session renders; the UI must not be able to suppress it. */
 #banner {
   position: fixed;
-  top: 10px;
+  top: 62px;
   right: 12px;
   padding: 4px 10px;
   border-radius: 6px;

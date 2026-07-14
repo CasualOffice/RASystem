@@ -1,0 +1,26 @@
+[package]
+name = "ras-host"
+description = "Casual RAS host — captures this machine's screen and serves it to a controller over iroh (alpha)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ras-host"
+path = "src/main.rs"
+
+[dependencies]
+# `insecure-no-auth` (default) gives the Phase-1 AllowAllValidator; real consent lands with the host UI.
+ras-core = { path = "../ras-core" }
+ras-media = { path = "../ras-media" }
+ras-transport-iroh = { path = "../ras-transport-iroh" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+
+# The only real capture/encode backend today; empty on non-macOS (the binary prints "unsupported").
+[target.'cfg(target_os = "macos")'.dependencies]
+ras-media-macos = { path = "../ras-media-macos" }
+
+[lints]
+workspace = true

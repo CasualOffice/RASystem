@@ -2960,6 +2960,17 @@ name = "ras-grant"
 version = "0.0.0"
 
 [[package]]
+name = "ras-host"
+version = "0.0.0"
+dependencies = [
+ "ras-core",
+ "ras-media",
+ "ras-media-macos",
+ "ras-transport-iroh",
+ "tokio",
+]
+
+[[package]]
 name = "ras-identity"
 version = "0.0.0"
 

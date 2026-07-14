@@ -132,23 +132,86 @@ function onFrame(bytes) {
   }
 }
 
-async function main() {
+// ── Session lifecycle ────────────────────────────────────────────────────────────────────────
+const ticketInput = document.getElementById("ticket");
+const connectBtn = document.getElementById("connect");
+const mirrorBtn = document.getElementById("mirror");
+const stopBtn = document.getElementById("stop");
+const banner = document.getElementById("banner");
+
+let active = false; // a session (remote or mirror) is live
+
+// Reset all decode/HUD state so a new session starts clean.
+function resetState() {
+  try { decoder && decoder.close(); } catch (_) {}
+  decoder = null;
+  sawKeyframe = false;
+  decoded = 0;
+  received = 0;
+  lastId = null;
+  gaps = 0;
+  t0 = performance.now();
+}
+
+function setLive(isLive, label) {
+  active = isLive;
+  banner.hidden = !isLive;
+  banner.textContent = label || "● LIVE — viewing remote screen";
+  connectBtn.disabled = isLive;
+  mirrorBtn.disabled = isLive;
+  ticketInput.disabled = isLive;
+  stopBtn.disabled = !isLive;
+}
+
+// Start a session by invoking `cmd` (connect_to_host / start_mirror) with a fresh frame Channel.
+async function startSession(cmd, args, liveLabel) {
   if (!("VideoDecoder" in window)) {
     hud.textContent = "WebCodecs VideoDecoder unavailable in this webview.";
     return;
   }
+  resetState();
   const channel = new Channel();
   channel.onmessage = onMessage;
-  window.addEventListener("beforeunload", () => invoke("stop_mirror"));
-
+  hud.textContent = "connecting…";
   try {
-    // The negotiated stream config + frames arrive on the channel (RCFG then RAS1 blobs).
-    await invoke("start_mirror", { onFrame: channel });
+    await invoke(cmd, { ...args, onFrame: channel });
   } catch (e) {
-    hud.textContent = "start_mirror failed: " + e;
+    hud.textContent = cmd + " failed: " + e;
+    setLive(false);
     return;
   }
+  setLive(true, liveLabel);
   hud.textContent = "session up — waiting for stream config…";
 }
 
-main();
+async function stopSession() {
+  try { await invoke("disconnect"); } catch (_) {}
+  try { await invoke("stop_mirror"); } catch (_) {}
+  resetState();
+  setLive(false);
+  hud.textContent = "Disconnected. Paste a host ticket and press Connect.";
+}
+
+connectBtn.addEventListener("click", () => {
+  const ticket = ticketInput.value.trim();
+  if (!ticket) {
+    hud.textContent = "Paste a host connection ticket first.";
+    return;
+  }
+  startSession("connect_to_host", { ticket }, "● LIVE — viewing remote screen");
+});
+
+mirrorBtn.addEventListener("click", () =>
+  startSession("start_mirror", {}, "● LIVE — local mirror (this machine)"),
+);
+
+stopBtn.addEventListener("click", stopSession);
+
+ticketInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !active) connectBtn.click();
+});
+
+window.addEventListener("beforeunload", () => {
+  invoke("disconnect");
+  invoke("stop_mirror");
+});

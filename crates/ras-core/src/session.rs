@@ -258,9 +258,7 @@ where
         sink.emit(LifecycleEvent::Connecting);
 
         // Identity (accept side): the target is unused by the host.
-        let target: DialTarget = EndpointAddr {
-            id: EndpointId([0u8; 32]),
-        };
+        let target: DialTarget = EndpointAddr::new(EndpointId([0u8; 32]));
         let peer_identity = inner.transport.establish(&target).await?;
         let mut control = inner.transport.control_channel().await?;
 

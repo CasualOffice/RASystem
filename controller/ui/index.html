@@ -7,9 +7,21 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
+    <div id="connectbar">
+      <input
+        id="ticket"
+        type="text"
+        placeholder="Paste the host's connection ticket (CASUALRAS1:…)"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button id="connect">Connect</button>
+      <button id="mirror" title="macOS only — view this machine's own screen (test)">Local mirror</button>
+      <button id="stop" disabled>Disconnect</button>
+    </div>
     <canvas id="screen"></canvas>
-    <div id="hud">initialising…</div>
-    <div id="banner">● LIVE — remote screen (local mirror)</div>
+    <div id="hud">Paste a host ticket and press Connect.</div>
+    <div id="banner" hidden>● LIVE — viewing remote screen</div>
     <script type="module" src="main.js"></script>
   </body>
 </html>

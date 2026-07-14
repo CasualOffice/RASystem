@@ -488,9 +488,7 @@ mod e2e {
             SyntheticEncoder::new(),
             Arc::new(AllowAllValidator),
         );
-        let target = EndpointAddr {
-            id: EndpointId([0u8; 32]),
-        };
+        let target = EndpointAddr::new(EndpointId([0u8; 32]));
         let controller = ControllerSession::new(ControllerSessionConfig::new(target), ctrl_tp);
 
         // Host accepts and starts pushing; controller dials and negotiates the stream.
@@ -569,9 +567,7 @@ mod e2e {
             SyntheticEncoder::new(),
             Arc::new(AllowAllValidator),
         );
-        let mut cfg = ControllerSessionConfig::new(EndpointAddr {
-            id: EndpointId([0u8; 32]),
-        });
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32])));
         cfg.reconnect_window = Duration::from_millis(120); // short so the test is fast
         let controller = ControllerSession::new(cfg, ctrl_tp);
 
@@ -634,9 +630,7 @@ mod e2e {
             SyntheticEncoder::new(),
             Arc::new(AllowAllValidator),
         );
-        let mut cfg = ControllerSessionConfig::new(EndpointAddr {
-            id: EndpointId([0u8; 32]),
-        });
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32])));
         // Deliberately long: if the controller wrongly suspended, it would still be Suspended (not
         // Terminated) for the whole test window, failing the prompt-termination assertion below.
         cfg.reconnect_window = Duration::from_secs(30);
@@ -691,9 +685,7 @@ mod e2e {
             Arc::new(AllowAllValidator),
         );
         let controller = ControllerSession::new(
-            ControllerSessionConfig::new(EndpointAddr {
-                id: EndpointId([0u8; 32]),
-            }),
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
             ctrl_tp,
         );
         let _host_events = host.start().await.unwrap();
@@ -740,9 +732,7 @@ mod e2e {
             Arc::new(AllowAllValidator),
         );
         let controller = ControllerSession::new(
-            ControllerSessionConfig::new(EndpointAddr {
-                id: EndpointId([0u8; 32]),
-            }),
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
             ctrl_tp,
         );
 
@@ -799,9 +789,7 @@ mod e2e {
             Arc::new(AllowAllValidator),
         );
         let controller = ControllerSession::new(
-            ControllerSessionConfig::new(EndpointAddr {
-                id: EndpointId([0u8; 32]),
-            }),
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
             ctrl_tp,
         );
         let _h = host.start().await.unwrap();
@@ -836,9 +824,7 @@ mod e2e {
             Arc::new(AllowAllValidator),
         );
         let controller = ControllerSession::new(
-            ControllerSessionConfig::new(EndpointAddr {
-                id: EndpointId([0u8; 32]),
-            }),
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
             ctrl_tp,
         );
         let _host_events = host.start().await.unwrap();

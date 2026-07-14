@@ -77,9 +77,7 @@ async fn main() -> Result<(), CoreError> {
         Arc::new(AllowAllValidator),
     );
     let controller = ControllerSession::new(
-        ControllerSessionConfig::new(EndpointAddr {
-            id: EndpointId([0u8; 32]),
-        }),
+        ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
         ctrl_tp,
     );
 

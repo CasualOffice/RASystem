@@ -12,6 +12,8 @@
 //! returns the peer identity the QUIC/TLS handshake already authenticated; grant/lease validation
 //! stays in `ras-core` behind the [`GrantValidator`](crate::deps::GrantValidator) seam.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::deps::{
@@ -24,20 +26,23 @@ use ras_transport_iroh::{
     ConnHealth, ControlChannel, Endpoint, SendOutcome, Session, VideoEvent, VideoSink, VideoSource,
 };
 
-/// A [`SessionTransport`] over one established iroh session. Owns the [`Endpoint`] so the connection
-/// (and its background tasks) outlive the session; drop it to tear the connection down.
+/// A [`SessionTransport`] over one established iroh session. Holds a shared handle to the owning
+/// [`Endpoint`] so the connection (and its background tasks) outlive the session — while the same
+/// endpoint stays free to accept further controllers (the host serves one viewer at a time but need
+/// not rebind between them).
 pub struct IrohSessionTransport {
-    // Kept alive for the session's lifetime — dropping the endpoint closes the connection.
-    _endpoint: Endpoint,
+    // Keeps the endpoint alive for the session's lifetime without taking exclusive ownership.
+    _endpoint: Arc<Endpoint>,
     session: Session,
     remote: PeerIdentity,
 }
 
 impl IrohSessionTransport {
-    /// Wrap an already-established session (+ its owning endpoint). The QUIC/TLS handshake has
-    /// already authenticated the peer; its identity is captured here for [`establish`].
+    /// Wrap an already-established session together with a shared handle to its owning endpoint. The
+    /// QUIC/TLS handshake has already authenticated the peer; its identity is captured here for
+    /// [`establish`].
     #[must_use]
-    pub fn new(endpoint: Endpoint, session: Session) -> Self {
+    pub fn new(endpoint: Arc<Endpoint>, session: Session) -> Self {
         let remote = session.remote();
         Self {
             _endpoint: endpoint,
@@ -171,17 +176,21 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spine_runs_over_real_iroh_transport() {
         // Establish one real iroh connection: host accepts, controller dials by direct address.
-        let host_ep = Endpoint::bind().await.unwrap();
-        let ctrl_ep = Endpoint::bind().await.unwrap();
+        let host_ep = Arc::new(Endpoint::bind().await.unwrap());
+        let ctrl_ep = Arc::new(Endpoint::bind().await.unwrap());
         let host_id = host_ep.id();
         let host_addrs = to_loopback(&host_ep.bound_addrs());
 
+        let accept_ep = host_ep.clone();
         let accept = tokio::spawn(async move {
-            let session = host_ep.accept().await.unwrap().expect("an inbound session");
-            (host_ep, session)
+            accept_ep
+                .accept()
+                .await
+                .unwrap()
+                .expect("an inbound session")
         });
         let ctrl_session = ctrl_ep.connect_direct(&host_id, &host_addrs).await.unwrap();
-        let (host_ep, host_session) = accept.await.unwrap();
+        let host_session = accept.await.unwrap();
 
         // Wrap each established side in the adapter and hand it to the orchestrators as `dyn`.
         let host_tp = Arc::new(IrohSessionTransport::new(host_ep, host_session));
@@ -195,7 +204,7 @@ mod tests {
             Arc::new(AllowAllValidator),
         );
         let controller = ControllerSession::new(
-            ControllerSessionConfig::new(EndpointAddr { id: host_id }),
+            ControllerSessionConfig::new(EndpointAddr::new(host_id)),
             ctrl_tp,
         );
 

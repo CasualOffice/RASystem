@@ -32,13 +32,146 @@ pub const ALPN: &[u8] = b"casual-ras/1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EndpointId(pub [u8; 32]);
 
-/// Dialable address: an [`EndpointId`] plus optional relay/direct hints (newtype over
-/// `iroh::EndpointAddr`).
-#[derive(Debug, Clone)]
+/// Dialable address: an [`EndpointId`] plus optional relay + direct-address hints (newtype over
+/// `iroh::EndpointAddr`, so nothing iroh-typed leaks). This is what a **connection ticket** carries:
+/// the controller reconstructs one from the host's ticket string and dials it. Identity is
+/// authenticated by the QUIC/TLS handshake regardless of which hint path (direct/relay/discovery)
+/// actually connects — the address hints only affect *reachability*, never *authority* (Invariant 9).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointAddr {
     /// The peer's identity.
     pub id: EndpointId,
-    // relay + direct-address hints added with the iroh wiring.
+    /// Known direct socket addresses (hole-punch / same-LAN candidates). May be stale; iroh falls
+    /// back to relay + discovery-by-id when they don't reach.
+    pub direct_addrs: Vec<std::net::SocketAddr>,
+    /// The peer's home relay URL, if known — the always-reachable fallback path across NAT.
+    pub relay_url: Option<String>,
+}
+
+/// Human-transferable connection-ticket prefix + version. A ticket is `CASUALRAS1:<hex>` where the
+/// hex payload is [`EndpointAddr`] in the fixed binary layout below. Bumped only on a breaking
+/// ticket-layout change.
+const TICKET_PREFIX: &str = "CASUALRAS1:";
+
+impl EndpointAddr {
+    /// An identity-only address (no reachability hints): dialing relies purely on iroh's
+    /// discovery-by-id + relay. Handy in tests and as a minimal ticket.
+    #[must_use]
+    pub fn new(id: EndpointId) -> Self {
+        Self {
+            id,
+            direct_addrs: Vec::new(),
+            relay_url: None,
+        }
+    }
+
+    /// Encode as a copy-pasteable **connection ticket** string (`CASUALRAS1:<hex>`). The payload is,
+    /// all lengths/ports big-endian:
+    /// `id[32] | relay_len:u16 | relay_utf8[relay_len] | addr_count:u8 | (fam:u8 | ip[4|16] | port:u16)*`.
+    #[must_use]
+    pub fn to_ticket(&self) -> String {
+        let mut buf = Vec::with_capacity(48);
+        buf.extend_from_slice(&self.id.0);
+        let relay = self.relay_url.as_deref().unwrap_or("");
+        let relay_len = u16::try_from(relay.len()).unwrap_or(0);
+        buf.extend_from_slice(&relay_len.to_be_bytes());
+        buf.extend_from_slice(&relay.as_bytes()[..relay_len as usize]);
+        let count = u8::try_from(self.direct_addrs.len()).unwrap_or(u8::MAX);
+        buf.push(count);
+        for sa in self.direct_addrs.iter().take(count as usize) {
+            match sa.ip() {
+                std::net::IpAddr::V4(v4) => {
+                    buf.push(4);
+                    buf.extend_from_slice(&v4.octets());
+                }
+                std::net::IpAddr::V6(v6) => {
+                    buf.push(6);
+                    buf.extend_from_slice(&v6.octets());
+                }
+            }
+            buf.extend_from_slice(&sa.port().to_be_bytes());
+        }
+        let mut s = String::with_capacity(TICKET_PREFIX.len() + buf.len() * 2);
+        s.push_str(TICKET_PREFIX);
+        for b in &buf {
+            s.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
+            s.push(char::from_digit((b & 0xf) as u32, 16).unwrap_or('0'));
+        }
+        s
+    }
+
+    /// Parse a **connection ticket** produced by [`to_ticket`](Self::to_ticket). Fail-closed: a wrong
+    /// prefix, odd/short hex, an over-long field, or trailing garbage is a typed, content-free error —
+    /// never a partial or defaulted address.
+    pub fn from_ticket(ticket: &str) -> Result<Self, TransportError> {
+        let bad =
+            || RasError::recoverable(ErrorCode::InvalidMessage, "malformed connection ticket");
+        let hex = ticket.strip_prefix(TICKET_PREFIX).ok_or_else(bad)?;
+        if hex.len() % 2 != 0 {
+            return Err(bad());
+        }
+        let mut bytes = Vec::with_capacity(hex.len() / 2);
+        let h = hex.as_bytes();
+        let mut i = 0;
+        while i < h.len() {
+            let hi = (h[i] as char).to_digit(16).ok_or_else(bad)?;
+            let lo = (h[i + 1] as char).to_digit(16).ok_or_else(bad)?;
+            bytes.push(((hi << 4) | lo) as u8);
+            i += 2;
+        }
+
+        // Cursor-based decode; every read is bounds-checked against the remaining buffer.
+        let mut c = 0usize;
+        let take = |c: &mut usize, n: usize| -> Result<std::ops::Range<usize>, TransportError> {
+            let end = c.checked_add(n).ok_or_else(bad)?;
+            if end > bytes.len() {
+                return Err(bad());
+            }
+            let r = *c..end;
+            *c = end;
+            Ok(r)
+        };
+
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&bytes[take(&mut c, 32)?]);
+        let rl = take(&mut c, 2)?;
+        let relay_len = u16::from_be_bytes([bytes[rl.start], bytes[rl.start + 1]]);
+        let relay_url = if relay_len == 0 {
+            None
+        } else {
+            let r = take(&mut c, relay_len as usize)?;
+            Some(String::from_utf8(bytes[r].to_vec()).map_err(|_| bad())?)
+        };
+        let count = bytes[take(&mut c, 1)?.start];
+        let mut direct_addrs = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let fam = bytes[take(&mut c, 1)?.start];
+            let ip: std::net::IpAddr = match fam {
+                4 => {
+                    let o = &bytes[take(&mut c, 4)?];
+                    std::net::Ipv4Addr::new(o[0], o[1], o[2], o[3]).into()
+                }
+                6 => {
+                    let o = &bytes[take(&mut c, 16)?];
+                    let mut a = [0u8; 16];
+                    a.copy_from_slice(o);
+                    std::net::Ipv6Addr::from(a).into()
+                }
+                _ => return Err(bad()),
+            };
+            let p = take(&mut c, 2)?;
+            let port = u16::from_be_bytes([bytes[p.start], bytes[p.start + 1]]);
+            direct_addrs.push(std::net::SocketAddr::new(ip, port));
+        }
+        if c != bytes.len() {
+            return Err(bad()); // trailing garbage
+        }
+        Ok(Self {
+            id: EndpointId(id),
+            direct_addrs,
+            relay_url,
+        })
+    }
 }
 
 /// Direct (hole-punched) vs relayed vs migrating. A controller `match` must handle `Migrating`.
@@ -131,11 +264,44 @@ impl Endpoint {
         self.inner.bound_sockets()
     }
 
-    /// Dial a peer by identity (controller role); n0 discovery resolves its address. QUIC/TLS
-    /// authenticates the peer's identity — never its authorization (Invariant 9).
+    /// Block until this endpoint has contacted its home relay, so [`addr`](Self::addr) contains a
+    /// relay hint that makes the endpoint dialable across NAT. Call before publishing a ticket.
+    pub async fn online(&self) {
+        self.inner.online().await;
+    }
+
+    /// This endpoint's current **dialable** address — identity + home relay + observed direct
+    /// addresses — for building a connection ticket ([`EndpointAddr::to_ticket`]). Call
+    /// [`online`](Self::online) first so the relay hint is populated.
+    #[must_use]
+    pub fn addr(&self) -> EndpointAddr {
+        let a = self.inner.addr();
+        let id = EndpointId(*a.id.as_bytes());
+        let direct_addrs: Vec<std::net::SocketAddr> = a.ip_addrs().copied().collect();
+        let relay_url = a.relay_urls().next().map(ToString::to_string);
+        EndpointAddr {
+            id,
+            direct_addrs,
+            relay_url,
+        }
+    }
+
+    /// Dial a peer from a full [`EndpointAddr`] (controller role): try its direct-address + relay
+    /// hints, and fall back to n0 discovery-by-id when they don't reach. QUIC/TLS authenticates the
+    /// peer's identity — never its authorization (Invariant 9).
     pub async fn connect(&self, target: &EndpointAddr) -> Result<Session, TransportError> {
         let peer = iroh_id(&target.id)?;
-        self.dial(peer.into()).await
+        let mut addr = target
+            .direct_addrs
+            .iter()
+            .copied()
+            .fold(IrohEndpointAddr::new(peer), |a, s| a.with_ip_addr(s));
+        if let Some(url) = &target.relay_url {
+            if let Ok(relay) = url.parse() {
+                addr = addr.with_relay_url(relay);
+            }
+        }
+        self.dial(addr).await
     }
 
     /// Dial a peer by explicit direct address(es), bypassing discovery — the same-network / loopback
@@ -744,6 +910,50 @@ fn map_health(conn: &Connection) -> ConnHealth {
         estimated_bandwidth_bps,
         frames_dropped: 0,
         state: LinkState::Live,
+    }
+}
+
+#[cfg(test)]
+mod ticket_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn ticket_round_trips_id_relay_and_addrs() {
+        let addr = EndpointAddr {
+            id: EndpointId([0xAB; 32]),
+            direct_addrs: vec![
+                "192.168.1.5:41641".parse::<SocketAddr>().unwrap(),
+                "[2001:db8::1]:5000".parse::<SocketAddr>().unwrap(),
+            ],
+            relay_url: Some("https://relay.example.com./".to_string()),
+        };
+        let ticket = addr.to_ticket();
+        assert!(ticket.starts_with(TICKET_PREFIX));
+        assert_eq!(EndpointAddr::from_ticket(&ticket).unwrap(), addr);
+    }
+
+    #[test]
+    fn ticket_round_trips_identity_only() {
+        let addr = EndpointAddr::new(EndpointId([7u8; 32]));
+        assert_eq!(EndpointAddr::from_ticket(&addr.to_ticket()).unwrap(), addr);
+    }
+
+    #[test]
+    fn from_ticket_is_fail_closed() {
+        let good = EndpointAddr::new(EndpointId([1u8; 32])).to_ticket();
+        // Wrong prefix.
+        assert!(EndpointAddr::from_ticket("NOPE:00").is_err());
+        // Odd-length hex.
+        assert!(EndpointAddr::from_ticket(&format!("{good}0")).is_err());
+        // Non-hex char.
+        assert!(EndpointAddr::from_ticket(&format!("{TICKET_PREFIX}zz")).is_err());
+        // Truncated (only the id, missing relay_len/count).
+        let short = &good[..TICKET_PREFIX.len() + 10];
+        assert!(EndpointAddr::from_ticket(short).is_err());
+        // Trailing garbage.
+        assert!(EndpointAddr::from_ticket(&format!("{good}ffff")).is_err());
     }
 }
 
