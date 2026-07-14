@@ -94,3 +94,71 @@ h1 {
   color: #7a7a88;
   font-size: 12px;
 }
+
+/* Local consent prompt — a modal over the panel. The viewer stays blocked until Allow. */
+#consent {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+#consent[hidden] {
+  display: none;
+}
+.consent-card {
+  width: min(420px, 88vw);
+  padding: 20px;
+  border-radius: 12px;
+  background: #17171d;
+  border: 1px solid #33333f;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+.consent-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.consent-id {
+  color: #9a9aa8;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.consent-id span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #b9b9c6;
+}
+.consent-note {
+  color: #b9b9c6;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+.consent-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.consent-actions button {
+  padding: 9px 18px;
+  border-radius: 8px;
+  border: 1px solid #33333f;
+  font-weight: 600;
+  cursor: pointer;
+}
+#deny {
+  background: #23232c;
+  color: #e8e8ee;
+}
+#deny:hover {
+  background: #2e2e3a;
+}
+#allow {
+  background: #2f6b34;
+  border-color: #3a8341;
+  color: #fff;
+}
+#allow:hover {
+  background: #367a3d;
+}

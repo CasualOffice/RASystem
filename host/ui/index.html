@@ -25,6 +25,19 @@
       <span class="note">View-only · the viewer can point but cannot click or type on this machine.</span>
     </div>
 
+    <div id="consent" hidden>
+      <div class="consent-card">
+        <p class="consent-title">A viewer wants to see your screen</p>
+        <p class="consent-id">identity <span id="peer">—</span></p>
+        <p class="consent-note">They will be able to view your screen and point at it. They cannot
+          click or type on your machine.</p>
+        <div class="consent-actions">
+          <button id="deny">Deny</button>
+          <button id="allow">Allow</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="main.js"></script>
   </body>
 </html>

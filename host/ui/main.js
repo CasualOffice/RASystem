@@ -39,3 +39,25 @@ copyBtn.addEventListener("click", async () => {
 });
 
 stopBtn.addEventListener("click", () => invoke("stop_sharing"));
+
+// ── Local consent (Invariant 1: the local user authorizes each viewer) ─────────────────────────
+const consent = document.getElementById("consent");
+const peerEl = document.getElementById("peer");
+const allowBtn = document.getElementById("allow");
+const denyBtn = document.getElementById("deny");
+
+listen("consent-request", (e) => {
+  peerEl.textContent = e.payload || "unknown";
+  consent.hidden = false;
+});
+listen("consent-closed", () => {
+  consent.hidden = true;
+});
+allowBtn.addEventListener("click", () => {
+  consent.hidden = true;
+  invoke("respond_consent", { allow: true });
+});
+denyBtn.addEventListener("click", () => {
+  consent.hidden = true;
+  invoke("respond_consent", { allow: false });
+});

@@ -418,6 +418,7 @@ dependencies = [
 name = "casual-ras-host"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "ras-core",
  "ras-media",
  "ras-media-macos",

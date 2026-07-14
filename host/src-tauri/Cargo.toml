@@ -17,8 +17,11 @@ tauri-build = { version = "2.6", features = [] }
 tauri = { version = "2.11", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `insecure-no-auth` (default) gives the Phase-1 AllowAllValidator; real consent gating lands later.
-ras-core = { path = "../../crates/ras-core" }
+async-trait = "0.1"
+# `default-features = false` deliberately drops the `insecure-no-auth` AllowAllValidator: the product
+# host must never link the no-op consent seam. It implements a real `GrantValidator` (local Allow/Deny)
+# instead — Invariant 1 (the local user authorizes; a controller never self-authorizes).
+ras-core = { path = "../../crates/ras-core", default-features = false }
 ras-media = { path = "../../crates/ras-media" }
 ras-protocol = { path = "../../crates/ras-protocol" }
 ras-transport-iroh = { path = "../../crates/ras-transport-iroh" }
