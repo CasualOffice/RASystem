@@ -70,6 +70,72 @@ body {
   object-fit: contain;
   background: #0b0b0e;
 }
+/* Annotation overlay — exactly covers the video area. Pointer events only when a tool is active
+   (the `drawing` class); otherwise clicks pass through and the app stays strictly view-only. */
+#annot {
+  position: fixed;
+  top: 52px;
+  left: 0;
+  width: 100vw;
+  height: calc(100vh - 52px);
+  pointer-events: none;
+  z-index: 5;
+}
+#annot.drawing {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+/* Floating annotation toolbar. */
+#tools {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(22, 22, 28, 0.92);
+  border: 1px solid #2a2a34;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  z-index: 20;
+}
+#tools button {
+  height: 30px;
+  min-width: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #e8e8ee;
+  font: 15px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+#tools button:hover {
+  background: #2e2e3a;
+}
+#tools button.active {
+  background: #3a3a48;
+  border-color: #55556a;
+}
+#tools .swatch {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+}
+#tools .swatch.active {
+  border-color: #fff;
+}
+#tools .sep {
+  width: 1px;
+  height: 22px;
+  background: #33333f;
+  margin: 0 4px;
+}
 #hud {
   position: fixed;
   top: 62px;

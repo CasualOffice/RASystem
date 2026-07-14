@@ -20,6 +20,22 @@
       <button id="stop" disabled>Disconnect</button>
     </div>
     <canvas id="screen"></canvas>
+    <canvas id="annot"></canvas>
+    <div id="tools" hidden>
+      <button data-tool="off" class="active" title="Stop annotating (interact with nothing — view only)">🚫</button>
+      <button data-tool="pen" title="Freehand pen">✏️</button>
+      <button data-tool="arrow" title="Arrow">↗</button>
+      <button data-tool="rect" title="Rectangle">▭</button>
+      <button data-tool="hi" title="Highlighter">🖍</button>
+      <span class="sep"></span>
+      <button class="swatch" data-color="#ff3b30" style="background:#ff3b30" title="Red"></button>
+      <button class="swatch" data-color="#ffcc00" style="background:#ffcc00" title="Yellow"></button>
+      <button class="swatch" data-color="#34c759" style="background:#34c759" title="Green"></button>
+      <button class="swatch" data-color="#0a84ff" style="background:#0a84ff" title="Blue"></button>
+      <span class="sep"></span>
+      <button id="undo" title="Undo last">⤺</button>
+      <button id="clearannot" title="Clear all annotations">Clear</button>
+    </div>
     <div id="hud">Paste a host ticket and press Connect.</div>
     <div id="banner" hidden>● LIVE — viewing remote screen</div>
     <script type="module" src="main.js"></script>

@@ -151,6 +151,7 @@ function resetState() {
   lastId = null;
   gaps = 0;
   t0 = performance.now();
+  annotations.clear();
 }
 
 function setLive(isLive, label) {
@@ -161,6 +162,7 @@ function setLive(isLive, label) {
   mirrorBtn.disabled = isLive;
   ticketInput.disabled = isLive;
   stopBtn.disabled = !isLive;
+  annotations.show(isLive);
 }
 
 // Start a session by invoking `cmd` (connect_to_host / start_mirror) with a fresh frame Channel.
@@ -215,3 +217,149 @@ window.addEventListener("beforeunload", () => {
   invoke("disconnect");
   invoke("stop_mirror");
 });
+
+// ── Annotations (viewer-side markup) ───────────────────────────────────────────────────────────
+// A transparent overlay the viewer draws on: pen / arrow / rectangle / highlighter. This is *not*
+// remote control — nothing is injected into the host's OS. Strokes are local to this canvas (v1);
+// syncing them to a host-side overlay is the next step. When the tool is "off" the overlay ignores
+// pointer events entirely, so the app is strictly view-only unless you deliberately pick a tool.
+const annotations = (function () {
+  const cv = document.getElementById("annot");
+  const g = cv.getContext("2d");
+  const bar = document.getElementById("tools");
+  let tool = "off";
+  let color = "#ff3b30";
+  let strokes = []; // committed: { tool, color, pts:[{x,y},…] }
+  let cur = null; // in-progress stroke
+  let dpr = 1;
+
+  function fit() {
+    dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth;
+    const h = cv.clientHeight;
+    cv.width = Math.max(1, Math.round(w * dpr));
+    cv.height = Math.max(1, Math.round(h * dpr));
+    render();
+  }
+
+  function pt(e) {
+    const r = cv.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * dpr, y: (e.clientY - r.top) * dpr };
+  }
+
+  function drawStroke(s) {
+    const pts = s.pts;
+    if (!pts.length) return;
+    g.strokeStyle = s.color;
+    g.lineJoin = "round";
+    g.lineCap = "round";
+    if (s.tool === "hi") {
+      g.globalAlpha = 0.35;
+      g.lineWidth = 18 * dpr;
+    } else {
+      g.globalAlpha = 1;
+      g.lineWidth = 3 * dpr;
+    }
+    const a = pts[0];
+    const b = pts[pts.length - 1];
+    g.beginPath();
+    if (s.tool === "rect") {
+      g.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
+    } else if (s.tool === "arrow") {
+      g.moveTo(a.x, a.y);
+      g.lineTo(b.x, b.y);
+      g.stroke();
+      const ang = Math.atan2(b.y - a.y, b.x - a.x);
+      const head = 16 * dpr;
+      g.beginPath();
+      g.moveTo(b.x, b.y);
+      g.lineTo(b.x - head * Math.cos(ang - Math.PI / 6), b.y - head * Math.sin(ang - Math.PI / 6));
+      g.moveTo(b.x, b.y);
+      g.lineTo(b.x - head * Math.cos(ang + Math.PI / 6), b.y - head * Math.sin(ang + Math.PI / 6));
+      g.stroke();
+    } else {
+      // pen / highlighter: freehand polyline
+      g.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+  }
+
+  function render() {
+    g.clearRect(0, 0, cv.width, cv.height);
+    for (const s of strokes) drawStroke(s);
+    if (cur) drawStroke(cur);
+  }
+
+  cv.addEventListener("pointerdown", (e) => {
+    if (tool === "off") return;
+    cv.setPointerCapture(e.pointerId);
+    cur = { tool, color, pts: [pt(e)] };
+    render();
+  });
+  cv.addEventListener("pointermove", (e) => {
+    if (!cur) return;
+    const p = pt(e);
+    // Freehand keeps every point; shapes only need first + last.
+    if (cur.tool === "pen" || cur.tool === "hi") cur.pts.push(p);
+    else cur.pts[1] = p;
+    render();
+  });
+  function endStroke() {
+    if (!cur) return;
+    if (cur.pts.length > 1 || cur.tool === "pen" || cur.tool === "hi") strokes.push(cur);
+    cur = null;
+    render();
+  }
+  cv.addEventListener("pointerup", endStroke);
+  cv.addEventListener("pointercancel", endStroke);
+
+  // Toolbar wiring.
+  bar.querySelectorAll("button[data-tool]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      tool = btn.dataset.tool;
+      bar.querySelectorAll("button[data-tool]").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      cv.classList.toggle("drawing", tool !== "off");
+    });
+  });
+  bar.querySelectorAll(".swatch").forEach((sw) => {
+    sw.addEventListener("click", () => {
+      color = sw.dataset.color;
+      bar.querySelectorAll(".swatch").forEach((b) => b.classList.remove("active"));
+      sw.classList.add("active");
+    });
+  });
+  document.getElementById("undo").addEventListener("click", () => {
+    strokes.pop();
+    render();
+  });
+  document.getElementById("clearannot").addEventListener("click", () => {
+    strokes = [];
+    render();
+  });
+  // Default swatch selection.
+  const firstSwatch = bar.querySelector(".swatch");
+  if (firstSwatch) firstSwatch.classList.add("active");
+
+  window.addEventListener("resize", fit);
+
+  return {
+    show(on) {
+      bar.hidden = !on;
+      if (on) fit();
+    },
+    clear() {
+      strokes = [];
+      cur = null;
+      // Reset to view-only when a session ends.
+      tool = "off";
+      cv.classList.remove("drawing");
+      bar.querySelectorAll("button[data-tool]").forEach((b) => b.classList.remove("active"));
+      const off = bar.querySelector('button[data-tool="off"]');
+      if (off) off.classList.add("active");
+      render();
+    },
+  };
+})();
