@@ -224,7 +224,19 @@ body {
   background: #181820;
 }
 .card-icon {
-  font-size: 30px;
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  border: 1px solid #2a2a34;
+  background: #101017;
+}
+.card-icon.share {
+  color: #7be0cf;
+}
+.card-icon.connect {
+  color: #8b8cf6;
 }
 .card-title {
   margin-top: 10px;
