@@ -64,7 +64,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lat_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
 
         // Contract checks (the reason this example exists).
-        assert_eq!(&ef.data[..4], &[0, 0, 0, 1], "every AU is Annex-B start-code framed");
+        assert_eq!(
+            &ef.data[..4],
+            &[0, 0, 0, 1],
+            "every AU is Annex-B start-code framed"
+        );
         if first_is_keyframe.is_none() {
             first_is_keyframe = Some(ef.is_keyframe);
         }
@@ -96,7 +100,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "mean {:.1} KB/frame · encode(+sync drain) median {med:.2} ms · wrote {out_path}",
         bytes as f64 / frames.max(1) as f64 / 1024.0
     );
-    assert_eq!(first_is_keyframe, Some(true), "the first emitted frame must be a keyframe");
+    assert_eq!(
+        first_is_keyframe,
+        Some(true),
+        "the first emitted frame must be a keyframe"
+    );
     assert!(monotonic, "frame ids must be gap-free monotonic");
     println!("OK — capture→encode via the ras-media traits produced a valid Annex-B stream.");
     println!("Verify decode:  ffprobe -v error -show_entries stream=codec_name,width,height -of default=nk=1 {out_path}");

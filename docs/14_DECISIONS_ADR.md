@@ -123,6 +123,27 @@
   argument. Synthetic capture returns `PlatformSurface::none()` and the synthetic encoder ignores it
   (unchanged behaviour). Additive/non-breaking: `SurfaceKind` is `#[non_exhaustive]`.
 
+- **ADR-059 · Transport ALPN `casual-ras/1`; the control channel rides one bidi QUIC stream ·
+  Accepted.** The concrete `ras-transport-iroh` first increment needs two wire commitments. **(1)
+  ALPN:** every endpoint binds and dials with the single application protocol id `casual-ras/1`.
+  ALPN is matched in the QUIC/TLS handshake, so a peer speaking any other protocol (or a stale
+  Casual RAS wire version) is refused *before any application byte is exchanged* — fail-closed at
+  the TLS layer, the earliest possible point. The trailing `/1` is the transport-wire major version;
+  it bumps only on a breaking framing/stream-topology change, never for an additive `ControlMsg`
+  variant (those are already versioned inside the protobuf). **(2) Control-stream topology:** the
+  reliable, ordered control channel is exactly one bidirectional QUIC stream, **opened by the dialer
+  (controller) and accepted by the acceptor (host)**, so both ends deterministically bind the same
+  stream without a negotiation round-trip. It carries the length-prefixed `ControlMsg` framing
+  (`u32-BE len | protobuf`, `MAX_CONTROL_FRAME` DoS guard) already fuzzed in `FramedControlChannel`.
+  Video rides *separate* per-frame unidirectional streams (next increment) so a stalled or reset
+  video frame can never head-of-line-block control or the emergency stop (the latency invariant).
+  This is a wire commitment because it fixes who-opens-what and the ALPN string; it does **not**
+  touch authorization — QUIC/TLS authenticates *identity* (each side reads the other's `EndpointId`
+  as the connection remote), never *authority* (Invariant 9). Grants/leases still ride opaque in
+  `ControlMsg::AuthEnvelope` and are validated host-side. Verified by a hermetic loopback
+  integration test (two real iroh endpoints, direct-address dial, `Hello`⇄`Bye` round-trip, both
+  sides assert the peer's authenticated `EndpointId`).
+
 ## Security, authorization, fraud
 
 - **ADR-040 · Algorithm-pinned signed grants, sender-constrained · Accepted.** Prefer **Biscuit**

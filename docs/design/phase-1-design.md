@@ -1524,3 +1524,16 @@ Ordered steps (each ends in a recorded result, not just code):
 Steps 0–3 are macOS + toolchain work (verified on your Mac); step 4 is the only one that needs the
 two-laptop iroh result. Nothing here changes the wire protocol or the core traits — it fills bodies
 behind seams that already exist and are tested.
+
+**Progress — step 4, first increment (control-plane) landed.** `ras-transport-iroh` now has a real
+`Endpoint` (bind/id/accept/connect + a `connect_direct` direct-address path for same-network dials),
+a real `Session` (`remote()` = the peer's authenticated `EndpointId`; `close(code)` → QUIC app close
+code), and a real `ControlChannel` that runs the already-fuzzed `FramedControlChannel` codec over
+iroh's `(RecvStream, SendStream)`. ALPN `casual-ras/1` and the "dialer opens / acceptor accepts the
+single control stream" topology are pinned in **ADR-059**. Verified by a **hermetic loopback
+integration test** — two real iroh endpoints, direct-address dial (no discovery/relay), a
+`Hello`⇄`Bye` control round-trip, and both sides asserting the peer's `EndpointId` (Invariant 9).
+`VideoSink`/`VideoSource` (per-frame uni streams) and `HealthObserver` (`Connection::stats()` →
+`watch`) stay `todo!()` for the next increments, as does the `IrohTransport: SessionTransport`
+adapter in `ras-core` that lets the controller swap loopback→iroh behind the existing seam. The
+cross-machine two-laptop run remains the developer-owned on-device step.

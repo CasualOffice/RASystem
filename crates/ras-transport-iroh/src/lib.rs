@@ -8,12 +8,21 @@
 //! `iroh` directly.
 
 use bytes::BytesMut;
+use iroh::endpoint::{presets, Connection, RecvStream, SendStream, VarInt};
+use iroh::{
+    Endpoint as IrohEndpoint, EndpointAddr as IrohEndpointAddr, EndpointId as IrohEndpointId,
+};
 use ras_media::{EncodedFrame, FrameId};
 use ras_protocol::{ControlMsg, ErrorCode, RasError};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// This crate's error alias over the shared taxonomy.
 pub type TransportError = ras_protocol::RasError;
+
+/// Transport ALPN — protocol identity + version negotiated in the QUIC/TLS handshake. Peers with a
+/// mismatched ALPN cannot connect (fail-closed at the TLS layer, before any app bytes). Bumped only
+/// on a breaking transport-wire change (ADR-059).
+pub const ALPN: &[u8] = b"casual-ras/1";
 
 /// Ed25519 public key of a peer (newtype over `iroh::EndpointId`, the 1.x rename of `NodeId`).
 /// This is identity — authenticates *who*, never *what they may do*.
@@ -80,23 +89,123 @@ pub struct ConnHealth {
 /// codec's framing guard and this crate's limit can never drift apart.
 pub use ras_protocol::MAX_CONTROL_FRAME;
 
+/// Which side of a connection we are — decides who *opens* vs *accepts* each stream (the dialer
+/// opens, the acceptor accepts, so both name the same stream).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// Accepted the connection (the controlled machine).
+    Host,
+    /// Dialed the connection (the technician side).
+    Controller,
+}
+
+/// A bound iroh endpoint — the local half of the transport. Quarantines `iroh` behind our newtypes:
+/// nothing iroh-typed escapes this crate's public API.
+pub struct Endpoint {
+    inner: IrohEndpoint,
+}
+
+impl Endpoint {
+    /// Bind a new endpoint advertising the Casual RAS [`ALPN`] (n0 discovery + default relay preset).
+    pub async fn bind() -> Result<Self, TransportError> {
+        let inner = IrohEndpoint::builder(presets::N0)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .map_err(|_| RasError::fatal(ErrorCode::TransportError, "endpoint bind failed"))?;
+        Ok(Self { inner })
+    }
+
+    /// This endpoint's own authenticated identity.
+    #[must_use]
+    pub fn id(&self) -> EndpointId {
+        EndpointId(*self.inner.id().as_bytes())
+    }
+
+    /// The local bound socket address(es) — direct-path hints for a same-network / test dialer.
+    #[must_use]
+    pub fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
+        self.inner.bound_sockets()
+    }
+
+    /// Dial a peer by identity (controller role); n0 discovery resolves its address. QUIC/TLS
+    /// authenticates the peer's identity — never its authorization (Invariant 9).
+    pub async fn connect(&self, target: &EndpointAddr) -> Result<Session, TransportError> {
+        let peer = iroh_id(&target.id)?;
+        self.dial(peer.into()).await
+    }
+
+    /// Dial a peer by explicit direct address(es), bypassing discovery — the same-network / loopback
+    /// path (and what the hermetic tests use). Relay/NAT-traversal dialing rides [`Self::connect`].
+    pub async fn connect_direct(
+        &self,
+        id: &EndpointId,
+        addrs: &[std::net::SocketAddr],
+    ) -> Result<Session, TransportError> {
+        let peer = iroh_id(id)?;
+        // `TransportAddr` is `#[non_exhaustive]` (not externally constructible); the public
+        // `with_ip_addr` builder wraps each socket address into a direct-path hint for us.
+        let addr = addrs
+            .iter()
+            .copied()
+            .fold(IrohEndpointAddr::new(peer), |a, s| a.with_ip_addr(s));
+        self.dial(addr).await
+    }
+
+    async fn dial(&self, addr: IrohEndpointAddr) -> Result<Session, TransportError> {
+        let conn = self
+            .inner
+            .connect(addr, ALPN)
+            .await
+            .map_err(|_| RasError::recoverable(ErrorCode::TransportError, "connect failed"))?;
+        Ok(Session {
+            conn,
+            role: Role::Controller,
+        })
+    }
+
+    /// Accept the next inbound session (host role). `Ok(None)` once the endpoint is closed.
+    pub async fn accept(&self) -> Result<Option<Session>, TransportError> {
+        let Some(incoming) = self.inner.accept().await else {
+            return Ok(None);
+        };
+        let conn = incoming
+            .await
+            .map_err(|_| RasError::recoverable(ErrorCode::TransportError, "accept failed"))?;
+        Ok(Some(Session {
+            conn,
+            role: Role::Host,
+        }))
+    }
+
+    /// Close the endpoint and all its sessions.
+    pub async fn close(&self) {
+        self.inner.close().await;
+    }
+}
+
+/// Convert our identity newtype into an iroh `EndpointId`, rejecting a malformed key.
+fn iroh_id(id: &EndpointId) -> Result<IrohEndpointId, TransportError> {
+    IrohEndpointId::from_bytes(&id.0)
+        .map_err(|_| RasError::fatal(ErrorCode::IdentityMismatch, "invalid peer identity"))
+}
+
 /// Reliable, ordered control channel over one bidi QUIC stream (loss-intolerant → never datagrams).
-/// The iroh-specific handle; its send/recv delegate to a [`FramedControlChannel`] over the iroh
-/// `SendStream`/`RecvStream` once the endpoint is wired. Kept as a distinct type so the iroh
-/// dependency stays quarantined here.
-#[derive(Clone)]
-pub struct ControlChannel;
+/// Delegates to the [`FramedControlChannel`] codec over the iroh `RecvStream`/`SendStream`; the iroh
+/// stream types stay quarantined inside.
+pub struct ControlChannel {
+    framed: FramedControlChannel<RecvStream, SendStream>,
+}
 
 impl ControlChannel {
     /// Send one control message.
-    pub async fn send(&self, msg: ControlMsg) -> Result<(), TransportError> {
-        let _ = msg;
-        todo!("delegate to FramedControlChannel over the iroh bidi stream")
+    pub async fn send(&mut self, msg: ControlMsg) -> Result<(), TransportError> {
+        self.framed.send(&msg).await
     }
 
     /// Await the next control message.
-    pub async fn recv(&self) -> Result<ControlMsg, TransportError> {
-        todo!("delegate to FramedControlChannel over the iroh bidi stream")
+    pub async fn recv(&mut self) -> Result<ControlMsg, TransportError> {
+        self.framed.recv().await
     }
 }
 
@@ -263,38 +372,53 @@ pub struct VideoFragHeader {
 
 /// An established, identity-authenticated session over one iroh connection. Owns the
 /// reliability-split channel map. The pointer channel is deferred out of Phase 1 (view-only).
-pub struct Session;
+pub struct Session {
+    conn: Connection,
+    role: Role,
+}
 
 impl Session {
-    /// The remote peer's authenticated identity (not authorization).
+    /// The remote peer's authenticated identity (not authorization — Invariant 9).
     #[must_use]
     pub fn remote(&self) -> EndpointId {
-        todo!("iroh Connection remote EndpointId")
+        EndpointId(*self.conn.remote_id().as_bytes())
     }
-    /// The reliable control channel.
-    #[must_use]
-    pub fn control(&self) -> ControlChannel {
-        todo!()
+
+    /// The reliable control channel: the controller (dialer) **opens** the bidi stream, the host
+    /// (acceptor) **accepts** it, so both ends bind the same single control stream.
+    pub async fn control(&self) -> Result<ControlChannel, TransportError> {
+        let (send, recv) = match self.role {
+            Role::Controller => self.conn.open_bi().await,
+            Role::Host => self.conn.accept_bi().await,
+        }
+        .map_err(|_| RasError::recoverable(ErrorCode::TransportError, "control stream failed"))?;
+        Ok(ControlChannel {
+            framed: FramedControlChannel::new(recv, send),
+        })
     }
+
     /// Host-side video sink (present on the host role).
     #[must_use]
     pub fn video_sink(&self) -> Option<VideoSink> {
-        todo!()
+        // Next increment: one droppable uni QUIC stream per frame (reset-on-stale), per the
+        // negotiated VideoTransport. The control path above lands first.
+        todo!("per-frame uni-stream video sink over self.conn")
     }
     /// Controller-side video source (present on the controller role).
     #[must_use]
     pub fn video_source(&self) -> Option<VideoSource> {
-        todo!()
+        todo!("per-frame uni-stream video source over self.conn")
     }
     /// Lock-free health observable.
     #[must_use]
     pub fn health(&self) -> HealthObserver {
-        todo!()
+        todo!("Connection::stats()-backed watch channel")
     }
-    /// Close the session with a reason code.
+
+    /// Close the session with a reason code (carried as the QUIC application close code).
     pub async fn close(self, code: ErrorCode) {
-        let _ = code;
-        todo!()
+        self.conn
+            .close(VarInt::from_u32(code as u32), code.as_str().as_bytes());
     }
 }
 
@@ -312,6 +436,96 @@ impl HealthObserver {
     /// Await the next health change (UI reactivity, not the hot path).
     pub async fn changed(&mut self) -> ConnHealth {
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod iroh_session_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    /// A freshly-bound endpoint reports its sockets as the *unspecified* address (`0.0.0.0` /
+    /// `[::]`) — the wildcard it listens on, not a dialable peer address. For a hermetic same-host
+    /// dial we rewrite each to its loopback counterpart, preserving the port. No discovery, no
+    /// relay, no network egress: the whole exchange stays on the loopback interface.
+    fn to_loopback(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+        addrs
+            .iter()
+            .map(|a| match a.ip() {
+                IpAddr::V4(ip) if ip.is_unspecified() => {
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port())
+                }
+                IpAddr::V6(ip) if ip.is_unspecified() => {
+                    SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), a.port())
+                }
+                _ => *a,
+            })
+            .collect()
+    }
+
+    /// End-to-end over a **real iroh connection** on loopback: the host binds and accepts, the
+    /// controller dials it by direct address, and a `ControlMsg` round-trips both ways over the
+    /// framed control stream. Also asserts the identity guarantee (Invariant 9): each side sees the
+    /// *other's* authenticated `EndpointId` as the connection's remote — the transport proves *who*,
+    /// and nothing here grants any authority.
+    #[tokio::test]
+    async fn control_round_trips_over_a_real_iroh_connection() {
+        let host = Endpoint::bind().await.unwrap();
+        let controller = Endpoint::bind().await.unwrap();
+        let host_id = host.id();
+        let controller_id = controller.id();
+        let host_addrs = to_loopback(&host.bound_addrs());
+
+        // Host side: accept one session, take the control channel, echo one message back.
+        let host_task = tokio::spawn(async move {
+            let session = host.accept().await.unwrap().expect("an inbound session");
+            let remote = session.remote();
+            let mut control = session.control().await.unwrap();
+            let got = control.recv().await.unwrap();
+            assert!(matches!(
+                got,
+                ControlMsg::Hello {
+                    protocol_version: 1
+                }
+            ));
+            control
+                .send(ControlMsg::Bye {
+                    code: ErrorCode::NormalClosure,
+                })
+                .await
+                .unwrap();
+            // Keep the endpoint alive until the controller has read the reply.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            host.close().await;
+            remote
+        });
+
+        let session = controller
+            .connect_direct(&host_id, &host_addrs)
+            .await
+            .unwrap();
+        // The dialer authenticated the host's identity, not any authority (Invariant 9).
+        assert_eq!(session.remote(), host_id);
+        let mut control = session.control().await.unwrap();
+        control
+            .send(ControlMsg::Hello {
+                protocol_version: 1,
+            })
+            .await
+            .unwrap();
+        let reply = control.recv().await.unwrap();
+        assert!(matches!(
+            reply,
+            ControlMsg::Bye {
+                code: ErrorCode::NormalClosure
+            }
+        ));
+
+        let host_saw = host_task.await.unwrap();
+        // The acceptor authenticated the controller's identity in turn.
+        assert_eq!(host_saw, controller_id);
+        controller.close().await;
     }
 }
 

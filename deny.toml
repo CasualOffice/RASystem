@@ -13,7 +13,28 @@ allow = [
   "Unicode-3.0",
   "MPL-2.0",
 ]
+# Scoped exceptions for permissive licenses that appear ONLY in iroh's transitive tree (iroh is
+# CLAUDE §6-sanctioned). None are GPL-family, so Invariant 18 holds; each is genuinely permissive and
+# allowed only for the specific crate that carries it — the global allow-list above is unchanged.
+exceptions = [
+  # Unlicense = public-domain dedication (OSI + FSF approved). These are wasm-only websocket helpers
+  # pulled by iroh-relay's browser path; never linked on the native host/controller.
+  { crate = "ws_stream_wasm", allow = ["Unlicense"] },
+  { crate = "async_io_stream", allow = ["Unlicense"] },
+  { crate = "pharos", allow = ["Unlicense"] },
+  # CDLA-Permissive-2.0 covers the certificate *data* in Mozilla's webpki root bundles (permissive,
+  # no copyleft); used by iroh-relay for relay TLS.
+  { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+  { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+]
 confidence-threshold = 0.9
+
+[advisories]
+# `paste` is flagged *unmaintained* (RUSTSEC-2024-0436) — an advisory, not a vulnerability. It is a
+# stable, ubiquitous proc-macro helper pulled transitively by iroh (CLAUDE §6); there is no drop-in
+# replacement and it carries no known security issue. Real vulnerability + yanked advisories still
+# fail the build (this ignore is a single, named exception).
+ignore = ["RUSTSEC-2024-0436"]
 
 [bans]
 multiple-versions = "warn"

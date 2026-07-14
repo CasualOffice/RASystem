@@ -183,8 +183,12 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   so CI stays green. **Remaining:** cursor metadata out-of-band, dirty rects, `excluded_window_ids`
   → `SCWindow` mapping, and pipelined (async) encode emission.
 - ☐ `MED` HW encoder abstraction + OpenH264 `libloading` software fallback (never x264).
-- ☐ `NET` `ras-transport-iroh`: real endpoint, versioned ALPN, channel plumbing over iroh 1.x
-  (`Connection::stats()` feeds the existing ABR hook).
+- ◐ `NET` `ras-transport-iroh`: real endpoint, versioned ALPN, channel plumbing over iroh 1.x
+  (`Connection::stats()` feeds the existing ABR hook). **Control plane done** (iroh `=1.0.2`): real
+  `Endpoint`/`Session`/`ControlChannel`, ALPN `casual-ras/1` + single-bidi-stream control topology
+  (ADR-059), hermetic loopback round-trip test asserting peer `EndpointId` (Invariant 9). **Left:**
+  video sink/source (per-frame uni streams), `HealthObserver` over `Connection::stats()`, and the
+  `IrohTransport: SessionTransport` adapter for the loopback→iroh swap.
 - ☐ `MED` FEC (`nanors`) + the *transport-side* loss detection that generates `FrameDropped` per
   `docs/10 §4` (the controller-side reaction to those events is done + tested above).
 - ◐ `UI` Controller Tauri shell (`controller/`). **Landed + compiles (Tauri 2.11.5, ≥2.11.1 pin):**

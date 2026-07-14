@@ -104,8 +104,19 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     capability; CSP set; always-visible LIVE indicator (Invariant 7). Kept **out of the root
     workspace** (heavy WebView deps); the GUI run is an on-device step (login session +
     Screen-Recording TCC).
-  - Still stubbed behind traits (`todo!()`): the concrete iroh transport (and the Windows DXGI/MF media
-    port), and the **host** Tauri app + consent UI — they land as the spike/network go/no-go clears.
+  - **`ras-transport-iroh` — control plane is concrete** (iroh `=1.0.2`, ADR-059). Real `Endpoint`
+    (bind/id/accept/connect + `connect_direct` for same-network dials), `Session` (`remote()` =
+    peer's authenticated `EndpointId`; `close(code)` → QUIC app-close code), and `ControlChannel`
+    running the fuzzed `FramedControlChannel` codec over iroh's `(RecvStream, SendStream)`. ALPN
+    `casual-ras/1`; the dialer opens / acceptor accepts the single bidi control stream. Verified by a
+    **hermetic loopback integration test** (two real endpoints, direct-address dial, `Hello`⇄`Bye`
+    round-trip, both sides assert the peer identity — Invariant 9). Transport authenticates identity,
+    never authority. `cargo-deny` gates iroh's transitive tree via scoped permissive exceptions
+    (Unlicense/CDLA-Permissive-2.0 wasm/relay helpers) — Invariant 18 holds.
+  - Still stubbed behind traits (`todo!()`): the iroh **video** path (`VideoSink`/`VideoSource`
+    per-frame uni streams) + `HealthObserver`, the `IrohTransport: SessionTransport` adapter in
+    `ras-core` (loopback→iroh swap), the Windows DXGI/MF media port, and the **host** Tauri app +
+    consent UI — they land as the video increment / network go/no-go clears.
 - **Build/verify commands** (all green as of M0):
   - `cargo build --workspace`
   - `cargo fmt --all -- --check`
