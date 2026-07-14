@@ -58,6 +58,16 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow-x: hidden;
+  /* long unbreakable tokens (URLs, tickets) wrap instead of forcing the page wide */
+  overflow-wrap: break-word;
+}
+/* Media never forces a track wider than the viewport. */
+img,
+svg,
+video,
+canvas,
+table {
+  max-width: 100%;
 }
 h1,
 h2,
@@ -318,13 +328,15 @@ section {
 .grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  /* min(260px,100%) so a narrow phone never forces a track wider than the viewport */
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
 }
 .card {
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 22px;
+  min-width: 0; /* allow the card to shrink inside grid/flex tracks (its content can scroll/wrap) */
 }
 .card h3 {
   font-size: var(--f-h3);
@@ -620,7 +632,7 @@ svg {
 /* ── Hero (two-column) ─────────────────────────────────────────────────────── */
 .hero-grid {
   display: grid;
-  grid-template-columns: 1.05fr 1fr;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
   gap: clamp(28px, 5vw, 60px);
   align-items: center;
 }
@@ -654,7 +666,7 @@ svg {
 }
 .shots-2 {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 22px;
   align-items: start;
 }
@@ -870,12 +882,12 @@ svg {
 /* ── Get / build ───────────────────────────────────────────────────────────── */
 .get-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 16px;
 }
 @media (max-width: 760px) {
   .get-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 .card.build pre {
@@ -889,7 +901,10 @@ svg {
 .card.build code {
   font: 0.85rem ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--teal);
-  white-space: pre;
+  /* wrap long commands (e.g. the clone URL) instead of forcing the card — and the
+     page — wider than a phone viewport, which triggers mobile shrink-to-fit. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .card.build .note {
   color: var(--text-2);
