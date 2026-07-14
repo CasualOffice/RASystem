@@ -156,14 +156,29 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     Both apps now carry a real bundle config (branded 1024px icon set, `bundle.active`, category);
     builds are unsigned in the alpha (Gatekeeper/SmartScreen warn — EV signing is a hardening-phase
     step). The controller `.app`/`.dmg` bundle was built and verified locally on macOS.
+  - **Cross-platform sharing implemented (ADR-063) — Share now targets macOS + Linux + Windows.** A
+    shared **software encoder `ras-media-openh264`** (`VideoEncoderBackend`): CPU BGRA → I420 →
+    Annex-B with in-band SPS/PPS on every IDR, forced-IDR-on-demand; permissive Cisco **BSD-2**
+    (openh264 `=0.8.1`, clears RUSTSEC-2025-0008 which is a *decode*-only overflow we never hit);
+    **unit-tested + built locally on macOS** (keyframe SPS/PPS/IDR, row-padding/odd-dim, fail-close).
+    A cross-platform **capture `ras-media-scap`** (`ScreenCaptureBackend`) over the permissive `scap`
+    crate — **PipeWire+portal (Linux), Windows.Graphics.Capture (Windows)**, SCK (macOS) — drains
+    scap's blocking pull on a thread into a latest-frame slot with a condvar-timeout `next_frame`
+    (Ok(None) on a static screen, no pump stall); frames normalize to CPU BGRA over the new
+    `SurfaceKind::CpuBgra` seam. The unified app's `make_backends()` picks hardware SCK+VideoToolbox on
+    macOS and scap+OpenH264 on Linux/Windows. **Verification honesty:** the encoder is verified
+    locally; the **Linux/Windows capture paths compile only on their own OS, so CI is the compile gate
+    there and on-device runtime verification is pending** (CI installs nasm + PipeWire/dbus/libclang).
+    Windows needed a transitive pin: `scap 0.0.8` calls `windows-capture`'s 5-arg `Settings::new`, but
+    `windows-capture 1.5.0` grew it to 8 args in a *minor* release, so `ras-media-scap` pins
+    `windows-capture = "=1.4.4"` (Windows-only, not used directly) to keep scap compiling.
   - Still stubbed / deferred (`todo!()` or additive): iroh **reset-on-stale + FEC** and the
     `DatagramFec` video alternative (behind `StreamConfig::video_transport`), windowed (vs cumulative)
-    loss for the ABR estimate, the **Linux (PipeWire/VAAPI) + Windows (DXGI/MF) capture backends**
-    (host stays macOS-only until these land), the **Phase-2 grant/lease/capability model** (consent is
-    now real local Allow/Deny, but authorization is still coarse — no signed grants/leases, no
-    capability scoping, no TPM tiers), excluding the host overlay from capture + multi-monitor pointer
-    mapping, and EV code-signing/notarization of the release bundles. The controller self-mirror still
-    uses the loopback; the real remote flow uses `IrohSessionTransport`.
+    loss for the ABR estimate, **hardware encoders + Wayland DMA-buf zero-copy** (Linux/Windows use the
+    software OpenH264 path; runtime ABR for it isn't wired), the **Phase-2 grant/lease/capability
+    model** (consent is now real local Allow/Deny, but authorization is still coarse — no signed
+    grants/leases, no capability scoping, no TPM tiers), excluding the host overlay from capture +
+    multi-monitor pointer mapping, and EV code-signing/notarization of the release bundles.
 - **Build/verify commands** (all green as of M0):
   - `cargo build --workspace`
   - `cargo fmt --all -- --check`
