@@ -1,15 +1,14 @@
 name: release
 
-# Build the desktop apps and publish them to a GitHub Release.
+# Build the unified desktop app and publish it to a GitHub Release.
 #
 # Trigger by pushing a tag like `v0.0.1-alpha`, or run manually (workflow_dispatch) to produce a
 # draft release you can inspect before publishing.
 #
-# What ships:
-#   - **Controller** — cross-platform (macOS .dmg, Linux .AppImage + .deb, Windows .exe/NSIS). It is
-#     decode-only (WebCodecs), so it runs on every desktop OS today.
-#   - **Host** — macOS .dmg only. The host needs a screen-capture backend and only the macOS backend
-#     (ScreenCaptureKit + VideoToolbox) exists so far; Linux/Windows host backends are a later port.
+# One app, both roles (ADR-062): **Connect** (view another machine) works on every desktop OS today
+# because it is decode-only; **Share** (let someone view this machine) is macOS-only for now, since
+# only the macOS capture backend exists. So the same app ships on macOS (.dmg), Linux (.AppImage +
+# .deb) and Windows (.exe/NSIS) — on Linux/Windows the Share button reports "not available yet".
 #
 # Builds are **unsigned** in the alpha: macOS shows a Gatekeeper warning (right-click → Open), and
 # Windows SmartScreen may warn. EV code-signing with HSM-held keys comes with the release-hardening
@@ -30,8 +29,8 @@ permissions:
   contents: write # create the release and upload assets
 
 jobs:
-  controller:
-    name: controller (${{ matrix.os }})
+  build:
+    name: app (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -60,54 +59,29 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            controller/src-tauri/target
-          key: ${{ matrix.os }}-controller-${{ hashFiles('controller/src-tauri/Cargo.lock') }}
+            app/src-tauri/target
+          key: ${{ matrix.os }}-app-${{ hashFiles('app/src-tauri/Cargo.lock') }}
 
-      - name: Build & publish controller
+      - name: Build & publish Casual RAS
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: controller/src-tauri
+          projectPath: app/src-tauri
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: "Casual RAS ${{ github.event.inputs.tag || github.ref_name }}"
           releaseBody: |
-            Alpha build of the Casual RAS **controller** (view side) and macOS **host** (share side).
+            Alpha build of **Casual RAS** — one desktop app that does both roles:
 
-            - **Controller** runs on macOS, Linux, and Windows (view-only: you can see the shared
-              screen and point at it with a remote cursor; no click/keyboard control).
-            - **Host** is macOS-only for now (needs ScreenCaptureKit); it asks the local user for
-              Allow/Deny before any pixels are shared.
+            - **Connect** to another machine and view its screen (with a remote pointer to point at
+              things). Works on macOS, Linux, and Windows.
+            - **Share** this machine's screen — it asks you for Allow/Deny before any pixels leave.
+              macOS-only in this alpha (Linux/Windows sharing is on the way); the Connect side of the
+              same app still works everywhere.
 
-            Builds are **unsigned** — macOS: right-click → Open to bypass Gatekeeper the first time.
-            Peer-to-peer over Iroh/QUIC; no server involved. See each app's README for how to pair.
-          releaseDraft: true
-          prerelease: true
+            View-only (no remote click/keyboard). Peer-to-peer over Iroh/QUIC — no server involved.
 
-  host:
-    name: host (macOS)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            host/src-tauri/target
-          key: macos-host-${{ hashFiles('host/src-tauri/Cargo.lock') }}
-
-      - name: Build & publish host (macOS)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: host/src-tauri
-          tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: "Casual RAS ${{ github.event.inputs.tag || github.ref_name }}"
+            Builds are **unsigned** — on macOS, right-click → Open to bypass Gatekeeper the first time;
+            on Windows, "More info → Run anyway" past SmartScreen.
           releaseDraft: true
           prerelease: true

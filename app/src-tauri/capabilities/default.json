@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Casual RAS unified shell: core defaults for the main window and the (host-role) pointer overlay. App commands (connect_to_host / disconnect / send_pointer / request_keyframe / start_sharing / stop_sharing / respond_consent) are exposed via the invoke handler; no plugin permissions are granted.",
+  "windows": ["main", "overlay"],
+  "permissions": ["core:default"]
+}

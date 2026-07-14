@@ -1,6 +1,0 @@
-{
-  "identifier": "default",
-  "description": "Host shell: core defaults for the control + overlay windows. App commands (stop_sharing) are exposed via the invoke handler; no plugin permissions are granted.",
-  "windows": ["main", "overlay"],
-  "permissions": ["core:default"]
-}

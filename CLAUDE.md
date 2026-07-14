@@ -91,19 +91,22 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     Pure-Rust `objc2` bindings (no Swift bridge); the crate is **empty on non-macOS** so Linux CI stays
     green. Driven end-to-end through the traits by `--example capture_encode`: first-frame keyframe,
     gap-free monotonic ids, Annex-B + in-band SPS/PPS on every IDR, `ffprobe`-clean h264, ~8 ms encode.
-  - **Controller Tauri v2 shell (`controller/`), builds clean (Tauri 2.11.5).** Proves the video path:
-    Rust pushes each encoded access unit as the canonical `ras_core::frame_channel` blob (24-byte
-    `RAS1` header + Annex-B) over a **binary** Tauri `Channel`; the webview decodes with WebCodecs
-    `VideoDecoder` → `<canvas>`, gates on the first IDR, and drives forced-IDR-on-demand
-    (`request_keyframe`). Frames flow through the **real `ras-core` spine** — a `HostSession` (real
-    `ras-media-macos` backends) + `ControllerSession` over the in-memory **loopback transport** (both
-    in one process), so each frame traverses handshake → authorize-gate (`AllowAllValidator` no-op
-    seam) → grant → media pump → teardown, and keyframe requests ride the control channel. Runs
-    glass-to-glass on one Mac before iroh; the loopback swaps for the concrete iroh transport behind
-    the same `SessionTransport` seam. Static frontend via `withGlobalTauri` (no bundler); `core:default`
-    capability; CSP set; always-visible LIVE indicator (Invariant 7). Kept **out of the root
-    workspace** (heavy WebView deps); the GUI run is an on-device step (login session +
-    Screen-Recording TCC).
+  - **Unified desktop app (`app/`, Tauri v2), one binary does both roles (ADR-062), builds clean.**
+    A home screen offers **Share this screen** (agent) and **Connect to a screen** (viewer); nobody
+    installs two apps. The video path: Rust pushes each encoded access unit as the canonical
+    `ras_core::frame_channel` blob (24-byte `RAS1` header + Annex-B) over a **binary** Tauri `Channel`;
+    the webview decodes with WebCodecs `VideoDecoder` → `<canvas>`, gates on the first IDR, and drives
+    forced-IDR-on-demand (`request_keyframe`). Both roles are the real `ras-core` orchestrators
+    (`ControllerSession` / `HostSession`) over `IrohSessionTransport` behind the `SessionTransport`
+    seam. Built with `ras-core` `default-features = false`, so the Share role uses the **real
+    `LocalConsent` `GrantValidator`** (Invariant 1) and the `insecure-no-auth` `AllowAllValidator` is
+    **not linked** — the old loopback self-mirror is dropped with it. **Connect is decode-only →
+    macOS/Linux/Windows; Share needs a capture backend → macOS-only** for now (`start_sharing` reports
+    "not available on this platform yet" off macOS, Connect still works). Static frontend via
+    `withGlobalTauri` (no bundler); `core:default` capability on main + transparent overlay windows;
+    CSP set; always-visible indicators (Invariant 7). Kept **out of the root workspace** (heavy WebView
+    deps); the GUI run is an on-device step (login session + Screen-Recording TCC). The `.app`/`.dmg`
+    bundle was built + verified locally on macOS.
   - **`ras-transport-iroh` — control + video + health planes are concrete, and the loopback→iroh
     swap is wired** (iroh `=1.0.2`, ADR-059/060). Real `Endpoint` (bind/id/accept/connect +
     `connect_direct` for same-network dials), `Session` (`remote()` = peer's authenticated
@@ -131,20 +134,21 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   - **Alpha two-machine app is usable (view-only + remote pointer).** A **connection ticket**
     (`EndpointAddr::to_ticket`, `CASUALRAS1:<hex>`, fail-closed decode) carries id + direct addrs +
     relay; `Endpoint::online`/`addr`/`connect` dial across NAT (direct + relay, discovery-by-id
-    fallback). The **controller** (`controller/`, Tauri) gained `connect_to_host(ticket)` /
-    `disconnect` — platform-independent (viewer only decodes) — plus viewer-side annotation and a
-    **remote pointer** (its cursor over the shared screen streams to the host as `ControlMsg::Pointer`
-    → `LifecycleEvent::RemotePointer`, ADR-061; normalized, best-effort, **not OS input** so outside
-    Invariants 6/14). The **host** ships two ways: `ras-host` (workspace CLI) and **`host/` (Tauri
-    GUI)** — a control panel (ticket + always-on `REMOTE VIEWING ACTIVE` indicator + Stop, Invariant 7)
-    plus a transparent, click-through, always-on-top **overlay** that draws the viewer's remote pointer
-    on the host's screen. Both serve real `ras-media-macos` capture over `IrohSessionTransport`, one
-    viewer at a time. The Tauri host now enforces **real local Allow/Deny consent (Invariant 1)**: a
+    fallback). The **unified `app/` (Tauri, ADR-062)** does both ends from one binary. **Connect**
+    (viewer): `connect_to_host(ticket)` / `disconnect` — platform-independent (viewer only decodes) —
+    plus viewer-side annotation and a **remote pointer** (its cursor over the shared screen streams to
+    the host as `ControlMsg::Pointer` → `LifecycleEvent::RemotePointer`, ADR-061; normalized,
+    best-effort, **not OS input** so outside Invariants 6/14). **Share** (agent, macOS-only):
+    `start_sharing` / `stop_sharing` publish a ticket and accept one viewer over `IrohSessionTransport`
+    serving real `ras-media-macos` capture, with an always-on `REMOTE VIEWING ACTIVE` indicator +
+    Stop (Invariant 7) and a transparent, click-through, always-on-top **overlay** drawing the viewer's
+    remote pointer on the host's screen. It enforces **real local Allow/Deny consent (Invariant 1)**: a
     `LocalConsent` implements `ras-core`'s `GrantValidator` — a connecting viewer is held in the
     handshake (no pixels) until the local user clicks Allow; Deny or 90 s of silence refuses
-    fail-closed. It is built with `ras-core` `default-features = false`, so the `insecure-no-auth`
-    `AllowAllValidator` is **not even linked** into the product host. Verified: controller + host Tauri
-    apps `cargo check`/`clippy` clean; pointer path has a loopback e2e
+    fail-closed. Built with `ras-core` `default-features = false`, so the `insecure-no-auth`
+    `AllowAllValidator` is **not even linked** (the old loopback self-mirror is dropped with it). A
+    headless `ras-host` (workspace CLI) remains for no-GUI shares. Verified: the app `cargo
+    check`/`clippy` clean and its `.app`/`.dmg` bundle builds on macOS; pointer path has a loopback e2e
     (`controller_pointer_reaches_host…`) + codec round-trip.
   - **GitHub release builds are wired** (`.github/workflows/release.yml`): on a `v*` tag (or manual
     dispatch → draft) `tauri-action` bundles the **controller** on macOS/Linux/Windows (dmg / AppImage
@@ -297,14 +301,11 @@ casual-ras/
     ras-media-macos/      # macOS backend: ScreenCaptureKit + VideoToolbox (FFI; unsafe confined here)
     ras-audit/            # hash-chained signed audit journal
     ras-transport-iroh/   # Iroh endpoint, ALPN routing, relay
+    ras-host/             # headless host CLI (no-GUI share)
     ras-ffi/              # C ABI (SDK phase only)
-  host/                   # Tauri v2 host app (MVP: single process)
-    src-tauri/
-    ui/                   # React consent/session-indicator UI
-    platform/windows/     # WGC capture, MF/NVENC encode, SendInput
-  controller/             # Tauri v2 controller app
-    src-tauri/
-    ui/                   # React session UI (future React SDK)
+  app/                    # unified Tauri v2 desktop app — both roles in one binary (ADR-062)
+    src-tauri/            #   connect_to_host/disconnect + start_sharing/stop_sharing/respond_consent
+    ui/                   #   home (share/connect) + WebCodecs viewer + pointer overlay + consent
   proto/                  # .proto sources (source of truth for the wire)
   docs/                   # architecture + design docs
   examples/               # integration samples (later)

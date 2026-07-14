@@ -1,0 +1,45 @@
+[package]
+name = "casual-ras"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+authors = ["Casual RAS authors"]
+publish = false
+description = "Casual RAS — one desktop app that both shares this screen and connects to another, over iroh."
+
+# The single unified desktop app (ADR-062). It plays **both** roles from one binary:
+#   - **Connect** (viewer): dial a host's ticket, decode H.264 → WebCodecs → canvas. Cross-platform.
+#   - **Share** (agent): capture this screen, ask local Allow/Deny consent, stream over iroh, and draw
+#     the viewer's remote pointer on an overlay. macOS-only until the Linux/Windows capture backends land.
+#
+# Kept OUT of the root crate workspace (heavy Tauri/WebView deps; not needed for the core CI gates).
+#
+# `default-features = false` deliberately drops `ras-core`'s `insecure-no-auth` AllowAllValidator: a
+# shipping product must never link the no-op consent seam. The Share role implements a real
+# `GrantValidator` (local Allow/Deny) — Invariant 1 (the local user authorizes; a controller never
+# self-authorizes). There is no local-loopback self-mirror here (it required the no-op validator).
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+ras-core = { path = "../../crates/ras-core", default-features = false }
+ras-media = { path = "../../crates/ras-media" }
+ras-protocol = { path = "../../crates/ras-protocol" }
+ras-transport-iroh = { path = "../../crates/ras-transport-iroh" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# The only real capture/encode backend today. On Linux/Windows the app still builds and the Connect
+# (viewer) role works fully; the Share role reports "screen sharing isn't available on this platform
+# yet" until the Linux (PipeWire/VAAPI) and Windows (DXGI/MF) backends land.
+[target.'cfg(target_os = "macos")'.dependencies]
+ras-media-macos = { path = "../../crates/ras-media-macos" }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

@@ -204,6 +204,28 @@
   round-trip. The **on-screen host overlay that draws the pointer** lands with the host GUI; until
   then the `ras-host` CLI logs the arriving position so a two-machine run can confirm the path.
 
+- **ADR-062 · One unified desktop app that plays both roles (agent *and* controller), not two
+  binaries · Accepted (amends S2/S4).** The shipped product is a **single app** (`app/`, Tauri v2):
+  a home screen offers **Share this screen** (agent) and **Connect to a screen** (viewer), and one
+  binary does both. *Motivation:* nobody installs two separate apps for the two ends of a remote
+  session — a real product (AnyDesk/TeamViewer-shaped) is one download that can share or connect. The
+  earlier split into a standalone `controller/` and `host/` Tauri app was a build-phase convenience,
+  not a product decision; it is collapsed here. **This does not weaken any invariant or change the
+  wire.** The two roles remain the same `ras-core` orchestrators (`ControllerSession` /
+  `HostSession`) over the same `SessionTransport`/iroh seam; they are merely surfaced from one webview
+  and one process. The unified app is built with `ras-core` `default-features = false`, so the Share
+  role uses the **real `LocalConsent` `GrantValidator`** (Invariant 1) and the `insecure-no-auth`
+  `AllowAllValidator` is **not linked** — consequently the old macOS-only **local loopback self-mirror
+  is dropped** (it required the no-op validator; it was a dev test, not a product feature). **Platform
+  asymmetry is explicit:** Connect is decode-only and ships on macOS/Linux/Windows; Share needs a
+  capture backend and is macOS-only until the Linux/Windows backends land, so `start_sharing` returns
+  a clear "not available on this platform yet" off macOS while Connect keeps working. This supersedes
+  the two separate release artifacts — the release workflow now bundles the one app on all three OSes.
+  The headless `ras-host` CLI (workspace crate) stays for no-GUI/testing use. *Consequence:* the host
+  process is still the collapsed single-process MVP posture of **S4** (re-separation into
+  service/agent/input-helper remains the hardening-phase work); unifying the *UI* of the two ends does
+  not change that server-side split.
+
 ## Security, authorization, fraud
 
 - **ADR-040 · Algorithm-pinned signed grants, sender-constrained · Accepted.** Prefer **Biscuit**

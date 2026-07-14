@@ -3,7 +3,7 @@
 resolver = "2"
 members = ["crates/*"]
 # The Phase-S spike is a throwaway with heavy/Windows-only deps; keep it out of the clean workspace.
-exclude = ["spike", "controller/src-tauri", "host/src-tauri"]
+exclude = ["spike", "app/src-tauri"]
 
 [workspace.package]
 version = "0.0.0"

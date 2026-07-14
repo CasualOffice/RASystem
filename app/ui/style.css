@@ -1,0 +1,421 @@
+:root {
+  color-scheme: dark;
+}
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+html,
+body {
+  width: 100%;
+  height: 100%;
+  background: #0b0b0e;
+  color: #e8e8ee;
+  font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
+  overflow: hidden;
+}
+/* A hidden view must stay gone even though its children are position:fixed. */
+[hidden] {
+  display: none !important;
+}
+:focus-visible {
+  outline: 2px solid #6ea8ff;
+  outline-offset: 2px;
+}
+/* Top connect bar: paste a host ticket, connect/disconnect. */
+#connectbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 52px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 0 12px;
+  background: #16161c;
+  border-bottom: 1px solid #2a2a34;
+  z-index: 10;
+}
+#connectbar input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid #33333f;
+  background: #0b0b0e;
+  color: #e8e8ee;
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+#connectbar button {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 6px;
+  border: 1px solid #33333f;
+  background: #23232c;
+  color: #e8e8ee;
+  font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+#connectbar button:hover:not(:disabled) {
+  background: #2e2e3a;
+}
+#connectbar button#connect {
+  background: #2f6b34;
+  border-color: #3a8341;
+}
+#connectbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+#screen {
+  display: block;
+  position: fixed;
+  top: 52px;
+  left: 0;
+  width: 100vw;
+  height: calc(100vh - 52px);
+  object-fit: contain;
+  background: #0b0b0e;
+}
+/* Annotation overlay — exactly covers the video area. Pointer events only when a tool is active
+   (the `drawing` class); otherwise clicks pass through and the app stays strictly view-only. */
+#annot {
+  position: fixed;
+  top: 52px;
+  left: 0;
+  width: 100vw;
+  height: calc(100vh - 52px);
+  pointer-events: none;
+  z-index: 5;
+}
+#annot.drawing {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+/* Floating annotation toolbar. */
+#tools {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(22, 22, 28, 0.92);
+  border: 1px solid #2a2a34;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  z-index: 20;
+}
+#tools button {
+  height: 30px;
+  min-width: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #e8e8ee;
+  font: 15px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+#tools button:hover {
+  background: #2e2e3a;
+}
+#tools button.active {
+  background: #3a3a48;
+  border-color: #55556a;
+}
+#tools .swatch {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+}
+#tools .swatch.active {
+  border-color: #fff;
+}
+#tools .sep {
+  width: 1px;
+  height: 22px;
+  background: #33333f;
+  margin: 0 4px;
+}
+#hud {
+  position: fixed;
+  top: 62px;
+  left: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #7CFC7C;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;
+  pointer-events: none;
+}
+/* Session indicator — an honest, always-visible "remote view active" marker (Invariant 7). The
+   real controller shows it whenever a session renders; the UI must not be able to suppress it. */
+#banner {
+  position: fixed;
+  top: 62px;
+  right: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(200, 30, 30, 0.85);
+  color: #fff;
+  font: 600 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+/* ── Home ─────────────────────────────────────────────────────────────────────────────────────── */
+#home {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 32px 20px;
+  text-align: center;
+}
+.home-head h1 {
+  font-size: clamp(28px, 6vw, 40px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(120deg, #7be0cf, #8b8cf6);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.tagline {
+  margin-top: 8px;
+  color: #b9b9c6;
+  font-size: clamp(14px, 3.4vw, 16px);
+}
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  justify-content: center;
+  width: 100%;
+  max-width: 760px;
+}
+.card {
+  flex: 1 1 300px;
+  max-width: 360px;
+  text-align: left;
+  padding: 22px;
+  border-radius: 16px;
+  border: 1px solid #2a2a34;
+  background: #14141a;
+  color: #e8e8ee;
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.card:hover {
+  transform: translateY(-2px);
+  border-color: #55556a;
+  background: #181820;
+}
+.card-icon {
+  font-size: 30px;
+}
+.card-title {
+  margin-top: 10px;
+  font-size: 18px;
+  font-weight: 600;
+}
+.card-desc {
+  margin-top: 6px;
+  color: #b9b9c6;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.card-cta {
+  margin-top: 14px;
+  color: #8b8cf6;
+  font-weight: 600;
+  font-size: 13.5px;
+}
+.foot-note {
+  color: #7a7a88;
+  font-size: 12.5px;
+}
+
+/* ── Share (host) view ─────────────────────────────────────────────────────────────────────────── */
+#share-view {
+  height: 100%;
+  padding: 16px 18px;
+  overflow-y: auto;
+}
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.bar h2 {
+  font-size: 17px;
+  font-weight: 600;
+  flex: 1 1 auto;
+}
+.back {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid #33333f;
+  background: #23232c;
+  color: #e8e8ee;
+  cursor: pointer;
+  font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+}
+.back:hover {
+  background: #2e2e3a;
+}
+#connectbar .back {
+  flex: 0 0 auto;
+}
+.indicator {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font: 600 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+}
+.indicator.idle {
+  background: #23232c;
+  color: #9a9aa8;
+}
+.indicator.live {
+  background: rgba(200, 30, 30, 0.9);
+  color: #fff;
+}
+.lead {
+  color: #b9b9c6;
+  margin-bottom: 8px;
+}
+.ticketrow {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  margin-bottom: 12px;
+}
+#share-ticket {
+  flex: 1 1 auto;
+  resize: none;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #33333f;
+  background: #050507;
+  color: #7cfc7c;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+#share-copy {
+  flex: 0 0 auto;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid #33333f;
+  background: #23232c;
+  color: #e8e8ee;
+  cursor: pointer;
+}
+#share-copy:hover {
+  background: #2e2e3a;
+}
+.status {
+  color: #9a9aa8;
+  min-height: 21px;
+  margin-bottom: 16px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.danger {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid #8a2b2b;
+  background: #7a1f1f;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.danger:hover {
+  background: #932424;
+}
+.note {
+  color: #7a7a88;
+  font-size: 12px;
+}
+
+/* Local consent prompt — a modal over the share view. The viewer stays blocked until Allow. */
+#consent {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.consent-card {
+  width: min(420px, 88vw);
+  padding: 20px;
+  border-radius: 12px;
+  background: #17171d;
+  border: 1px solid #33333f;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+.consent-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.consent-id {
+  color: #9a9aa8;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.consent-id span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #b9b9c6;
+}
+.consent-note {
+  color: #b9b9c6;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+.consent-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.consent-actions button {
+  padding: 9px 18px;
+  border-radius: 8px;
+  border: 1px solid #33333f;
+  font-weight: 600;
+  cursor: pointer;
+}
+#deny {
+  background: #23232c;
+  color: #e8e8ee;
+}
+#deny:hover {
+  background: #2e2e3a;
+}
+#allow {
+  background: #2f6b34;
+  border-color: #3a8341;
+  color: #fff;
+}
+#allow:hover {
+  background: #367a3d;
+}

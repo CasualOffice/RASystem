@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Casual RAS</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- ── Home: pick a role ──────────────────────────────────────────────────────────────────── -->
+    <section id="home" class="view">
+      <header class="home-head">
+        <h1>Casual RAS</h1>
+        <p class="tagline">Share this screen, or connect to another — peer-to-peer, no server.</p>
+      </header>
+      <div class="cards">
+        <button class="card" id="go-share">
+          <div class="card-icon">🖥️</div>
+          <div class="card-title">Share this screen</div>
+          <div class="card-desc">Let someone view this machine. You approve them first, and can stop anytime.</div>
+          <div class="card-cta">Get a ticket to share →</div>
+        </button>
+        <button class="card" id="go-connect">
+          <div class="card-icon">👁️</div>
+          <div class="card-title">Connect to a screen</div>
+          <div class="card-desc">Paste a ticket someone shared and view their screen. Point with a remote cursor.</div>
+          <div class="card-cta">Enter a ticket →</div>
+        </button>
+      </div>
+      <p class="foot-note">View-only in the alpha — no remote click or keyboard control.</p>
+    </section>
+
+    <!-- ── Share (host role) ──────────────────────────────────────────────────────────────────── -->
+    <section id="share-view" class="view" hidden>
+      <header class="bar">
+        <button class="back" data-home>← Back</button>
+        <h2>Share this screen</h2>
+        <div id="share-indicator" class="indicator idle">● IDLE</div>
+      </header>
+      <p class="lead">Send this connection ticket to the person who will view your screen:</p>
+      <div class="ticketrow">
+        <textarea id="share-ticket" readonly rows="3" placeholder="Starting…"></textarea>
+        <button id="share-copy">Copy</button>
+      </div>
+      <p id="share-status" class="status">Preparing…</p>
+      <div class="row">
+        <button id="share-stop" class="danger">Stop sharing</button>
+        <span class="note">The viewer can see your screen and point at it — they cannot click or type.</span>
+      </div>
+
+      <div id="consent" hidden>
+        <div class="consent-card">
+          <p class="consent-title">A viewer wants to see your screen</p>
+          <p class="consent-id">identity <span id="peer">—</span></p>
+          <p class="consent-note">They will be able to view your screen and point at it. They cannot
+            click or type on your machine.</p>
+          <div class="consent-actions">
+            <button id="deny">Deny</button>
+            <button id="allow">Allow</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Connect (viewer role) ──────────────────────────────────────────────────────────────── -->
+    <section id="connect-view" class="view" hidden>
+      <div id="connectbar">
+        <button class="back" data-home>←</button>
+        <input
+          id="ticket"
+          type="text"
+          placeholder="Paste the ticket from the person sharing (CASUALRAS1:…)"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button id="connect">Connect</button>
+        <button id="stop" disabled>Disconnect</button>
+      </div>
+      <canvas id="screen"></canvas>
+      <canvas id="annot"></canvas>
+      <div id="tools" hidden>
+        <button data-tool="off" class="active" title="Stop annotating (interact with nothing — view only)">🚫</button>
+        <button data-tool="pen" title="Freehand pen">✏️</button>
+        <button data-tool="arrow" title="Arrow">↗</button>
+        <button data-tool="rect" title="Rectangle">▭</button>
+        <button data-tool="hi" title="Highlighter">🖍</button>
+        <span class="sep"></span>
+        <button class="swatch" data-color="#ff3b30" style="background:#ff3b30" title="Red"></button>
+        <button class="swatch" data-color="#ffcc00" style="background:#ffcc00" title="Yellow"></button>
+        <button class="swatch" data-color="#34c759" style="background:#34c759" title="Green"></button>
+        <button class="swatch" data-color="#0a84ff" style="background:#0a84ff" title="Blue"></button>
+        <span class="sep"></span>
+        <button id="undo" title="Undo last">⤺</button>
+        <button id="clearannot" title="Clear all annotations">Clear</button>
+      </div>
+      <div id="hud">Paste a ticket and press Connect.</div>
+      <div id="banner" hidden>● LIVE — viewing remote screen</div>
+    </section>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
