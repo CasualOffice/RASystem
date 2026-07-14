@@ -41,6 +41,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # nasm builds OpenH264's x86 assembly (Linux/Windows sharing backends) on x86 runners.
+      - uses: ilammy/setup-nasm@v1
+
       # WebView + bundling system deps for Tauri v2 on Linux (webkit2gtk 4.1).
       - name: Linux system deps
         if: matrix.os == 'ubuntu-latest'

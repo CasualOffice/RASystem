@@ -154,6 +154,32 @@ pub enum SurfaceKind {
     None,
     /// macOS: a borrowed `CVPixelBuffer` (`objc2_core_video::CVPixelBuffer`), IOSurface-backed.
     MacCoreVideoPixelBuffer,
+    /// A CPU-resident, top-down **BGRA8888** frame (Linux/Windows software capture → software
+    /// encoder). The pointer is a `*const `[`CpuBgraFrame`] describing the borrowed buffer. Used by
+    /// the cross-platform OpenH264 encoder, which reads the bytes and converts to I420 (ADR-063).
+    CpuBgra,
+}
+
+/// Descriptor for a CPU-resident BGRA frame, pointed at by a [`PlatformSurface`] of kind
+/// [`SurfaceKind::CpuBgra`]. `data` addresses `height * stride` bytes; each of `height` rows begins a
+/// `width * 4`-byte run of **BGRA** (byte order B,G,R,A) within a `stride`-byte row (`stride >=
+/// width*4`, for row padding). The buffer is **borrowed** for the lifetime of the producing
+/// [`CapturedFrame`]; the consumer (the paired software encoder) must not retain the pointer past the
+/// `encode` call. Constructing/holding this is safe; the dereference contract lives with the encoder
+/// (mirrors [`PlatformSurface`], ADR-058).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CpuBgraFrame {
+    /// Start of the top-left pixel's byte.
+    pub data: *const u8,
+    /// Total readable length in bytes (`>= (height - 1) * stride + width * 4`).
+    pub len: usize,
+    /// Bytes per row (`>= width * 4`).
+    pub stride: usize,
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
 }
 
 /// Opaque, thread-affine, **borrowed** handle to a GPU-resident surface (macOS: IOSurface-backed

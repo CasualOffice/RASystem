@@ -17,6 +17,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # nasm builds OpenH264's x86 assembly (ras-media-openh264) on x86 runners; a no-op on arm macOS.
+      - uses: ilammy/setup-nasm@v1
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy

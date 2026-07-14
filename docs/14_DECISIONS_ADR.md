@@ -226,6 +226,38 @@
   service/agent/input-helper remains the hardening-phase work); unifying the *UI* of the two ends does
   not change that server-side split.
 
+- **ADR-063 · Cross-platform sharing = PipeWire (Linux) + DXGI (Windows) capture → a shared OpenH264
+  software encoder over a CPU-BGRA seam · Accepted.** To make **Share** work beyond macOS, each
+  platform gets a `ras-media::ScreenCaptureBackend` and they feed **one** cross-platform encoder:
+  - **Encoder — `ras-media-openh264`** (`VideoEncoderBackend`). Software H.264 via the permissive
+    **OpenH264** crate (Cisco **BSD-2**; CLAUDE §6's sanctioned fallback — *never x264/GPL*). Consumes
+    CPU **BGRA**, converts to I420, emits **Annex-B with in-band SPS/PPS on every IDR** (the wire
+    contract the WebCodecs viewer already expects) with forced-IDR-on-demand + infinite GOP. It builds
+    on every desktop OS, so it is verifiable **locally and in CI** (unit-tested here: Annex-B keyframe
+    with SPS/PPS/IDR, row-padding + odd-dim handling, fail-close on a wrong surface). macOS keeps its
+    **hardware VideoToolbox** path; this software path is the Linux/Windows default. *Patent flag
+    (carried from ADR-051):* building OpenH264 from source grants **no H.264 patent rights** — flag for
+    IP counsel before a formal (non-alpha) release; production may switch to `libloading` a
+    Cisco-distributed binary or to OS hardware encoders (VAAPI / Media Foundation / NVENC).
+  - **The CPU-frame seam — `SurfaceKind::CpuBgra` + `CpuBgraFrame`** (`ras-media`). A software capture
+    hands the encoder a **borrowed** top-down BGRA buffer via the existing tagged-`PlatformSurface`
+    mechanism (ADR-058): `ras-media` stays `unsafe`-free (it only stores a pointer); the dereference is
+    confined to the encoder crate, fail-closed on a kind mismatch. Additive — the macOS
+    `MacCoreVideoPixelBuffer` surface is untouched.
+  - **Linux capture — PipeWire + `xdg-desktop-portal` (ScreenCast).** Chosen over X11/`x11rb` because
+    the portal path works on **both Wayland and X11** (Wayland is the modern Ubuntu default and blocks
+    legacy X11 screen grabs). A bonus: the portal's own screen-picker is an **OS-level consent
+    surface** that complements (never replaces) the app's Allow/Deny. DMA-buf zero-copy is a follow-up;
+    the alpha maps buffers to CPU BGRA for the software encoder.
+  - **Windows capture — DXGI Desktop Duplication.** The standard low-latency desktop capture; the alpha
+    copies the duplicated surface to CPU BGRA for the software encoder (a hardware-encode zero-copy path
+    via Media Foundation is a follow-up).
+  - **No invariant or wire change.** Consent, the always-visible indicator, and the stop control are
+    unchanged; only the *source* of pixels differs per OS. **Consequence:** `cargo build --workspace`
+    now compiles OpenH264's C/C++ (a C++ toolchain + `nasm` on x86 — added to CI). Runtime correctness
+    of the two OS capture backends is an **on-device** step (not reproducible in CI); the shared
+    encoder is verified now.
+
 ## Security, authorization, fraud
 
 - **ADR-040 · Algorithm-pinned signed grants, sender-constrained · Accepted.** Prefer **Biscuit**

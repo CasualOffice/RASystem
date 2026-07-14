@@ -1,0 +1,28 @@
+[package]
+name = "ras-media-openh264"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Cross-platform software H.264 encoder (OpenH264) behind the `ras-media` VideoEncoderBackend trait.
+# Used by the Linux + Windows software capture backends (ADR-063). Builds everywhere OpenH264 builds
+# (bundled Cisco source, BSD-2-Clause). FFI-bearing but the `openh264` crate wraps the unsafe.
+
+[dependencies]
+ras-media = { path = "../ras-media" }
+ras-protocol = { path = "../ras-protocol" }
+bytes = "1"
+openh264 = "0.6"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[dev-dependencies]
