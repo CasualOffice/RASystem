@@ -222,22 +222,14 @@ mod imp {
             let stop = Arc::new(AtomicBool::new(false));
             let fps = opts.target_fps.max(1);
 
-            let options = Options {
-                fps,
-                show_cursor: true,
-                show_highlight: false,
-                target: None, // primary display
-                crop_area: None,
-                output_type: FrameType::BGRAFrame,
-                output_resolution: Resolution::Captured,
-                excluded_targets: None,
-            };
-
+            // scap's `Options` embeds `Target` (a raw window/monitor handle) which is `!Send` on
+            // Windows, so it can't cross the thread boundary even when `None`. Pass only the `Send`
+            // `fps` and build `Options` for the primary display inside `capture_loop`.
             let thread_shared = shared.clone();
             let thread_stop = stop.clone();
             let handle = std::thread::Builder::new()
                 .name("ras-scap-capture".into())
-                .spawn(move || capture_loop(options, thread_shared, thread_stop))
+                .spawn(move || capture_loop(fps, thread_shared, thread_stop))
                 .map_err(|_| cap_fatal("failed to spawn capture thread"))?;
 
             self.running = Some(Running {
@@ -323,7 +315,18 @@ mod imp {
 
     /// The capture thread: build the capturer, then push each frame into the latest-frame slot
     /// (drop-old — only the newest matters for a low-latency feed).
-    fn capture_loop(options: Options, shared: Arc<Shared>, stop: Arc<AtomicBool>) {
+    fn capture_loop(fps: u32, shared: Arc<Shared>, stop: Arc<AtomicBool>) {
+        // Built here (not passed in) because `Options`/`Target` is `!Send` on Windows.
+        let options = Options {
+            fps,
+            show_cursor: true,
+            show_highlight: false,
+            target: None, // primary display
+            crop_area: None,
+            output_type: FrameType::BGRAFrame,
+            output_resolution: Resolution::Captured,
+            excluded_targets: None,
+        };
         let mut capturer = match Capturer::build(options) {
             Ok(c) => c,
             Err(_) => {
