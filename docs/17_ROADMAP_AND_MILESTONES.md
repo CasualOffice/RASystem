@@ -183,16 +183,22 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   so CI stays green. **Remaining:** cursor metadata out-of-band, dirty rects, `excluded_window_ids`
   → `SCWindow` mapping, and pipelined (async) encode emission.
 - ☐ `MED` HW encoder abstraction + OpenH264 `libloading` software fallback (never x264).
-- ◐ `NET` `ras-transport-iroh`: real endpoint, versioned ALPN, channel plumbing over iroh 1.x
-  (`Connection::stats()` feeds the existing ABR hook). **Control + video planes done** (iroh
+- ☑ `NET` `ras-transport-iroh`: real endpoint, versioned ALPN, channel plumbing over iroh 1.x
+  (`Connection::stats()` feeds the existing ABR hook). **Control + video + health planes done** (iroh
   `=1.0.2`): real `Endpoint`/`Session`/`ControlChannel`, ALPN `casual-ras/1` + single-bidi-stream
-  control topology (ADR-059); the **`PerFrameStream` video path** — one uni QUIC stream per frame, a
-  44-byte per-frame header carrying `StreamConfig`, bounded drop-at-source sink, and source-side gap
-  → `FrameDropped` synthesis (ADR-060). Hermetic loopback tests: control round-trip asserting peer
-  `EndpointId` (Invariant 9), a real per-frame-stream video exchange with gap detection, and a header
-  round-trip / fail-closed-decode unit test. **Left:** `HealthObserver` over `Connection::stats()`,
-  the `IrohTransport: SessionTransport` adapter for the loopback→iroh swap, and (deferred, additive)
-  reset-on-stale + FEC / the `DatagramFec` alternative.
+  control topology, **host-opens** (ADR-059 amended after a real two-endpoint run surfaced the
+  controller-opens deadlock the loopback masked); the **`PerFrameStream` video path** — one uni QUIC
+  stream per frame, a 44-byte per-frame header carrying `StreamConfig`, bounded drop-at-source sink,
+  source-side gap → `FrameDropped` synthesis (ADR-060); and a **`HealthObserver`** deriving
+  `ConnHealth` (rtt/bandwidth/path from the selected path's `PathStats`, cumulative loss from
+  `ConnectionStats`). The **`IrohSessionTransport: SessionTransport` adapter** (in `ras-core`) makes
+  the loopback→iroh swap transparent: the full spine runs end-to-end over two real iroh endpoints
+  (`spine_runs_over_real_iroh_transport`) with **no orchestrator change**. Hermetic tests: control
+  round-trip asserting peer `EndpointId` (Invariant 9), a real per-frame-stream video exchange with
+  gap detection + live health read, a header round-trip / fail-closed-decode unit test, and the
+  full-spine iroh e2e. **Deferred (additive):** reset-on-stale + FEC / the `DatagramFec` alternative,
+  and windowed (vs cumulative) loss for the ABR bandwidth estimate. The cross-machine two-laptop run
+  remains the developer-owned on-device step.
 - ☐ `MED` FEC (`nanors`) + the *transport-side* loss detection that generates `FrameDropped` per
   `docs/10 §4` (the controller-side reaction to those events is done + tested above).
 - ◐ `UI` Controller Tauri shell (`controller/`). **Landed + compiles (Tauri 2.11.5, ≥2.11.1 pin):**

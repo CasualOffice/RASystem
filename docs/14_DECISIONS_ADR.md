@@ -131,18 +131,30 @@
   the TLS layer, the earliest possible point. The trailing `/1` is the transport-wire major version;
   it bumps only on a breaking framing/stream-topology change, never for an additive `ControlMsg`
   variant (those are already versioned inside the protobuf). **(2) Control-stream topology:** the
-  reliable, ordered control channel is exactly one bidirectional QUIC stream, **opened by the dialer
-  (controller) and accepted by the acceptor (host)**, so both ends deterministically bind the same
-  stream without a negotiation round-trip. It carries the length-prefixed `ControlMsg` framing
+  reliable, ordered control channel is exactly one bidirectional QUIC stream, **opened by the host
+  and accepted by the controller** (amended — see below), so both ends deterministically bind the
+  same stream without a negotiation round-trip. It carries the length-prefixed `ControlMsg` framing
   (`u32-BE len | protobuf`, `MAX_CONTROL_FRAME` DoS guard) already fuzzed in `FramedControlChannel`.
-  Video rides *separate* per-frame unidirectional streams (next increment) so a stalled or reset
-  video frame can never head-of-line-block control or the emergency stop (the latency invariant).
-  This is a wire commitment because it fixes who-opens-what and the ALPN string; it does **not**
-  touch authorization — QUIC/TLS authenticates *identity* (each side reads the other's `EndpointId`
-  as the connection remote), never *authority* (Invariant 9). Grants/leases still ride opaque in
-  `ControlMsg::AuthEnvelope` and are validated host-side. Verified by a hermetic loopback
+  Video rides *separate* per-frame unidirectional streams (ADR-060), each **also opened by the host**,
+  so a stalled or reset video frame can never head-of-line-block control or the emergency stop (the
+  latency invariant). This is a wire commitment because it fixes who-opens-what and the ALPN string;
+  it does **not** touch authorization — QUIC/TLS authenticates *identity* (each side reads the other's
+  `EndpointId` as the connection remote), never *authority* (Invariant 9). Grants/leases still ride
+  opaque in `ControlMsg::AuthEnvelope` and are validated host-side. Verified by a hermetic loopback
   integration test (two real iroh endpoints, direct-address dial, `Hello`⇄`Bye` round-trip, both
   sides assert the peer's authenticated `EndpointId`).
+  - **Amendment (control-stream opener): the *host* opens, not the dialer.** The initial draft had the
+    *dialer* (controller) open the control stream. That deadlocks over real QUIC: a freshly-opened
+    stream is surfaced to the *acceptor* only once the *opener* first writes, but in the Casual RAS
+    handshake the **host speaks first** (`Hello` → `StreamConfig`) while the controller reads first —
+    so a controller-opened stream leaves the host's `accept_bi` waiting for a write that never comes,
+    and the host waiting to `accept` before it can write. The in-memory loopback masked this (its
+    channel is pre-wired and direction-agnostic); a real two-endpoint iroh run surfaced it. Fix: **the
+    opener is always the first speaker → the host opens** the control stream (and every video
+    uni-stream). The host is thus the uniform *stream* opener; the controller only *dials the
+    connection*. No wire-format or ALPN change — purely which side calls `open_bi`/`accept_bi` — so
+    `casual-ras/1` stands. Verified by the `ras-core` spine running end-to-end over two real iroh
+    endpoints (`iroh_transport::tests::spine_runs_over_real_iroh_transport`).
 
 - **ADR-060 · Video rides one unidirectional QUIC stream per frame (`PerFrameStream`); a 44-byte
   header carries the per-frame `StreamConfig` · Accepted.** `StreamConfig::video_transport` already

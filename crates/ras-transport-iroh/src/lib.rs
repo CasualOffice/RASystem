@@ -7,6 +7,8 @@
 //! `iroh` dependency is added then. Newtypes wrap `[u8; 32]` so downstream crates never depend on
 //! `iroh` directly.
 
+use core::time::Duration;
+
 use bytes::{Bytes, BytesMut};
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream, VarInt};
 use iroh::{
@@ -607,12 +609,17 @@ impl Session {
         EndpointId(*self.conn.remote_id().as_bytes())
     }
 
-    /// The reliable control channel: the controller (dialer) **opens** the bidi stream, the host
-    /// (acceptor) **accepts** it, so both ends bind the same single control stream.
+    /// The reliable control channel over one bidi QUIC stream. The **host opens** it and the
+    /// **controller accepts** it (ADR-059). This is deliberate: QUIC only surfaces a freshly-opened
+    /// stream to the *acceptor* once the *opener* first writes, and in the Casual RAS handshake the
+    /// **host speaks first** (`Hello` → `StreamConfig`). Making the host the opener means its first
+    /// write is what unblocks the controller's accept — the two rendezvous with no dead wait. (The
+    /// host likewise opens every per-frame video uni-stream, so it is the uniform stream opener; the
+    /// controller only *dials the connection*.)
     pub async fn control(&self) -> Result<ControlChannel, TransportError> {
         let (send, recv) = match self.role {
-            Role::Controller => self.conn.open_bi().await,
-            Role::Host => self.conn.accept_bi().await,
+            Role::Host => self.conn.open_bi().await,
+            Role::Controller => self.conn.accept_bi().await,
         }
         .map_err(|_| RasError::recoverable(ErrorCode::TransportError, "control stream failed"))?;
         Ok(ControlChannel {
@@ -637,10 +644,12 @@ impl Session {
             Role::Host => None,
         }
     }
-    /// Lock-free health observable.
+    /// Connection-health observable, computed on demand from this connection's live QUIC stats.
     #[must_use]
     pub fn health(&self) -> HealthObserver {
-        todo!("Connection::stats()-backed watch channel")
+        HealthObserver {
+            conn: self.conn.clone(),
+        }
     }
 
     /// Close the session with a reason code (carried as the QUIC application close code).
@@ -650,20 +659,91 @@ impl Session {
     }
 }
 
-/// Read-only, lock-free connection-health observable (a `watch` receiver). A stalled video path
-/// never blocks a health read.
+/// Read-only connection-health observable over one iroh [`Connection`]. Each read derives a fresh
+/// [`ConnHealth`] from the connection's live QUIC stats; it reads in-memory counters only and never
+/// awaits network I/O, so a stalled video path can never block a health read (the latency invariant).
 #[derive(Clone)]
-pub struct HealthObserver;
+pub struct HealthObserver {
+    conn: Connection,
+}
 
 impl HealthObserver {
-    /// The latest snapshot; never blocks on the network.
+    /// How often [`changed`](Self::changed) resamples. Health drives UI badges + the ABR loop, not
+    /// the hot frame path, so a coarse poll is right — a tighter loop would burn CPU for no benefit.
+    const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+    /// The current health snapshot. Non-blocking: reads in-memory QUIC counters, never the network.
     #[must_use]
     pub fn snapshot(&self) -> ConnHealth {
-        todo!()
+        map_health(&self.conn)
     }
-    /// Await the next health change (UI reactivity, not the hot path).
+
+    /// Await the next sampled health value (UI reactivity + ABR, not the hot path). iroh exposes no
+    /// edge-triggered health signal, so this is a fixed-interval resample rather than a true
+    /// change-notify — honest about being a sampler, not a watch.
     pub async fn changed(&mut self) -> ConnHealth {
-        todo!()
+        tokio::time::sleep(Self::POLL_INTERVAL).await;
+        self.snapshot()
+    }
+}
+
+/// Derive a [`ConnHealth`] from one connection's live QUIC stats. Sourced honestly:
+/// - `rtt_us` / `estimated_bandwidth_bps` / `path` come from the **selected** network path's
+///   [`PathStats`] (`rtt`, congestion window, relay-vs-direct); bandwidth is the BDP estimate
+///   `cwnd·8 / rtt` (bits/sec), saturating.
+/// - `loss_fraction` is the **cumulative** lost-vs-sent datagram ratio from `ConnectionStats` (a
+///   coarse lifetime average, not a recent-window rate — the windowed loss estimate lands with the
+///   FEC/ABR increment).
+/// - `frames_dropped` is `0` here: host-side sink drops surface as a [`SendOutcome`] at send time,
+///   not through this connection-level view.
+/// - `state` is [`LinkState::Live`] while the connection is up; the watchdog `Stalled`/`Reconnecting`
+///   transitions are a `ras-core` timing concern, not a transport-stats one.
+fn map_health(conn: &Connection) -> ConnHealth {
+    let paths = conn.paths();
+    // The path currently carrying application data (fall back to the first known path).
+    let selected = paths
+        .iter()
+        .find(iroh::endpoint::Path::is_selected)
+        .or_else(|| paths.iter().next());
+
+    let (rtt_us, cwnd_bytes, is_relay) = match selected {
+        Some(p) => (
+            u32::try_from(p.rtt().as_micros()).unwrap_or(u32::MAX),
+            p.stats().cwnd,
+            p.is_relay(),
+        ),
+        None => (0, 0, false),
+    };
+
+    // BDP estimate: cwnd (bytes) · 8 / rtt (seconds) = bits/sec. Guard rtt=0 (loopback reports
+    // near-zero) with a 1 µs floor; saturate the u64 math into the u32 field.
+    let rtt_floor_us = u64::from(rtt_us).max(1);
+    let bw_bps = cwnd_bytes
+        .saturating_mul(8)
+        .saturating_mul(1_000_000)
+        .checked_div(rtt_floor_us)
+        .unwrap_or(0);
+    let estimated_bandwidth_bps = u32::try_from(bw_bps).unwrap_or(u32::MAX);
+
+    let cs = conn.stats();
+    let sent = cs.udp_tx.datagrams;
+    let loss_fraction = if sent > 0 {
+        (cs.lost_packets as f64 / sent as f64) as f32
+    } else {
+        0.0
+    };
+
+    ConnHealth {
+        path: if is_relay {
+            PathKind::Relayed
+        } else {
+            PathKind::Direct
+        },
+        rtt_us,
+        loss_fraction,
+        estimated_bandwidth_bps,
+        frames_dropped: 0,
+        state: LinkState::Live,
     }
 }
 
@@ -757,25 +837,27 @@ mod iroh_session_tests {
         let controller_id = controller.id();
         let host_addrs = to_loopback(&host.bound_addrs());
 
-        // Host side: accept one session, take the control channel, echo one message back.
+        // Host side: accept the connection, **open** the control stream, and speak first (`Hello`) —
+        // the same order as the real handshake. Its first write is what unblocks the controller's
+        // `accept_bi`. Then read the controller's reply.
         let host_task = tokio::spawn(async move {
             let session = host.accept().await.unwrap().expect("an inbound session");
             let remote = session.remote();
             let mut control = session.control().await.unwrap();
-            let got = control.recv().await.unwrap();
-            assert!(matches!(
-                got,
-                ControlMsg::Hello {
-                    protocol_version: 1
-                }
-            ));
             control
-                .send(ControlMsg::Bye {
-                    code: ErrorCode::NormalClosure,
+                .send(ControlMsg::Hello {
+                    protocol_version: 1,
                 })
                 .await
                 .unwrap();
-            // Keep the endpoint alive until the controller has read the reply.
+            let reply = control.recv().await.unwrap();
+            assert!(matches!(
+                reply,
+                ControlMsg::Bye {
+                    code: ErrorCode::NormalClosure
+                }
+            ));
+            // Keep the endpoint alive until the controller has finished.
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             host.close().await;
             remote
@@ -787,20 +869,21 @@ mod iroh_session_tests {
             .unwrap();
         // The dialer authenticated the host's identity, not any authority (Invariant 9).
         assert_eq!(session.remote(), host_id);
+        // Controller **accepts** the host-opened control stream, reads the host's `Hello`, replies.
         let mut control = session.control().await.unwrap();
+        let got = control.recv().await.unwrap();
+        assert!(matches!(
+            got,
+            ControlMsg::Hello {
+                protocol_version: 1
+            }
+        ));
         control
-            .send(ControlMsg::Hello {
-                protocol_version: 1,
+            .send(ControlMsg::Bye {
+                code: ErrorCode::NormalClosure,
             })
             .await
             .unwrap();
-        let reply = control.recv().await.unwrap();
-        assert!(matches!(
-            reply,
-            ControlMsg::Bye {
-                code: ErrorCode::NormalClosure
-            }
-        ));
 
         let host_saw = host_task.await.unwrap();
         // The acceptor authenticated the controller's identity in turn.
@@ -899,6 +982,16 @@ mod iroh_session_tests {
             VideoEvent::Frame(f) => assert_eq!(f.frame_id, 5),
             other => panic!("expected frame 5 after the gap, got {other:?}"),
         }
+
+        // Health reads off the live connection: a real, direct, low-loss loopback path.
+        let health = session.health().snapshot();
+        assert_eq!(health.state, LinkState::Live);
+        assert_eq!(health.path, PathKind::Direct);
+        assert!(
+            health.loss_fraction < 0.5,
+            "loopback loss should be low, got {}",
+            health.loss_fraction
+        );
 
         drop(sink);
         host_ep.close().await;

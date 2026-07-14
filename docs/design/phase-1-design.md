@@ -1533,10 +1533,7 @@ iroh's `(RecvStream, SendStream)`. ALPN `casual-ras/1` and the "dialer opens / a
 single control stream" topology are pinned in **ADR-059**. Verified by a **hermetic loopback
 integration test** — two real iroh endpoints, direct-address dial (no discovery/relay), a
 `Hello`⇄`Bye` control round-trip, and both sides asserting the peer's `EndpointId` (Invariant 9).
-`HealthObserver` (`Connection::stats()` → `watch`) stays `todo!()` for the next increment, as does
-the `IrohTransport: SessionTransport` adapter in `ras-core` that lets the controller swap
-loopback→iroh behind the existing seam. The cross-machine two-laptop run remains the developer-owned
-on-device step.
+The cross-machine two-laptop run remains the developer-owned on-device step.
 
 **Progress — step 4, video plane landed.** `ras-transport-iroh` now streams video over the
 `PerFrameStream` transport (ADR-060): the host `VideoSink` opens **one unidirectional QUIC stream
@@ -1549,3 +1546,22 @@ head-of-line-block each other or the control stream (the latency invariant). Dec
 and `read_to_end` is bounded (8 MiB). Verified by a hermetic loopback test (real per-frame streams,
 faithful reconstruction incl. per-frame config, the synthesized-gap path) and a header
 round-trip / fail-closed-decode unit test.
+
+**Progress — step 4, health + `SessionTransport` adapter landed; M2 spine proven over real iroh.**
+A `HealthObserver` derives `ConnHealth` on demand from the connection's live QUIC stats — rtt,
+BDP-estimated bandwidth (`cwnd·8/rtt`), and direct-vs-relay from the *selected* path's `PathStats`;
+cumulative loss from `ConnectionStats`. It reads in-memory counters only (never awaits I/O), so a
+stalled video path can't block a health read. The new **`IrohSessionTransport`** (in `ras-core`,
+`iroh_transport.rs`) implements the `SessionTransport` seam by wrapping an established
+`ras_transport_iroh::Session`, forwarding control/video/health (the error types are identical —
+`CoreError` *is* the transport error — so the adapter is a straight forward). The payoff: the **full
+host + controller spine runs end-to-end over two real iroh endpoints on loopback with no orchestrator
+or wire change** — the loopback→iroh swap the DI seam was built for
+(`iroh_transport::tests::spine_runs_over_real_iroh_transport`). That integration run also **surfaced a
+real handshake bug the loopback had masked**: with the controller opening the control stream, the
+host's `accept_bi` waited forever because QUIC only reveals an opened stream to the acceptor once the
+opener *writes*, but the host speaks first (`Hello`→`StreamConfig`) while the controller reads first.
+Fix (ADR-059 amendment): **the opener must be the first speaker → the host opens** the control stream
+(it already opens the video uni-streams); the controller only dials the connection. No wire/ALPN
+change. What remains for cross-machine M2 is the developer-owned two-laptop run and pointing the
+controller app's transport at `IrohSessionTransport` (currently the in-process loopback).

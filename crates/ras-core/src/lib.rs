@@ -19,6 +19,7 @@ pub mod abr;
 pub mod deps;
 pub mod event;
 pub mod frame_channel;
+pub mod iroh_transport;
 pub mod session;
 
 #[cfg(any(test, feature = "testkit"))]
@@ -47,6 +48,7 @@ pub use event::{
 pub use frame_channel::{
     encode_frame_blob, parse_header, FrameHeader, FRAME_HEADER_LEN, FRAME_MAGIC,
 };
+pub use iroh_transport::IrohSessionTransport;
 pub use session::{ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig};
 
 use ras_protocol::{DecoderFeedback, ErrorCode, KeyframeReason};
