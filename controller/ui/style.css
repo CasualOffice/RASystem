@@ -1,0 +1,48 @@
+:root {
+  color-scheme: dark;
+}
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+html,
+body {
+  width: 100%;
+  height: 100%;
+  background: #0b0b0e;
+  overflow: hidden;
+}
+#screen {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  object-fit: contain;
+  background: #0b0b0e;
+}
+#hud {
+  position: fixed;
+  top: 10px;
+  left: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #7CFC7C;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;
+  pointer-events: none;
+}
+/* Session indicator — an honest, always-visible "remote view active" marker (Invariant 7). The
+   real controller shows it whenever a session renders; the UI must not be able to suppress it. */
+#banner {
+  position: fixed;
+  top: 10px;
+  right: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(200, 30, 30, 0.85);
+  color: #fff;
+  font: 600 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}

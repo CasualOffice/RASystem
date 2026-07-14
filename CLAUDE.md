@@ -91,8 +91,17 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     Pure-Rust `objc2` bindings (no Swift bridge); the crate is **empty on non-macOS** so Linux CI stays
     green. Driven end-to-end through the traits by `--example capture_encode`: first-frame keyframe,
     gap-free monotonic ids, Annex-B + in-band SPS/PPS on every IDR, `ffprobe`-clean h264, ~8 ms encode.
+  - **Controller Tauri v2 shell (`controller/`), builds clean (Tauri 2.11.5).** Proves the video path:
+    Rust pushes each encoded access unit as the canonical `ras_core::frame_channel` blob (24-byte
+    `RAS1` header + Annex-B) over a **binary** Tauri `Channel`; the webview decodes with WebCodecs
+    `VideoDecoder` → `<canvas>`, gates on the first IDR, and drives forced-IDR-on-demand
+    (`request_keyframe`). Fed by a **local mirror** (`ras-media-macos` in-process) so it runs
+    glass-to-glass on one Mac before iroh. Static frontend via `withGlobalTauri` (no bundler);
+    `core:default` capability; CSP set; always-visible LIVE indicator (Invariant 7). Kept **out of the
+    root workspace** (heavy WebView deps); the GUI run is an on-device step (login session +
+    Screen-Recording TCC). The real remote (iroh) source swaps in behind the same channel.
   - Still stubbed behind traits (`todo!()`): the concrete iroh transport (and the Windows DXGI/MF media
-    port), and the Tauri host/controller apps — they land as the spike/network go/no-go clears.
+    port), and the **host** Tauri app + consent UI — they land as the spike/network go/no-go clears.
 - **Build/verify commands** (all green as of M0):
   - `cargo build --workspace`
   - `cargo fmt --all -- --check`

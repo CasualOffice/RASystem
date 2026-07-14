@@ -187,8 +187,16 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   (`Connection::stats()` feeds the existing ABR hook).
 - ☐ `MED` FEC (`nanors`) + the *transport-side* loss detection that generates `FrameDropped` per
   `docs/10 §4` (the controller-side reaction to those events is done + tested above).
-- ☐ `UI` Controller Tauri shell: Web Worker + `OffscreenCanvas` WebCodecs renderer over the
-  frame-Channel codec; connection-state UI; **pin Tauri ≥ 2.11.1**, deny-by-default caps, strict CSP.
+- ◐ `UI` Controller Tauri shell (`controller/`). **Landed + compiles (Tauri 2.11.5, ≥2.11.1 pin):**
+  the video path is proven — Rust pushes each encoded access unit as the canonical
+  `ras_core::frame_channel` blob (24-byte `RAS1` header + Annex-B) over a **binary** Tauri `Channel`;
+  the webview decodes with a WebCodecs `VideoDecoder` and renders to a `<canvas>`, drops deltas until
+  the first IDR, and drives forced-IDR-on-demand (`request_keyframe`) to cover the infinite-GOP
+  startup race + decoder reset. Fed by a **local mirror** (`ras-media-macos` capture→encode in-process)
+  so it's runnable **glass-to-glass on one Mac before iroh** (steps 2+3 collapsed). Static frontend via
+  `withGlobalTauri` (no bundler); `core:default` capability; CSP set; always-visible LIVE indicator
+  (Invariant 7). **Remaining:** Web Worker + `OffscreenCanvas` renderer, React/TS UI + strict-CSP
+  hardening, connection-state UI, and swapping the local mirror for the iroh `VideoSource` (step 4).
 - ◐ `QA` Reconnection behavior documented + tested (loopback; the `LoopbackFaults` handle injects both
   an abrupt link cut and `FrameDropped` events, so suspend/reconnect *and* loss handling are exercised
   without abusing `stop`); **generative/fuzz property tests** over the untrusted-input surface: the control codec, frame

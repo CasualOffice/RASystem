@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Controller shell: core defaults for the main window. Custom app commands (start_mirror / stop_mirror / request_keyframe) are exposed via the invoke handler; no plugin permissions are granted.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
