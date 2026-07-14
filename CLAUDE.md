@@ -139,14 +139,27 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     GUI)** — a control panel (ticket + always-on `REMOTE VIEWING ACTIVE` indicator + Stop, Invariant 7)
     plus a transparent, click-through, always-on-top **overlay** that draws the viewer's remote pointer
     on the host's screen. Both serve real `ras-media-macos` capture over `IrohSessionTransport`, one
-    viewer at a time. Verified: controller + host Tauri apps `cargo check` clean; pointer path has a
-    loopback e2e (`controller_pointer_reaches_host…`) + codec round-trip.
+    viewer at a time. The Tauri host now enforces **real local Allow/Deny consent (Invariant 1)**: a
+    `LocalConsent` implements `ras-core`'s `GrantValidator` — a connecting viewer is held in the
+    handshake (no pixels) until the local user clicks Allow; Deny or 90 s of silence refuses
+    fail-closed. It is built with `ras-core` `default-features = false`, so the `insecure-no-auth`
+    `AllowAllValidator` is **not even linked** into the product host. Verified: controller + host Tauri
+    apps `cargo check`/`clippy` clean; pointer path has a loopback e2e
+    (`controller_pointer_reaches_host…`) + codec round-trip.
+  - **GitHub release builds are wired** (`.github/workflows/release.yml`): on a `v*` tag (or manual
+    dispatch → draft) `tauri-action` bundles the **controller** on macOS/Linux/Windows (dmg / AppImage
+    + deb / NSIS — it is decode-only so it ships everywhere today) and the **host** on macOS (dmg).
+    Both apps now carry a real bundle config (branded 1024px icon set, `bundle.active`, category);
+    builds are unsigned in the alpha (Gatekeeper/SmartScreen warn — EV signing is a hardening-phase
+    step). The controller `.app`/`.dmg` bundle was built and verified locally on macOS.
   - Still stubbed / deferred (`todo!()` or additive): iroh **reset-on-stale + FEC** and the
     `DatagramFec` video alternative (behind `StreamConfig::video_transport`), windowed (vs cumulative)
-    loss for the ABR estimate, the **Linux (PipeWire/VAAPI) + Windows (DXGI/MF) capture backends**,
-    **real approve/deny consent** (still the `AllowAllValidator` no-op seam), excluding the host
-    overlay from capture + multi-monitor pointer mapping, and the GitHub release build. The controller
-    self-mirror still uses the loopback; the real remote flow uses `IrohSessionTransport`.
+    loss for the ABR estimate, the **Linux (PipeWire/VAAPI) + Windows (DXGI/MF) capture backends**
+    (host stays macOS-only until these land), the **Phase-2 grant/lease/capability model** (consent is
+    now real local Allow/Deny, but authorization is still coarse — no signed grants/leases, no
+    capability scoping, no TPM tiers), excluding the host overlay from capture + multi-monitor pointer
+    mapping, and EV code-signing/notarization of the release bundles. The controller self-mirror still
+    uses the loopback; the real remote flow uses `IrohSessionTransport`.
 - **Build/verify commands** (all green as of M0):
   - `cargo build --workspace`
   - `cargo fmt --all -- --check`

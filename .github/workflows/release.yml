@@ -1,0 +1,113 @@
+name: release
+
+# Build the desktop apps and publish them to a GitHub Release.
+#
+# Trigger by pushing a tag like `v0.0.1-alpha`, or run manually (workflow_dispatch) to produce a
+# draft release you can inspect before publishing.
+#
+# What ships:
+#   - **Controller** — cross-platform (macOS .dmg, Linux .AppImage + .deb, Windows .exe/NSIS). It is
+#     decode-only (WebCodecs), so it runs on every desktop OS today.
+#   - **Host** — macOS .dmg only. The host needs a screen-capture backend and only the macOS backend
+#     (ScreenCaptureKit + VideoToolbox) exists so far; Linux/Windows host backends are a later port.
+#
+# Builds are **unsigned** in the alpha: macOS shows a Gatekeeper warning (right-click → Open), and
+# Windows SmartScreen may warn. EV code-signing with HSM-held keys comes with the release-hardening
+# phase (docs/08). Nothing here uploads or notarizes secrets.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to attach the draft release to (e.g. v0.0.1-alpha)"
+        required: true
+        default: "v0.0.0-dev"
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  controller:
+    name: controller (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # WebView + bundling system deps for Tauri v2 on Linux (webkit2gtk 4.1).
+      - name: Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            controller/src-tauri/target
+          key: ${{ matrix.os }}-controller-${{ hashFiles('controller/src-tauri/Cargo.lock') }}
+
+      - name: Build & publish controller
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: controller/src-tauri
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "Casual RAS ${{ github.event.inputs.tag || github.ref_name }}"
+          releaseBody: |
+            Alpha build of the Casual RAS **controller** (view side) and macOS **host** (share side).
+
+            - **Controller** runs on macOS, Linux, and Windows (view-only: you can see the shared
+              screen and point at it with a remote cursor; no click/keyboard control).
+            - **Host** is macOS-only for now (needs ScreenCaptureKit); it asks the local user for
+              Allow/Deny before any pixels are shared.
+
+            Builds are **unsigned** — macOS: right-click → Open to bypass Gatekeeper the first time.
+            Peer-to-peer over Iroh/QUIC; no server involved. See each app's README for how to pair.
+          releaseDraft: true
+          prerelease: true
+
+  host:
+    name: host (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            host/src-tauri/target
+          key: macos-host-${{ hashFiles('host/src-tauri/Cargo.lock') }}
+
+      - name: Build & publish host (macOS)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: host/src-tauri
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "Casual RAS ${{ github.event.inputs.tag || github.ref_name }}"
+          releaseDraft: true
+          prerelease: true

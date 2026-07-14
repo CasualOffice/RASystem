@@ -35,6 +35,17 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["dmg", "app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "Casual RAS host — share this screen over a peer-to-peer link.",
+    "longDescription": "The shared-machine side of Casual RAS. Shows a connection ticket to hand to a viewer, asks for local Allow/Deny consent, then streams this screen over an encrypted peer-to-peer (Iroh/QUIC) link. macOS only in the alpha; view-only."
   }
 }
