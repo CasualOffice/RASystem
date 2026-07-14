@@ -1,0 +1,33 @@
+[package]
+name = "casual-ras-host"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+authors = ["Casual RAS authors"]
+publish = false
+description = "Casual RAS host (Tauri v2) — shares this machine's screen over iroh + shows the remote pointer."
+
+# Kept OUT of the root crate workspace (heavy Tauri/WebView deps; not needed for the core CI gates).
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `insecure-no-auth` (default) gives the Phase-1 AllowAllValidator; real consent gating lands later.
+ras-core = { path = "../../crates/ras-core" }
+ras-media = { path = "../../crates/ras-media" }
+ras-protocol = { path = "../../crates/ras-protocol" }
+ras-transport-iroh = { path = "../../crates/ras-transport-iroh" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# The only real capture/encode backend today; on other targets the app builds but reports "unsupported".
+[target.'cfg(target_os = "macos")'.dependencies]
+ras-media-macos = { path = "../../crates/ras-media-macos" }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

@@ -1,0 +1,96 @@
+:root {
+  color-scheme: dark;
+}
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+body {
+  background: #0b0b0e;
+  color: #e8e8ee;
+  font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
+  padding: 16px 18px;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+h1 {
+  font-size: 16px;
+  font-weight: 600;
+}
+#indicator {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font: 600 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+}
+#indicator.idle {
+  background: #23232c;
+  color: #9a9aa8;
+}
+#indicator.live {
+  background: rgba(200, 30, 30, 0.9);
+  color: #fff;
+}
+.lead {
+  color: #b9b9c6;
+  margin-bottom: 6px;
+}
+.ticketrow {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  margin-bottom: 12px;
+}
+#ticket {
+  flex: 1 1 auto;
+  resize: none;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #33333f;
+  background: #050507;
+  color: #7cfc7c;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+#copy {
+  flex: 0 0 auto;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid #33333f;
+  background: #23232c;
+  color: #e8e8ee;
+  cursor: pointer;
+}
+#copy:hover {
+  background: #2e2e3a;
+}
+#status {
+  color: #9a9aa8;
+  min-height: 21px;
+  margin-bottom: 16px;
+}
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+#stop {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid #8a2b2b;
+  background: #7a1f1f;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+#stop:hover {
+  background: #932424;
+}
+.note {
+  color: #7a7a88;
+  font-size: 12px;
+}

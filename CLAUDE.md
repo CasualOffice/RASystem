@@ -128,11 +128,25 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     fail-closed-decode unit test; the full-spine iroh e2e). Transport authenticates identity, never
     authority. `cargo-deny` gates iroh's transitive tree via scoped permissive exceptions
     (Unlicense/CDLA-Permissive-2.0 wasm/relay helpers) — Invariant 18 holds.
+  - **Alpha two-machine app is usable (view-only + remote pointer).** A **connection ticket**
+    (`EndpointAddr::to_ticket`, `CASUALRAS1:<hex>`, fail-closed decode) carries id + direct addrs +
+    relay; `Endpoint::online`/`addr`/`connect` dial across NAT (direct + relay, discovery-by-id
+    fallback). The **controller** (`controller/`, Tauri) gained `connect_to_host(ticket)` /
+    `disconnect` — platform-independent (viewer only decodes) — plus viewer-side annotation and a
+    **remote pointer** (its cursor over the shared screen streams to the host as `ControlMsg::Pointer`
+    → `LifecycleEvent::RemotePointer`, ADR-061; normalized, best-effort, **not OS input** so outside
+    Invariants 6/14). The **host** ships two ways: `ras-host` (workspace CLI) and **`host/` (Tauri
+    GUI)** — a control panel (ticket + always-on `REMOTE VIEWING ACTIVE` indicator + Stop, Invariant 7)
+    plus a transparent, click-through, always-on-top **overlay** that draws the viewer's remote pointer
+    on the host's screen. Both serve real `ras-media-macos` capture over `IrohSessionTransport`, one
+    viewer at a time. Verified: controller + host Tauri apps `cargo check` clean; pointer path has a
+    loopback e2e (`controller_pointer_reaches_host…`) + codec round-trip.
   - Still stubbed / deferred (`todo!()` or additive): iroh **reset-on-stale + FEC** and the
     `DatagramFec` video alternative (behind `StreamConfig::video_transport`), windowed (vs cumulative)
-    loss for the ABR estimate, the Windows DXGI/MF media port, and the **host** Tauri app + consent UI
-    — they land as later increments / the network go/no-go clears. Controller still runs the in-process
-    loopback until it is switched to `IrohSessionTransport`.
+    loss for the ABR estimate, the **Linux (PipeWire/VAAPI) + Windows (DXGI/MF) capture backends**,
+    **real approve/deny consent** (still the `AllowAllValidator` no-op seam), excluding the host
+    overlay from capture + multi-monitor pointer mapping, and the GitHub release build. The controller
+    self-mirror still uses the loopback; the real remote flow uses `IrohSessionTransport`.
 - **Build/verify commands** (all green as of M0):
   - `cargo build --workspace`
   - `cargo fmt --all -- --check`

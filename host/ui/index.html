@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Casual RAS — Host</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Casual RAS — Host</h1>
+      <div id="indicator" class="idle">● IDLE</div>
+    </header>
+
+    <p class="lead">Share this connection ticket with the person who will view this screen:</p>
+    <div class="ticketrow">
+      <textarea id="ticket" readonly rows="3" placeholder="Starting…"></textarea>
+      <button id="copy">Copy</button>
+    </div>
+
+    <p id="status">Starting…</p>
+
+    <div class="footer">
+      <button id="stop">Stop sharing</button>
+      <span class="note">View-only · the viewer can point but cannot click or type on this machine.</span>
+    </div>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
