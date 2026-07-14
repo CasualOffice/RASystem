@@ -218,6 +218,45 @@ window.addEventListener("beforeunload", () => {
   invoke("stop_mirror");
 });
 
+// ── Remote pointer (this viewer's cursor → shown on the host's screen) ─────────────────────────
+// Track the cursor over the shared video and stream its position to the host (throttled). The host
+// draws it as a "look here" overlay. Purely visual — not remote control; no clicks/keys are sent.
+// Coordinates are normalized to the *video content* rect (object-fit: contain letterboxes it).
+let lastPointerAt = 0;
+
+function videoContentRect() {
+  const box = canvas.getBoundingClientRect();
+  const vw = canvas.width, vh = canvas.height;
+  if (!vw || !vh) return { left: box.left, top: box.top, width: box.width, height: box.height };
+  const scale = Math.min(box.width / vw, box.height / vh);
+  const w = vw * scale, h = vh * scale;
+  return { left: box.left + (box.width - w) / 2, top: box.top + (box.height - h) / 2, width: w, height: h };
+}
+
+function trackPointer(e) {
+  if (!active) return;
+  const now = performance.now();
+  if (now - lastPointerAt < 40) return; // ~25 Hz is plenty for a pointer
+  lastPointerAt = now;
+  const r = videoContentRect();
+  if (r.width <= 0 || r.height <= 0) return;
+  let nx = (e.clientX - r.left) / r.width;
+  let ny = (e.clientY - r.top) / r.height;
+  const inside = nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1;
+  nx = Math.min(1, Math.max(0, nx));
+  ny = Math.min(1, Math.max(0, ny));
+  invoke("send_pointer", {
+    x: Math.round(nx * 65535),
+    y: Math.round(ny * 65535),
+    visible: inside,
+  });
+}
+
+window.addEventListener("pointermove", trackPointer);
+window.addEventListener("pointerleave", () => {
+  if (active) invoke("send_pointer", { x: 0, y: 0, visible: false });
+});
+
 // ── Annotations (viewer-side markup) ───────────────────────────────────────────────────────────
 // A transparent overlay the viewer draws on: pen / arrow / rectangle / highlighter. This is *not*
 // remote control — nothing is injected into the host's OS. Strokes are local to this canvas (v1);

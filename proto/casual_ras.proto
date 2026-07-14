@@ -110,6 +110,16 @@ message Bye {
   ErrorCodeProto code = 1;
 }
 
+// Controller -> host: the controller's pointer position over the shared screen, for a *remote
+// pointer* overlay on the host ("look here"). This is NOT OS input — no click, no keyboard; nothing
+// reaches the host's input system. Coordinates are normalized fixed-point (0..=65535 = 0.0..=1.0 of
+// the shared frame) so they survive any resolution/scaling. `x`/`y` are u16 carried in uint32.
+message PointerUpdate {
+  uint32 x       = 1; // 0..=65535 → left..right
+  uint32 y       = 2; // 0..=65535 → top..bottom
+  bool   visible = 3; // false → hide the overlay cursor
+}
+
 // ---------------------------------------------------------------------------
 // Top-level control-channel message
 // ---------------------------------------------------------------------------
@@ -125,5 +135,6 @@ message ControlMsg {
     DecoderFeedback feedback         = 4;
     AuthEnvelope    auth_envelope    = 5;
     Bye             bye              = 6;
+    PointerUpdate   pointer          = 7;
   }
 }

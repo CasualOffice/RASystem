@@ -19,16 +19,26 @@ Encoded H.264 access units arrive on a **binary** Tauri `Channel` as `ras_core::
 (24-byte `RAS1` header + Annex-B); a WebCodecs `VideoDecoder` decodes each to a `<canvas>`. No pixels
 ever cross JSON IPC. A red **LIVE** banner is always visible while a session renders (Invariant 7).
 
-## Annotations (view-only markup)
+## Remote pointer ("look here")
 
-Pick a tool from the floating toolbar — **pen / arrow / rectangle / highlighter**, four colors, undo,
-clear — and draw over the shared screen. This is **not** remote control: annotations are a drawing
-overlay, nothing is injected into the host's OS. When the tool is **🚫 (off)** the overlay ignores
-pointer events entirely, so the app is strictly view-only unless you deliberately pick a tool.
+While connected, your cursor position over the shared screen is streamed to the host (throttled,
+normalized), so the host user can **see where you're pointing** — e.g. to say *"click there to
+connect."* This is the alpha's collaboration model: **screen-share + a remote pointer**, never remote
+control. No clicks or keystrokes are ever injected into the host's OS; the pointer is a purely visual
+"look here" cursor (ADR-061), so it carries none of the input-injection risk that Invariants 6/14
+govern.
 
-> **v1 = viewer-side.** Strokes are local to this window today. Making them visible on the *host's*
-> screen (a transparent click-through overlay driven by a typed `ControlMsg::Annotation`) is the next
-> step and lands with the host GUI.
+> The **on-screen overlay that draws the pointer on the host** lands with the host GUI. Until then
+> `ras-host` (CLI) **logs** the incoming pointer position, so a two-machine run confirms the path
+> end-to-end.
+
+## Annotations (viewer-side markup)
+
+A floating toolbar — **pen / arrow / rectangle / highlighter**, four colors, undo, clear — lets you
+draw over the shared screen. Also not remote control: a local drawing overlay, nothing injected. When
+the tool is **🚫 (off)** the overlay ignores pointer events, so the app stays strictly view-only
+unless you pick a tool. (v1 is viewer-side; host-visible strokes ride the same overlay path as the
+remote pointer later.)
 
 ## Layout
 

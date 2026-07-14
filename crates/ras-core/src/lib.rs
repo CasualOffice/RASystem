@@ -558,6 +558,52 @@ mod e2e {
     }
 
     #[tokio::test]
+    async fn controller_pointer_reaches_host_as_a_lifecycle_event() {
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+
+        let mut host_events = host.start().await.unwrap();
+        let _ctrl_events = controller.connect().await.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        // The controller points at ~3/4 across, 1/4 down — a "look here" gesture. Best-effort send.
+        controller.send_pointer(49151, 16384, true);
+
+        // The host must surface it as a RemotePointer lifecycle event (for its overlay). Poll the
+        // stream briefly; the event rides the reliable control channel.
+        let mut seen = None;
+        for _ in 0..200 {
+            while let Ok(ev) = host_events.try_recv() {
+                if let LifecycleEvent::RemotePointer { x, y, visible } = ev {
+                    seen = Some((x, y, visible));
+                }
+            }
+            if seen.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            seen,
+            Some((49151, 16384, true)),
+            "host should receive the controller's pointer position"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
+    #[tokio::test]
     async fn controller_suspends_then_terminates_when_transport_drops() {
         let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
         let host = HostSession::new(

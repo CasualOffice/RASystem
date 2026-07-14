@@ -130,6 +130,23 @@ async fn connect_to_host(
     Ok(())
 }
 
+/// Forward the viewer's pointer position to the host for its remote-pointer overlay ("look here").
+/// Normalized `0..=65535`. Best-effort + non-blocking (latency-first); dropped if the control task
+/// is behind. Not OS input — a purely visual cursor. No-op unless a remote session is live.
+#[tauri::command]
+async fn send_pointer(
+    state: State<'_, AppState>,
+    x: u16,
+    y: u16,
+    visible: bool,
+) -> Result<(), String> {
+    let controller = lock(&state.session).as_ref().map(|s| s.controller.clone());
+    if let Some(c) = controller {
+        c.send_pointer(x, y, visible);
+    }
+    Ok(())
+}
+
 /// End the live remote session (idempotent).
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
@@ -267,6 +284,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             connect_to_host,
             disconnect,
+            send_pointer,
             start_mirror,
             stop_mirror,
             request_keyframe

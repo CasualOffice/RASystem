@@ -140,6 +140,16 @@ pub enum LifecycleEvent {
         /// Reason code.
         code: ErrorCode,
     },
+    /// Host-side: the controller's **remote-pointer** position, for a "look here" overlay. Purely
+    /// visual (never OS input). Coordinates are normalized `0..=65535` (left→right / top→bottom).
+    RemotePointer {
+        /// Horizontal position, `0..=65535`.
+        x: u16,
+        /// Vertical position, `0..=65535`.
+        y: u16,
+        /// Whether the pointer is on-screen (`false` → hide the overlay cursor).
+        visible: bool,
+    },
 }
 
 /// The lifecycle event stream handed to the embedding app. A bounded receiver: latest-wins-ish, so

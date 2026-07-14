@@ -105,7 +105,10 @@ mod mac {
         };
 
         // Run until the viewer's session ends (transport drop → terminal event / closed stream) or a
-        // Ctrl-C shuts the host down.
+        // Ctrl-C shuts the host down. Remote-pointer events are logged (throttled) so a two-machine
+        // test can confirm the "look here" pointer arrives over the network — the on-screen overlay
+        // that draws it lands with the host GUI.
+        let mut ptr_count = 0u64;
         loop {
             tokio::select! {
                 _ = shutdown.changed() => {
@@ -117,6 +120,16 @@ mod mac {
                     | Some(LifecycleEvent::Revoked { .. })
                     | Some(LifecycleEvent::Disconnected { .. })
                     | None => break,
+                    Some(LifecycleEvent::RemotePointer { x, y, visible }) => {
+                        ptr_count += 1;
+                        if visible && ptr_count.is_multiple_of(12) {
+                            println!(
+                                "   👉 viewer pointing at {}% , {}%",
+                                u32::from(x) * 100 / 65535,
+                                u32::from(y) * 100 / 65535
+                            );
+                        }
+                    }
                     _ => {}
                 },
             }

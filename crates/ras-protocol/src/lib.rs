@@ -190,6 +190,23 @@ pub enum ControlMsg {
         /// Reason.
         code: ErrorCode,
     },
+    /// Controller → host: remote-pointer position for a "look here" overlay on the host. **Not OS
+    /// input** — a purely visual cursor; nothing reaches the host's input system.
+    Pointer(PointerUpdate),
+}
+
+/// The controller's pointer position over the shared screen (controller → host), for a **remote
+/// pointer** overlay. Purely visual — never OS input (no click, no keyboard), so it sits outside the
+/// input-injection invariants. Coordinates are normalized fixed-point fractions of the shared frame
+/// (`0..=65535` maps to `0.0..=1.0`) so they survive any resolution/scaling on either side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerUpdate {
+    /// Horizontal position: `0..=65535` = left..right edge of the shared frame.
+    pub x: u16,
+    /// Vertical position: `0..=65535` = top..bottom edge.
+    pub y: u16,
+    /// Whether the pointer is on-screen (`false` → hide the overlay cursor).
+    pub visible: bool,
 }
 
 /// Canonical keyframe/IDR request (controller → host).

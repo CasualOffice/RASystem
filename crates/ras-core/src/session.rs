@@ -642,6 +642,22 @@ async fn host_control_loop<C, E>(
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fb);
                 inner.feedback_count.fetch_add(1, Ordering::Relaxed);
             }
+            // Remote-pointer position from the controller: surface it as a lifecycle event for the
+            // host app's "look here" overlay. Purely visual — never OS input (Invariants 6/14 untouched).
+            Ok(ControlMsg::Pointer(p)) => {
+                if let Some(sink) = inner
+                    .lifecycle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                {
+                    sink.emit(LifecycleEvent::RemotePointer {
+                        x: p.x,
+                        y: p.y,
+                        visible: p.visible,
+                    });
+                }
+            }
             // Any Bye from the controller is a clean peer close — deliberately code-agnostic. A
             // controller cannot revoke the host, so a controller-claimed `SessionRevoked` is treated
             // as an ordinary close, never a privileged action (Invariants 1/15: never trust the
@@ -724,6 +740,8 @@ impl ControllerSessionConfig {
 enum ControlCommand {
     Keyframe(KeyframeReason),
     Feedback(DecoderFeedback),
+    /// Remote-pointer position to forward to the host (best-effort; dropped if the task is behind).
+    Pointer(ras_protocol::PointerUpdate),
     Bye,
 }
 
@@ -913,6 +931,27 @@ impl ControllerSession {
         }
     }
 
+    /// Forward the controller's pointer position to the host for its **remote-pointer** overlay
+    /// ("look here"). Best-effort and **non-blocking** (latency-first): a high-frequency update is
+    /// dropped rather than queued if the control task is briefly behind. This is a purely visual
+    /// pointer — **not OS input** (no click, no keyboard reaches the host), so it is outside the
+    /// input-injection invariants. `x`/`y` are normalized `0..=65535` (left→right / top→bottom).
+    pub fn send_pointer(&self, x: u16, y: u16, visible: bool) {
+        let tx = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(ControlCommand::Pointer(ras_protocol::PointerUpdate {
+                x,
+                y,
+                visible,
+            }));
+        }
+    }
+
     /// Cooperative disconnect. Applies `LocalStop`, closes tasks, emits `SessionEnded`. Returns
     /// promptly even mid-decode.
     pub async fn disconnect(&self, reason: StopReason) {
@@ -966,6 +1005,9 @@ async fn controller_control_loop(
                 }
                 Some(ControlCommand::Feedback(fb)) => {
                     if control.send(ControlMsg::Feedback(fb)).await.is_err() { break; }
+                }
+                Some(ControlCommand::Pointer(p)) => {
+                    if control.send(ControlMsg::Pointer(p)).await.is_err() { break; }
                 }
                 Some(ControlCommand::Bye) => {
                     // A controller leaving is a clean peer close, never a revoke — a controller

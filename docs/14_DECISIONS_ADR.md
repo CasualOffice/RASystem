@@ -185,6 +185,25 @@
   stream (currently drop-at-enqueue), FEC, and the `DatagramFec` alternative — all additive behind
   `video_transport`.
 
+- **ADR-061 · Remote pointer as a `ControlMsg::Pointer` — a visual "look here" cursor, explicitly not
+  OS input · Accepted.** The alpha collaboration model is **screen-share + a remote pointer**, not
+  remote control: the controller streams its cursor position and the host shows a "look here" overlay,
+  so a technician can point ("click *there* to connect") without touching the host's mouse/keyboard.
+  Wire: a new `PointerUpdate { x:u16, y:u16, visible:bool }` on the reliable control channel
+  (`ControlMsg::Pointer`, proto oneof field 7), controller → host. Coordinates are **normalized
+  fixed-point** (`0..=65535` = `0.0..=1.0` of the shared frame) so they survive any resolution/scaling
+  on either side; the codec rejects an out-of-range value as `InvalidMessage` (fail-closed). **Why
+  this is safe / carries no input-injection risk:** a pointer position is *pixels on a screen*, never
+  an OS event — it is not routed to any input helper, injects no click/keypress, and cannot move the
+  host's real cursor. It therefore sits **entirely outside Invariants 6 (input helper) and 14
+  (secure-desktop/SAS)** — those govern injected input, which this is not. It is also not authority
+  (Invariant 9): the pointer is advisory UI. Delivery is **best-effort, latency-first**: the sender
+  `try_send`s and drops an update if the control task is briefly behind (a stale pointer is worthless),
+  and the host surfaces it as a content-free `LifecycleEvent::RemotePointer`. Verified end-to-end over
+  the real spine (loopback e2e: controller `send_pointer` → host `RemotePointer` event) plus a codec
+  round-trip. The **on-screen host overlay that draws the pointer** lands with the host GUI; until
+  then the `ras-host` CLI logs the arriving position so a two-machine run can confirm the path.
+
 ## Security, authorization, fraud
 
 - **ADR-040 · Algorithm-pinned signed grants, sender-constrained · Accepted.** Prefer **Biscuit**

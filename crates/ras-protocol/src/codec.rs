@@ -21,8 +21,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use prost::Message;
 
 use crate::{
-    ControlMsg, DecoderFeedback, ErrorCode, KeyframeReason, KeyframeRequest, RasError,
-    StreamConfigWire, MAX_CONTROL_FRAME,
+    ControlMsg, DecoderFeedback, ErrorCode, KeyframeReason, KeyframeRequest, PointerUpdate,
+    RasError, StreamConfigWire, MAX_CONTROL_FRAME,
 };
 
 /// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
@@ -228,6 +228,11 @@ fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
         ControlMsg::Bye { code } => Kind::Bye(pb::Bye {
             code: i32::from(errorcode_to_pb(code)),
         }),
+        ControlMsg::Pointer(p) => Kind::Pointer(pb::PointerUpdate {
+            x: u32::from(p.x),
+            y: u32::from(p.y),
+            visible: p.visible,
+        }),
     };
     pb::ControlMsg { kind: Some(kind) }
 }
@@ -247,6 +252,16 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
         Some(Kind::Bye(b)) => Ok(ControlMsg::Bye {
             code: errorcode_from_pb(b.code)?,
         }),
+        Some(Kind::Pointer(p)) => Ok(ControlMsg::Pointer(PointerUpdate {
+            // u16 fixed-point on the wire as uint32: out-of-range is a malformed message.
+            x: u16::try_from(p.x).map_err(|_| {
+                RasError::fatal(ErrorCode::InvalidMessage, "pointer x out of range")
+            })?,
+            y: u16::try_from(p.y).map_err(|_| {
+                RasError::fatal(ErrorCode::InvalidMessage, "pointer y out of range")
+            })?,
+            visible: p.visible,
+        })),
         // No valid empty control message: unset oneof (empty bytes, or a future variant an old
         // build doesn't recognize) is rejected, never silently defaulted.
         None => Err(RasError::fatal(
@@ -497,6 +512,27 @@ mod tests {
             assert!(seen_tags.insert(tag), "duplicate wire tag for {code:?}");
         }
         assert_eq!(seen_tags.len(), ALL_CODES.len());
+    }
+
+    #[test]
+    fn roundtrip_pointer() {
+        use crate::PointerUpdate;
+        for (x, y, visible) in [
+            (0u16, 0u16, true),
+            (65535, 65535, false),
+            (12345, 54321, true),
+        ] {
+            let m = ControlMsg::Pointer(PointerUpdate { x, y, visible });
+            assert_roundtrip(&m);
+            match decode(&encode(&m)).unwrap() {
+                ControlMsg::Pointer(p) => {
+                    assert_eq!(p.x, x);
+                    assert_eq!(p.y, y);
+                    assert_eq!(p.visible, visible);
+                }
+                _ => panic!("wrong variant"),
+            }
+        }
     }
 
     #[test]
