@@ -1533,7 +1533,19 @@ iroh's `(RecvStream, SendStream)`. ALPN `casual-ras/1` and the "dialer opens / a
 single control stream" topology are pinned in **ADR-059**. Verified by a **hermetic loopback
 integration test** — two real iroh endpoints, direct-address dial (no discovery/relay), a
 `Hello`⇄`Bye` control round-trip, and both sides asserting the peer's `EndpointId` (Invariant 9).
-`VideoSink`/`VideoSource` (per-frame uni streams) and `HealthObserver` (`Connection::stats()` →
-`watch`) stay `todo!()` for the next increments, as does the `IrohTransport: SessionTransport`
-adapter in `ras-core` that lets the controller swap loopback→iroh behind the existing seam. The
-cross-machine two-laptop run remains the developer-owned on-device step.
+`HealthObserver` (`Connection::stats()` → `watch`) stays `todo!()` for the next increment, as does
+the `IrohTransport: SessionTransport` adapter in `ras-core` that lets the controller swap
+loopback→iroh behind the existing seam. The cross-machine two-laptop run remains the developer-owned
+on-device step.
+
+**Progress — step 4, video plane landed.** `ras-transport-iroh` now streams video over the
+`PerFrameStream` transport (ADR-060): the host `VideoSink` opens **one unidirectional QUIC stream
+per frame** (bounded drop-at-source channel → a slow path sheds frames instead of building latency),
+and the controller `VideoSource` reads each stream to its FIN, reconstructs the `EncodedFrame` from a
+44-byte per-frame header (which carries the whole `StreamConfig`, so a resolution/bitrate change
+arrives atomically with its IDR), and synthesizes a `FrameDropped` on any `frame_id` gap so a run of
+losses coalesces into one keyframe request rather than a freeze. Distinct per-frame streams can't
+head-of-line-block each other or the control stream (the latency invariant). Decode is fail-closed
+and `read_to_end` is bounded (8 MiB). Verified by a hermetic loopback test (real per-frame streams,
+faithful reconstruction incl. per-frame config, the synthesized-gap path) and a header
+round-trip / fail-closed-decode unit test.

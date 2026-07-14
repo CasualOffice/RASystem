@@ -104,19 +104,26 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     capability; CSP set; always-visible LIVE indicator (Invariant 7). Kept **out of the root
     workspace** (heavy WebView deps); the GUI run is an on-device step (login session +
     Screen-Recording TCC).
-  - **`ras-transport-iroh` — control plane is concrete** (iroh `=1.0.2`, ADR-059). Real `Endpoint`
-    (bind/id/accept/connect + `connect_direct` for same-network dials), `Session` (`remote()` =
-    peer's authenticated `EndpointId`; `close(code)` → QUIC app-close code), and `ControlChannel`
-    running the fuzzed `FramedControlChannel` codec over iroh's `(RecvStream, SendStream)`. ALPN
-    `casual-ras/1`; the dialer opens / acceptor accepts the single bidi control stream. Verified by a
-    **hermetic loopback integration test** (two real endpoints, direct-address dial, `Hello`⇄`Bye`
-    round-trip, both sides assert the peer identity — Invariant 9). Transport authenticates identity,
-    never authority. `cargo-deny` gates iroh's transitive tree via scoped permissive exceptions
+  - **`ras-transport-iroh` — control + video planes are concrete** (iroh `=1.0.2`, ADR-059/060). Real
+    `Endpoint` (bind/id/accept/connect + `connect_direct` for same-network dials), `Session`
+    (`remote()` = peer's authenticated `EndpointId`; `close(code)` → QUIC app-close code), and
+    `ControlChannel` running the fuzzed `FramedControlChannel` codec over iroh's `(RecvStream,
+    SendStream)` — ALPN `casual-ras/1`, dialer opens / acceptor accepts the single bidi control
+    stream. The **`PerFrameStream` video path** (ADR-060): host `VideoSink` opens one uni QUIC stream
+    per frame (bounded drop-at-source channel → sheds under congestion, no latency build-up),
+    controller `VideoSource` reads each to FIN and reconstructs the `EncodedFrame` from a 44-byte
+    per-frame header carrying the whole `StreamConfig` (a res/bitrate change arrives atomically with
+    its IDR), synthesizing a `FrameDropped` on any `frame_id` gap. Distinct per-frame streams never
+    HOL-block each other or control (the latency invariant); decode is fail-closed, `read_to_end`
+    bounded (8 MiB). Verified by **hermetic loopback tests** (control `Hello`⇄`Bye` round-trip
+    asserting peer identity — Invariant 9; a real per-frame-stream video exchange with gap detection;
+    a header round-trip / fail-closed-decode unit test). Transport authenticates identity, never
+    authority. `cargo-deny` gates iroh's transitive tree via scoped permissive exceptions
     (Unlicense/CDLA-Permissive-2.0 wasm/relay helpers) — Invariant 18 holds.
-  - Still stubbed behind traits (`todo!()`): the iroh **video** path (`VideoSink`/`VideoSource`
-    per-frame uni streams) + `HealthObserver`, the `IrohTransport: SessionTransport` adapter in
-    `ras-core` (loopback→iroh swap), the Windows DXGI/MF media port, and the **host** Tauri app +
-    consent UI — they land as the video increment / network go/no-go clears.
+  - Still stubbed behind traits (`todo!()`): the iroh `HealthObserver` (`Connection::stats()` →
+    `watch`), the `IrohTransport: SessionTransport` adapter in `ras-core` (loopback→iroh swap), the
+    Windows DXGI/MF media port, and the **host** Tauri app + consent UI — they land as the remaining
+    transport increment / network go/no-go clears.
 - **Build/verify commands** (all green as of M0):
   - `cargo build --workspace`
   - `cargo fmt --all -- --check`

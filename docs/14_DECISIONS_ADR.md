@@ -144,6 +144,35 @@
   integration test (two real iroh endpoints, direct-address dial, `Hello`⇄`Bye` round-trip, both
   sides assert the peer's authenticated `EndpointId`).
 
+- **ADR-060 · Video rides one unidirectional QUIC stream per frame (`PerFrameStream`); a 44-byte
+  header carries the per-frame `StreamConfig` · Accepted.** `StreamConfig::video_transport` already
+  names two droppable options (`PerFrameStream` vs `DatagramFec`, ADR pending on the spike); this
+  fixes the wire for the first one, which the iroh transport implements now. **(1) Topology:** the
+  host opens a fresh uni stream per encoded frame, writes `[header | Annex-B AU]`, and FINs it; the
+  controller accepts streams and reads each to the FIN. Distinct streams are independently ordered in
+  QUIC, so a lost or stalled frame **cannot** head-of-line-block a later frame *or* the control
+  stream — the load-bearing latency invariant. This is why video is emphatically **not** on the
+  reliable control stream. **(2) Header (44 bytes, little-endian, ADR-060):** `magic("RVF1"):u32 |
+  version:u8 | flags:u8 | codec:u8 | color:u8 | video_transport:u8 | reserved[3] | width:u32 |
+  height:u32 | fps:u32 | target_bitrate_bps:u32 | frame_id:u64 | captured_at_us:u64`, then the AU as
+  the stream remainder. The full `StreamConfig` travels **per frame** (not once at session start)
+  because the path is droppable/out-of-order: a resolution/bitrate change must arrive atomically with
+  the IDR it applies to, or a decoder that missed the setup frame would misparse. Decode is
+  **fail-closed**: bad magic, unknown version, an out-of-range enum discriminant, or a short header
+  drops *that frame only* (the connection survives); `read_to_end` is bounded by `MAX_VIDEO_FRAME`
+  (8 MiB) so a hostile oversized stream is aborted, not buffered. **(3) Droppability & loss
+  signalling:** the sink is a bounded channel (depth 4) drained by a writer task — `send_frame` is
+  non-blocking and returns `DroppedCongested` when full (a slow path sheds frames at the source
+  rather than building latency). The source tracks the next-expected `frame_id` and synthesizes
+  exactly one `FrameDropped{first_missing_id}` on a gap, *before* the next frame, so `ras-core`
+  coalesces a run of drops into one keyframe request instead of freezing; a stale/reordered frame
+  behind the watermark is dropped. **Not authorization** (Invariant 9): the stream carries opaque
+  encoded bytes; grants/leases never ride it. Verified by a hermetic loopback test (real per-frame
+  uni streams, faithful reconstruction incl. per-frame config, and the synthesized-gap path) plus a
+  header round-trip / fail-closed-decode unit test. **Deferred:** true reset-on-stale of an in-flight
+  stream (currently drop-at-enqueue), FEC, and the `DatagramFec` alternative — all additive behind
+  `video_transport`.
+
 ## Security, authorization, fraud
 
 - **ADR-040 · Algorithm-pinned signed grants, sender-constrained · Accepted.** Prefer **Biscuit**

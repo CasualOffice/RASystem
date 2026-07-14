@@ -184,11 +184,15 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   → `SCWindow` mapping, and pipelined (async) encode emission.
 - ☐ `MED` HW encoder abstraction + OpenH264 `libloading` software fallback (never x264).
 - ◐ `NET` `ras-transport-iroh`: real endpoint, versioned ALPN, channel plumbing over iroh 1.x
-  (`Connection::stats()` feeds the existing ABR hook). **Control plane done** (iroh `=1.0.2`): real
-  `Endpoint`/`Session`/`ControlChannel`, ALPN `casual-ras/1` + single-bidi-stream control topology
-  (ADR-059), hermetic loopback round-trip test asserting peer `EndpointId` (Invariant 9). **Left:**
-  video sink/source (per-frame uni streams), `HealthObserver` over `Connection::stats()`, and the
-  `IrohTransport: SessionTransport` adapter for the loopback→iroh swap.
+  (`Connection::stats()` feeds the existing ABR hook). **Control + video planes done** (iroh
+  `=1.0.2`): real `Endpoint`/`Session`/`ControlChannel`, ALPN `casual-ras/1` + single-bidi-stream
+  control topology (ADR-059); the **`PerFrameStream` video path** — one uni QUIC stream per frame, a
+  44-byte per-frame header carrying `StreamConfig`, bounded drop-at-source sink, and source-side gap
+  → `FrameDropped` synthesis (ADR-060). Hermetic loopback tests: control round-trip asserting peer
+  `EndpointId` (Invariant 9), a real per-frame-stream video exchange with gap detection, and a header
+  round-trip / fail-closed-decode unit test. **Left:** `HealthObserver` over `Connection::stats()`,
+  the `IrohTransport: SessionTransport` adapter for the loopback→iroh swap, and (deferred, additive)
+  reset-on-stale + FEC / the `DatagramFec` alternative.
 - ☐ `MED` FEC (`nanors`) + the *transport-side* loss detection that generates `FrameDropped` per
   `docs/10 §4` (the controller-side reaction to those events is done + tested above).
 - ◐ `UI` Controller Tauri shell (`controller/`). **Landed + compiles (Tauri 2.11.5, ≥2.11.1 pin):**

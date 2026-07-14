@@ -7,14 +7,15 @@
 //! `iroh` dependency is added then. Newtypes wrap `[u8; 32]` so downstream crates never depend on
 //! `iroh` directly.
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream, VarInt};
 use iroh::{
     Endpoint as IrohEndpoint, EndpointAddr as IrohEndpointAddr, EndpointId as IrohEndpointId,
 };
-use ras_media::{EncodedFrame, FrameId};
+use ras_media::{ColorSpace, EncodedFrame, FrameId, StreamConfig, VideoCodec, VideoTransportKind};
 use ras_protocol::{ControlMsg, ErrorCode, RasError};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 /// This crate's error alias over the shared taxonomy.
 pub type TransportError = ras_protocol::RasError;
@@ -312,29 +313,251 @@ pub enum VideoEvent {
     },
 }
 
-/// Host-side droppable video sender. Non-blocking: if the path can't keep up, frames are dropped at
-/// the sink, never queued unbounded.
-pub struct VideoSink;
+/// Largest video access unit we will read off one uni stream (DoS bound on hostile input): a
+/// high-resolution IDR is well under this. `read_to_end` aborts a stream that exceeds it — the frame
+/// is dropped, the connection survives.
+pub const MAX_VIDEO_FRAME: usize = 8 * 1024 * 1024;
 
-impl VideoSink {
-    /// Fragment (if needed) and send one frame. Returns immediately; does not await delivery.
-    /// `Err` only on fatal path error (connection gone); ordinary loss is a non-error
-    /// [`SendOutcome`].
-    pub fn send_frame(&self, frame: EncodedFrame) -> Result<SendOutcome, TransportError> {
-        let _ = frame;
-        todo!("reset stale in-flight frame; fragment; send via the negotiated VideoTransport")
+/// Fixed 44-byte header prepended to each per-frame uni stream (`PerFrameStream` transport, ADR-060).
+/// Carries everything needed to reconstruct an [`EncodedFrame`] *except* its bytes, which are the
+/// remainder of the stream (delimited by the QUIC FIN). The [`StreamConfig`] travels **per frame**
+/// because the video path is droppable/out-of-order: a resolution change must arrive atomically with
+/// the IDR it applies to. All fields little-endian.
+///
+/// Wire: `magic:u32 | version:u8 | flags:u8 | codec:u8 | color:u8 | video_transport:u8 |
+/// reserved[3] | width:u32 | height:u32 | fps:u32 | target_bitrate_bps:u32 | frame_id:u64 |
+/// captured_at_us:u64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VideoFrameHeader {
+    is_keyframe: bool,
+    config: StreamConfig,
+    frame_id: u64,
+    captured_at_us: u64,
+}
+
+impl VideoFrameHeader {
+    /// `"RVF1"` big-endian ASCII tag; a mismatch means desync (drop the frame, not the connection).
+    const MAGIC: u32 = u32::from_be_bytes(*b"RVF1");
+    const VERSION: u8 = 1;
+    const LEN: usize = 44;
+    const FLAG_KEYFRAME: u8 = 0b0000_0001;
+
+    fn encode(&self) -> [u8; Self::LEN] {
+        let mut b = [0u8; Self::LEN];
+        b[0..4].copy_from_slice(&Self::MAGIC.to_le_bytes());
+        b[4] = Self::VERSION;
+        b[5] = if self.is_keyframe {
+            Self::FLAG_KEYFRAME
+        } else {
+            0
+        };
+        // Known variants map to their discriminant; an unknown future (`#[non_exhaustive]`) variant
+        // maps to 0xFF, which `decode` rejects — fail-closed, never silently mis-tagged.
+        b[6] = match self.config.codec {
+            VideoCodec::H264AnnexB => 0,
+            _ => 0xFF,
+        };
+        b[7] = match self.config.color {
+            ColorSpace::Bt709Limited => 0,
+            ColorSpace::Bt709Full => 1,
+            _ => 0xFF,
+        };
+        b[8] = match self.config.video_transport {
+            VideoTransportKind::PerFrameStream => 0,
+            VideoTransportKind::DatagramFec => 1,
+        };
+        // b[9..12] reserved (zero)
+        b[12..16].copy_from_slice(&self.config.width.to_le_bytes());
+        b[16..20].copy_from_slice(&self.config.height.to_le_bytes());
+        b[20..24].copy_from_slice(&self.config.fps.to_le_bytes());
+        b[24..28].copy_from_slice(&self.config.target_bitrate_bps.to_le_bytes());
+        b[28..36].copy_from_slice(&self.frame_id.to_le_bytes());
+        b[36..44].copy_from_slice(&self.captured_at_us.to_le_bytes());
+        b
+    }
+
+    /// Parse a header from the front of `buf`. `None` on any malformed field (short, bad magic,
+    /// unknown version, or an out-of-range enum) — the caller drops that frame. Fail-closed: an
+    /// unrecognized enum discriminant is rejected, never defaulted.
+    fn decode(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::LEN {
+            return None;
+        }
+        // Infallible: the length is checked above, so every slice below is exactly in range.
+        let u32le = |o: usize| {
+            let mut a = [0u8; 4];
+            a.copy_from_slice(&buf[o..o + 4]);
+            u32::from_le_bytes(a)
+        };
+        let u64le = |o: usize| {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(&buf[o..o + 8]);
+            u64::from_le_bytes(a)
+        };
+        if u32le(0) != Self::MAGIC || buf[4] != Self::VERSION {
+            return None;
+        }
+        let codec = match buf[6] {
+            0 => VideoCodec::H264AnnexB,
+            _ => return None,
+        };
+        let color = match buf[7] {
+            0 => ColorSpace::Bt709Limited,
+            1 => ColorSpace::Bt709Full,
+            _ => return None,
+        };
+        let video_transport = match buf[8] {
+            0 => VideoTransportKind::PerFrameStream,
+            1 => VideoTransportKind::DatagramFec,
+            _ => return None,
+        };
+        Some(Self {
+            is_keyframe: buf[5] & Self::FLAG_KEYFRAME != 0,
+            config: StreamConfig {
+                codec,
+                width: u32le(12),
+                height: u32le(16),
+                fps: u32le(20),
+                target_bitrate_bps: u32le(24),
+                color,
+                video_transport,
+            },
+            frame_id: u64le(28),
+            captured_at_us: u64le(36),
+        })
     }
 }
 
-/// Controller-side droppable video receiver. Reassembles fragments/FEC into whole frames and
-/// surfaces loss as a first-class, non-fatal event. The decoder (not the transport) owns
-/// reorder-by-`frame_id`.
-pub struct VideoSource;
+/// Host-side droppable video sender (`PerFrameStream`). Non-blocking: [`send_frame`](Self::send_frame)
+/// hands the frame to a bounded channel drained by a background task that opens **one unidirectional
+/// QUIC stream per frame**. Separate streams never head-of-line-block each other, so a lost/stalled
+/// frame cannot stall a later one or the control channel (the latency invariant). If the path can't
+/// keep up the channel fills and frames are dropped at the source — never queued unbounded.
+pub struct VideoSink {
+    tx: mpsc::Sender<EncodedFrame>,
+}
+
+impl VideoSink {
+    /// Bounded channel depth: a few frames of slack absorbs jitter without letting a slow path build
+    /// latency. Deeper would trade latency for a smoother-but-staler stream — the wrong trade here.
+    const QUEUE_DEPTH: usize = 4;
+
+    /// Spawn the per-frame-stream writer task bound to `conn` and return the sender half. Must be
+    /// called from within a Tokio runtime (it is — the media pump is async).
+    fn spawn(conn: Connection) -> Self {
+        let (tx, mut rx) = mpsc::channel::<EncodedFrame>(Self::QUEUE_DEPTH);
+        tokio::spawn(async move {
+            while let Some(frame) = rx.recv().await {
+                // One uni stream per frame: open, write header + Annex-B AU, FIN. `write_all` awaits
+                // flow-control, so a slow receiver backpressures here → the channel fills → the next
+                // `send_frame` drops (congestion). A per-frame error means the connection is gone.
+                let mut stream = match conn.open_uni().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let header = VideoFrameHeader {
+                    is_keyframe: frame.is_keyframe,
+                    config: frame.config,
+                    frame_id: frame.frame_id,
+                    captured_at_us: frame.captured_at_us,
+                }
+                .encode();
+                if stream.write_all(&header).await.is_err()
+                    || stream.write_all(&frame.data).await.is_err()
+                    || stream.finish().is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    /// Hand one frame to the transport. Returns immediately; does not await delivery. Ordinary loss
+    /// (a full or closed queue) is a non-error [`SendOutcome`], not an `Err`.
+    #[allow(clippy::unnecessary_wraps)] // signature parity with the DatagramFec sink (may fail-fast)
+    pub fn send_frame(&self, frame: EncodedFrame) -> Result<SendOutcome, TransportError> {
+        Ok(match self.tx.try_send(frame) {
+            Ok(()) => SendOutcome::Sent,
+            Err(mpsc::error::TrySendError::Full(_)) => SendOutcome::DroppedCongested,
+            Err(mpsc::error::TrySendError::Closed(_)) => SendOutcome::DroppedStale,
+        })
+    }
+}
+
+/// Controller-side droppable video receiver (`PerFrameStream`). Accepts one uni stream per frame,
+/// reads it to the FIN, and reconstructs the [`EncodedFrame`]. Loss is first-class and non-fatal: a
+/// `frame_id` gap (the host dropped that frame at the source under congestion) surfaces as a
+/// [`VideoEvent::FrameDropped`] *before* the next frame, so `ras-core` can coalesce a run of drops
+/// into one keyframe request instead of freezing. The decoder owns final reorder-by-`frame_id`.
+pub struct VideoSource {
+    conn: Connection,
+    /// The next in-order `frame_id` we expect; `None` until the first frame establishes the base.
+    next_expected: Option<u64>,
+    /// A frame read ahead of a detected gap, returned on the call after the synthesized drop event.
+    pending: Option<EncodedFrame>,
+}
 
 impl VideoSource {
-    /// Await the next video event.
-    pub async fn recv(&self) -> Result<VideoEvent, TransportError> {
-        todo!("reassemble per the negotiated VideoTransport")
+    fn new(conn: Connection) -> Self {
+        Self {
+            conn,
+            next_expected: None,
+            pending: None,
+        }
+    }
+
+    /// Await the next video event (a decoded frame or a synthesized loss). `Err` only on a terminal
+    /// transport failure (the connection is gone); a malformed or oversized single frame is skipped,
+    /// not fatal.
+    pub async fn recv(&mut self) -> Result<VideoEvent, TransportError> {
+        loop {
+            // Deliver a frame stashed behind a just-reported gap before reading more.
+            if let Some(frame) = self.pending.take() {
+                self.next_expected = Some(frame.frame_id.wrapping_add(1));
+                return Ok(VideoEvent::Frame(frame));
+            }
+
+            // Accept the next per-frame stream. A connection-level error here is terminal.
+            let mut stream = self.conn.accept_uni().await.map_err(|_| {
+                RasError::recoverable(ErrorCode::TransportError, "video stream ended")
+            })?;
+
+            // Read the whole access unit (bounded). A frame-level read/parse failure drops just this
+            // frame — loop to the next stream rather than tearing down the session.
+            let Ok(buf) = stream.read_to_end(MAX_VIDEO_FRAME).await else {
+                continue;
+            };
+            let Some(header) = VideoFrameHeader::decode(&buf) else {
+                continue;
+            };
+            let frame = EncodedFrame {
+                frame_id: header.frame_id,
+                captured_at_us: header.captured_at_us,
+                is_keyframe: header.is_keyframe,
+                data: Bytes::copy_from_slice(&buf[VideoFrameHeader::LEN..]),
+                config: header.config,
+            };
+
+            match self.next_expected {
+                // A gap: the source dropped frame(s) under congestion. Report one loss for the first
+                // missing id, stash this frame, and return it next call.
+                Some(expected) if frame.frame_id > expected => {
+                    self.pending = Some(frame);
+                    return Ok(VideoEvent::FrameDropped {
+                        frame_id: expected,
+                        reason: DropReason::MissingFragments,
+                    });
+                }
+                // A stale/reordered frame at or behind the watermark: drop it, keep reading.
+                Some(expected) if frame.frame_id < expected => continue,
+                // In order (or the first frame): deliver and advance.
+                _ => {
+                    self.next_expected = Some(frame.frame_id.wrapping_add(1));
+                    return Ok(VideoEvent::Frame(frame));
+                }
+            }
+        }
     }
 }
 
@@ -397,17 +620,22 @@ impl Session {
         })
     }
 
-    /// Host-side video sink (present on the host role).
+    /// Host-side video sink (present on the host role only; video flows host → controller). Spawns
+    /// the per-frame-stream writer task bound to this connection. `None` on the controller side.
     #[must_use]
     pub fn video_sink(&self) -> Option<VideoSink> {
-        // Next increment: one droppable uni QUIC stream per frame (reset-on-stale), per the
-        // negotiated VideoTransport. The control path above lands first.
-        todo!("per-frame uni-stream video sink over self.conn")
+        match self.role {
+            Role::Host => Some(VideoSink::spawn(self.conn.clone())),
+            Role::Controller => None,
+        }
     }
-    /// Controller-side video source (present on the controller role).
+    /// Controller-side video source (present on the controller role only). `None` on the host side.
     #[must_use]
     pub fn video_source(&self) -> Option<VideoSource> {
-        todo!("per-frame uni-stream video source over self.conn")
+        match self.role {
+            Role::Controller => Some(VideoSource::new(self.conn.clone())),
+            Role::Host => None,
+        }
     }
     /// Lock-free health observable.
     #[must_use]
@@ -440,9 +668,61 @@ impl HealthObserver {
 }
 
 #[cfg(test)]
+mod video_header_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use ras_media::{ColorSpace, StreamConfig, VideoCodec, VideoTransportKind};
+
+    fn sample() -> VideoFrameHeader {
+        VideoFrameHeader {
+            is_keyframe: true,
+            config: StreamConfig {
+                codec: VideoCodec::H264AnnexB,
+                width: 2560,
+                height: 1440,
+                fps: 60,
+                target_bitrate_bps: 12_000_000,
+                color: ColorSpace::Bt709Full,
+                video_transport: VideoTransportKind::PerFrameStream,
+            },
+            frame_id: 1 << 40, // exercises the u64 path (> 2^32)
+            captured_at_us: 123_456_789,
+        }
+    }
+
+    #[test]
+    fn header_round_trips_every_field() {
+        let h = sample();
+        let decoded = VideoFrameHeader::decode(&h.encode()).unwrap();
+        assert_eq!(decoded, h);
+    }
+
+    #[test]
+    fn decode_is_fail_closed_on_corruption() {
+        let good = sample().encode();
+        assert_eq!(good.len(), VideoFrameHeader::LEN);
+        // Truncated.
+        assert!(VideoFrameHeader::decode(&good[..VideoFrameHeader::LEN - 1]).is_none());
+        // Bad magic.
+        let mut bad_magic = good;
+        bad_magic[0] ^= 0xFF;
+        assert!(VideoFrameHeader::decode(&bad_magic).is_none());
+        // Unknown version.
+        let mut bad_ver = good;
+        bad_ver[4] = 0xEE;
+        assert!(VideoFrameHeader::decode(&bad_ver).is_none());
+        // Out-of-range enum discriminant (color byte) — rejected, never defaulted.
+        let mut bad_color = good;
+        bad_color[7] = 0x7F;
+        assert!(VideoFrameHeader::decode(&bad_color).is_none());
+    }
+}
+
+#[cfg(test)]
 mod iroh_session_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use ras_media::{ColorSpace, EncodedFrame, StreamConfig, VideoCodec, VideoTransportKind};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     /// A freshly-bound endpoint reports its sockets as the *unspecified* address (`0.0.0.0` /
@@ -525,6 +805,103 @@ mod iroh_session_tests {
         let host_saw = host_task.await.unwrap();
         // The acceptor authenticated the controller's identity in turn.
         assert_eq!(host_saw, controller_id);
+        controller.close().await;
+    }
+
+    /// A tiny valid `EncodedFrame` for the streaming test. The payload stands in for an Annex-B AU
+    /// (the transport is codec-agnostic — it moves opaque bytes).
+    fn test_frame(id: u64, keyframe: bool, payload: &[u8]) -> EncodedFrame {
+        EncodedFrame {
+            frame_id: id,
+            captured_at_us: id.wrapping_mul(1000),
+            is_keyframe: keyframe,
+            data: Bytes::copy_from_slice(payload),
+            config: StreamConfig {
+                codec: VideoCodec::H264AnnexB,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                target_bitrate_bps: 8_000_000,
+                color: ColorSpace::Bt709Limited,
+                video_transport: VideoTransportKind::PerFrameStream,
+            },
+        }
+    }
+
+    /// End-to-end video over **real per-frame uni streams** on loopback: the host opens one uni
+    /// stream per frame, the controller reconstructs each `EncodedFrame` faithfully (bytes, keyframe
+    /// flag, and the per-frame `StreamConfig`). Driven in lockstep (send one, receive one) so stream
+    /// ordering is deterministic. Then exercises loss handling: a `frame_id` gap surfaces as exactly
+    /// one synthesized `FrameDropped` for the first missing id, *before* the next frame — the signal
+    /// `ras-core` coalesces into a keyframe request instead of freezing. Also asserts the role split
+    /// (only the host has a sink; only the controller a source).
+    #[tokio::test]
+    async fn video_streams_frame_by_frame_over_iroh_with_gap_detection() {
+        let host = Endpoint::bind().await.unwrap();
+        let controller = Endpoint::bind().await.unwrap();
+        let host_id = host.id();
+        let host_addrs = to_loopback(&host.bound_addrs());
+
+        // Host accepts, takes its video sink, and hands the endpoint + sink back (kept alive so the
+        // connection — and the sink's writer task — outlive the exchange).
+        let host_task = tokio::spawn(async move {
+            let session = host.accept().await.unwrap().expect("an inbound session");
+            assert!(
+                session.video_source().is_none(),
+                "the host has no video source"
+            );
+            let sink = session.video_sink().expect("the host has a video sink");
+            (host, sink)
+        });
+
+        let session = controller
+            .connect_direct(&host_id, &host_addrs)
+            .await
+            .unwrap();
+        assert!(
+            session.video_sink().is_none(),
+            "the controller has no video sink"
+        );
+        let mut source = session
+            .video_source()
+            .expect("the controller has a video source");
+        let (host_ep, sink) = host_task.await.unwrap();
+
+        // Three in-order frames round-trip 1:1, config and keyframe flag intact.
+        for id in 0..3u64 {
+            let sent = sink
+                .send_frame(test_frame(id, id == 0, b"annexb-au"))
+                .unwrap();
+            assert_eq!(sent, SendOutcome::Sent);
+            match source.recv().await.unwrap() {
+                VideoEvent::Frame(f) => {
+                    assert_eq!(f.frame_id, id);
+                    assert_eq!(f.is_keyframe, id == 0);
+                    assert_eq!(&f.data[..], b"annexb-au");
+                    assert_eq!(f.config.width, 1920);
+                    assert_eq!(f.config.video_transport, VideoTransportKind::PerFrameStream);
+                }
+                other => panic!("expected a frame, got {other:?}"),
+            }
+        }
+
+        // Skip ids 3 and 4 (as if the host dropped them under congestion): send 5. The source reports
+        // one drop for the first missing id (3), then delivers frame 5.
+        sink.send_frame(test_frame(5, false, b"annexb-au")).unwrap();
+        match source.recv().await.unwrap() {
+            VideoEvent::FrameDropped { frame_id, reason } => {
+                assert_eq!(frame_id, 3);
+                assert_eq!(reason, DropReason::MissingFragments);
+            }
+            other => panic!("expected a synthesized drop, got {other:?}"),
+        }
+        match source.recv().await.unwrap() {
+            VideoEvent::Frame(f) => assert_eq!(f.frame_id, 5),
+            other => panic!("expected frame 5 after the gap, got {other:?}"),
+        }
+
+        drop(sink);
+        host_ep.close().await;
         controller.close().await;
     }
 }
