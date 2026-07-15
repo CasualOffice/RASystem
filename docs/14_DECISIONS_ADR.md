@@ -324,6 +324,19 @@
   *validator*. If sign-off prefers Biscuit now, only `ras-grant`'s encoder/decoder changes; every
   other Phase-2 contract is format-agnostic. See `docs/design/phase-2-design.md §0`.
 
+- **ADR-065 · Ed25519 primitive = `ed25519-dalek` (already vendored), not a new libsodium binding ·
+  Accepted** (refines ADR-040/CLAUDE.md §6 "libsodium Ed25519"). `ed25519-dalek` is **already in the
+  dependency graph** — iroh authenticates every endpoint with it (the transport identity *is* an
+  Ed25519 key), so it is code we already trust on the security path. Using it for application
+  identities + `AccessRequest`/ticket signatures adds **zero new crypto dependency**, avoids a C
+  dependency (`libsodium-sys`), and keeps a **single** audited Ed25519 implementation rather than
+  two. The primitive is **confined behind `ras-identity`'s `KeyStore` trait** (the trait exposes only
+  raw `[u8;32]` public keys and `[u8;64]` signatures — no dalek types leak), so swapping to libsodium
+  or a hardware/TPM store later is a `KeyStore` impl change, not an API change. Keys are generated
+  from `getrandom` (avoids the dalek↔rand_core version coupling). PASETO v4.public grants (ADR-064)
+  reuse this same primitive. *If sign-off prefers a libsodium binding, only the `KeyStore` impl
+  changes.* Pinned `=3.0.0-rc.0` to match iroh 1.0.2's tree (the RC iroh already ships).
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

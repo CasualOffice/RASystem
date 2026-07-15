@@ -3449,6 +3449,11 @@ dependencies = [
 [[package]]
 name = "ras-identity"
 version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "ras-protocol",
+]
 
 [[package]]
 name = "ras-media"

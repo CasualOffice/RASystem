@@ -7,5 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[dependencies]
+ras-protocol = { path = "../ras-protocol" }
+# Ed25519 primitive — already vendored via iroh (transport auth), reused here behind the KeyStore
+# trait so no dalek type leaks the API and libsodium/TPM stores are drop-in later (ADR-065). Pinned
+# to the RC iroh 1.0.2 already ships, to avoid a second dalek version in the tree.
+ed25519-dalek = "=3.0.0-rc.0"
+# Secure key generation without coupling to dalek's rand_core version.
+getrandom = "0.2"
+
 [lints]
 workspace = true
