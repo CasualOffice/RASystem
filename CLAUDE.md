@@ -190,8 +190,10 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     **hardware encoders + Wayland DMA-buf zero-copy** (Linux/Windows use the
     software OpenH264 path), the **Phase-2 grant/lease/capability
     model** (consent is now real local Allow/Deny, but authorization is still coarse — no signed
-    grants/leases, no capability scoping, no TPM tiers), excluding the host overlay from capture +
-    multi-monitor pointer mapping, and EV code-signing/notarization of the release bundles.
+    grants/leases, no capability scoping, no TPM tiers), multi-monitor pointer mapping, and EV
+    code-signing/notarization of the release bundles. **(Excluding the host's own overlay/indicator
+    windows from macOS capture is now done — `CaptureOptions::excluded_window_ids` → `SCWindow` via
+    CGWindowID; the app supplies the ids from each Tauri window's `NSWindow.windowNumber`.)**
 - **Build/verify commands** (all green as of M0):
   - `cargo build --workspace`
   - `cargo fmt --all -- --check`

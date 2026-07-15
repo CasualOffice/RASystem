@@ -456,6 +456,7 @@ name = "casual-ras"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "objc2",
  "ras-core",
  "ras-media",
  "ras-media-macos",
@@ -3946,9 +3947,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openh264"
-version = "0.6.6"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c1af3a4d35290ba7a46d1ce69cb13ae740a2d72cc2ee00abee3c84bed3dbe5d"
+checksum = "fef0655e143954965073374f5390411131590d0bc793208aabf7c6785430fa00"
 dependencies = [
  "openh264-sys2",
  "wide",
@@ -3956,9 +3957,9 @@ dependencies = [
 
 [[package]]
 name = "openh264-sys2"
-version = "0.6.6"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77a77c1e18503537113d77b1b1d05274e81fa9f44843c06be2d735adb19f7c9d"
+checksum = "ad97e73d98000c46623ec4719e4fd2d7f79076a75350af8ae3878abf682c071d"
 dependencies = [
  "cc",
  "nasm-rs",
@@ -4673,6 +4674,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "openh264",
+ "openh264-sys2",
  "ras-media",
  "ras-protocol",
 ]
@@ -4684,6 +4686,7 @@ dependencies = [
  "ras-media",
  "ras-protocol",
  "scap",
+ "windows-capture",
 ]
 
 [[package]]
@@ -7043,9 +7046,9 @@ dependencies = [
 
 [[package]]
 name = "windows-capture"
-version = "1.5.0"
+version = "1.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a4df73e95feddb9ec1a7e9c2ca6323b8c97d5eeeff78d28f1eccdf19c882b24"
+checksum = "757c9e7b920233fec91cb314ad92b96853ba2907e3482a193d290d33838e3fc5"
 dependencies = [
  "parking_lot",
  "rayon",

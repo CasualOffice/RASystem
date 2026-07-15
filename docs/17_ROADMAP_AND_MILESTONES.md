@@ -180,8 +180,10 @@ exercised end-to-end on an in-memory loopback with no iroh/OS/GPU:*
   wired through the real `PlatformSurface` seam (ADR-058). Driven end-to-end through the `ras-media`
   traits (`--example capture_encode`): first-frame keyframe, gap-free monotonic ids, Annex-B + in-band
   SPS/PPS, `ffprobe`-clean h264, ~8 ms encode. Pure-Rust `objc2` (no Swift bridge); empty on non-macOS
-  so CI stays green. **Remaining:** cursor metadata out-of-band, dirty rects, `excluded_window_ids`
-  → `SCWindow` mapping, and pipelined (async) encode emission.
+  so CI stays green. `excluded_window_ids` → `SCWindow` mapping is **done** (the filter now excludes
+  our own overlay/consent/indicator windows, matched by CGWindowID, so they never re-enter the shared
+  feed; the app supplies the ids from each Tauri window's `NSWindow.windowNumber`). **Remaining:**
+  cursor metadata out-of-band, dirty rects, and pipelined (async) encode emission.
 - ◐ `MED` HW encoder abstraction + OpenH264 software fallback (never x264). **Software encoder landed**
   (`ras-media-openh264`, built from Cisco BSD-2 source): BGRA→I420→Annex-B, in-band SPS/PPS per IDR,
   forced-IDR-on-demand, and **runtime ABR** — built in bitrate rate-control mode at the negotiated

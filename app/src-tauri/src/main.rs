@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use ras_core::frame_channel::encode_frame_blob;
 use ras_core::transport::Endpoint;
-use ras_core::{CoreError, ControllerSession, FrameSink, LifecycleStream, PushResult};
+use ras_core::{ControllerSession, CoreError, FrameSink, LifecycleStream, PushResult};
 use ras_media::{EncodedFrame, StreamConfig};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager, State};
@@ -374,6 +374,34 @@ async fn run_share(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+/// CGWindowIDs of our own windows (overlay + main/indicator) to keep out of the shared capture, so
+/// the viewer never sees the remote-pointer overlay we draw for them (a feedback loop) or our local
+/// control UI. Fail-safe: any window whose id can't be read is simply not excluded (capture is
+/// unchanged), never fatal. macOS-only — the capture backend that consumes these is macOS-only.
+#[cfg(target_os = "macos")]
+fn host_excluded_windows(app: &tauri::AppHandle) -> Vec<ras_media::WindowId> {
+    ["overlay", "main"]
+        .iter()
+        .filter_map(|label| app.get_webview_window(label))
+        .filter_map(|w| w.ns_window().ok())
+        .filter_map(|ns| {
+            let obj = ns as *mut objc2::runtime::AnyObject;
+            if obj.is_null() {
+                return None;
+            }
+            // SAFETY: `obj` is a live NSWindow handed out by Tauri for this window; `windowNumber`
+            // takes no arguments and returns the CGWindowID as an NSInteger.
+            let number: isize = unsafe { objc2::msg_send![obj, windowNumber] };
+            (number > 0).then_some(ras_media::WindowId(number as u64))
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_excluded_windows(_app: &tauri::AppHandle) -> Vec<ras_media::WindowId> {
+    Vec::new()
+}
+
 async fn serve_one(
     app: &tauri::AppHandle,
     endpoint: &Arc<ras_transport_iroh::Endpoint>,
@@ -391,7 +419,8 @@ async fn serve_one(
     let (capture, encoder) = make_backends();
     let transport = Arc::new(IrohSessionTransport::new(endpoint.clone(), session));
     let host = HostSession::new(
-        HostSessionConfig::new(MonitorId(0)),
+        // Exclude our own overlay/indicator windows from the shared feed (privacy + no feedback loop).
+        HostSessionConfig::new(MonitorId(0)).with_excluded_windows(host_excluded_windows(app)),
         transport,
         capture,
         encoder,
@@ -403,7 +432,10 @@ async fn serve_one(
     let mut events = match host.start().await {
         Ok(events) => events,
         Err(_) => {
-            let _ = app.emit("share-status", "Access denied. Waiting for the next viewer…");
+            let _ = app.emit(
+                "share-status",
+                "Access denied. Waiting for the next viewer…",
+            );
             return;
         }
     };
@@ -442,7 +474,10 @@ async fn serve_one(
         let _ = ov.hide();
     }
     let _ = app.emit("share-viewer", false);
-    let _ = app.emit("share-status", "Viewer disconnected. Waiting for the next viewer…");
+    let _ = app.emit(
+        "share-status",
+        "Viewer disconnected. Waiting for the next viewer…",
+    );
 }
 
 // ─── Entrypoint ──────────────────────────────────────────────────────────────────────────────────

@@ -212,15 +212,32 @@ impl ScreenCaptureBackend for MacScreenCapture {
         };
         let (dw, dh) = unsafe { (display.width() as u32, display.height() as u32) };
 
-        // Phase 1: whole-display filter, exclude nothing. (Mapping `excluded_window_ids` to
-        // `SCWindow`s — to hide our own consent/overlay windows — is additive and lands with the UI.)
-        let empty: Retained<NSArray<SCWindow>> = NSArray::new();
-        // SAFETY: `display` + `empty` outlive the init call.
+        // Exclude our own overlay / consent / indicator windows from capture, matched by CGWindowID.
+        // Without this the always-on-top overlay we draw the viewer's remote pointer on would be
+        // re-captured and streamed straight back to the viewer (a feedback loop), and the local-only
+        // indicator/consent surfaces would leak into the shared feed. An empty list excludes nothing.
+        let excluded: Retained<NSArray<SCWindow>> = if opts.excluded_window_ids.is_empty() {
+            NSArray::new()
+        } else {
+            // SAFETY: `content` is live; `windows()` returns its current on-screen window array.
+            let all = unsafe { content.windows() };
+            let mut keep: Vec<Retained<SCWindow>> = Vec::new();
+            for i in 0..all.count() {
+                let w = all.objectAtIndex(i);
+                // SAFETY: `w` is a live `SCWindow`; `windowID` reads its CoreGraphics id.
+                let id = unsafe { w.windowID() } as u64;
+                if opts.excluded_window_ids.iter().any(|x| x.0 == id) {
+                    keep.push(w);
+                }
+            }
+            NSArray::from_retained_slice(&keep)
+        };
+        // SAFETY: `display` + `excluded` outlive the init call.
         let filter = unsafe {
             SCContentFilter::initWithDisplay_excludingWindows(
                 SCContentFilter::alloc(),
                 &display,
-                &empty,
+                &excluded,
             )
         };
 

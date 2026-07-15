@@ -31,7 +31,7 @@ use crate::{
 };
 use ras_media::{
     CaptureOptions, ColorSpace, MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec,
-    VideoEncoderBackend, VideoTransportKind,
+    VideoEncoderBackend, VideoTransportKind, WindowId,
 };
 use ras_protocol::{ControlMsg, DecoderFeedback, ErrorCode, KeyframeReason, StreamConfigWire};
 use ras_transport_iroh::{DropReason, EndpointAddr, EndpointId, VideoEvent};
@@ -134,6 +134,10 @@ pub struct HostSessionConfig {
     pub max_bitrate_bps: u32,
     /// Reconnect window before `Suspended → Terminated`.
     pub reconnect_window: Duration,
+    /// The host's own windows (overlay / consent / indicator) to exclude from capture, by platform
+    /// window id, so they never re-enter the shared feed (privacy + no capture-feedback loop). The
+    /// UI supplies these; empty means capture the whole display.
+    pub excluded_window_ids: Vec<WindowId>,
 }
 
 impl HostSessionConfig {
@@ -144,7 +148,15 @@ impl HostSessionConfig {
             monitor,
             max_bitrate_bps: 8_000_000,
             reconnect_window: Duration::from_secs(10),
+            excluded_window_ids: Vec::new(),
         }
+    }
+
+    /// Set the host-owned windows to exclude from capture (overlay / consent / indicator).
+    #[must_use]
+    pub fn with_excluded_windows(mut self, ids: Vec<WindowId>) -> Self {
+        self.excluded_window_ids = ids;
+        self
     }
 }
 
@@ -303,7 +315,7 @@ where
         let opts = CaptureOptions {
             monitor: inner.config.monitor,
             target_fps: HOST_TARGET_FPS,
-            excluded_window_ids: vec![],
+            excluded_window_ids: inner.config.excluded_window_ids.clone(),
         };
         let (mut capture, mut encoder) = inner
             .backends
