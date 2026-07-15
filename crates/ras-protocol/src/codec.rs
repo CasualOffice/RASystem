@@ -21,9 +21,10 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use prost::Message;
 
 use crate::{
-    AccessOutcome, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode, KeyframeReason,
-    KeyframeRequest, PointerUpdate, RasError, StreamConfigWire, MAX_CONTROL_FRAME,
-    MAX_DISPLAY_NAME,
+    AccessOutcome, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode, InputAction,
+    InputEnvelope, KeyframeReason, KeyframeRequest, PointerButton, PointerUpdate, RasError,
+    StreamConfigWire, MAX_CAPABILITIES, MAX_CAPABILITY_LEN, MAX_CONTROL_FRAME, MAX_DISPLAY_NAME,
+    MAX_TEXT_INPUT,
 };
 
 /// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
@@ -234,6 +235,26 @@ fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
             y: u32::from(p.y),
             visible: p.visible,
         }),
+        ControlMsg::ControlRequest { capabilities } => {
+            Kind::ControlRequest(pb::ControlRequest { capabilities })
+        }
+        ControlMsg::ControlGranted {
+            lease_id,
+            generation,
+            capabilities,
+            expires_at,
+            signature,
+        } => Kind::ControlGranted(pb::ControlGranted {
+            lease_id: Bytes::copy_from_slice(&lease_id),
+            generation,
+            capabilities,
+            expires_at,
+            signature,
+        }),
+        ControlMsg::ControlRevoked { code } => Kind::ControlRevoked(pb::ControlRevoked {
+            code: i32::from(errorcode_to_pb(code)),
+        }),
+        ControlMsg::Input(env) => Kind::Input(input_envelope_to_pb(env)),
     };
     pb::ControlMsg { kind: Some(kind) }
 }
@@ -263,11 +284,196 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
             })?,
             visible: p.visible,
         })),
+        Some(Kind::ControlRequest(r)) => Ok(ControlMsg::ControlRequest {
+            capabilities: validate_capabilities(r.capabilities)?,
+        }),
+        Some(Kind::ControlGranted(g)) => Ok(ControlMsg::ControlGranted {
+            lease_id: arr16(&g.lease_id, "control_granted.lease_id")?,
+            generation: g.generation,
+            capabilities: validate_capabilities(g.capabilities)?,
+            expires_at: g.expires_at,
+            signature: g.signature,
+        }),
+        Some(Kind::ControlRevoked(r)) => Ok(ControlMsg::ControlRevoked {
+            code: errorcode_from_pb(r.code)?,
+        }),
+        Some(Kind::Input(env)) => Ok(ControlMsg::Input(input_envelope_from_pb(env)?)),
         // No valid empty control message: unset oneof (empty bytes, or a future variant an old
         // build doesn't recognize) is rejected, never silently defaulted.
         None => Err(RasError::fatal(
             ErrorCode::InvalidMessage,
             "empty control message",
+        )),
+    }
+}
+
+/// Decode a wire `bytes` field to a fixed 16-byte lease id; wrong length → malformed message.
+fn arr16(bytes: &Bytes, ctx: &'static str) -> Result<[u8; 16], RasError> {
+    <[u8; 16]>::try_from(bytes.as_ref())
+        .map_err(|_| RasError::fatal(ErrorCode::InvalidMessage, ctx))
+}
+
+/// Validate an untrusted capability list: bounded count and per-identifier length (DoS guard). The
+/// identifiers themselves are recognized/denied later by `ras-policy` (unknown-denied); the codec
+/// only enforces size.
+fn validate_capabilities(caps: Vec<String>) -> Result<Vec<String>, RasError> {
+    if caps.len() > MAX_CAPABILITIES {
+        return Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "too many capabilities",
+        ));
+    }
+    if caps.iter().any(|c| c.len() > MAX_CAPABILITY_LEN) {
+        return Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "capability identifier too long",
+        ));
+    }
+    Ok(caps)
+}
+
+fn pointerbutton_to_pb(b: PointerButton) -> pb::PointerButtonProto {
+    match b {
+        PointerButton::Left => pb::PointerButtonProto::PointerButtonLeft,
+        PointerButton::Right => pb::PointerButtonProto::PointerButtonRight,
+        PointerButton::Middle => pb::PointerButtonProto::PointerButtonMiddle,
+    }
+}
+
+/// `i32` wire tag → `PointerButton`; UNSPECIFIED / unknown → malformed (never silently defaulted).
+fn pointerbutton_from_pb(tag: i32) -> Result<PointerButton, RasError> {
+    match pb::PointerButtonProto::try_from(tag) {
+        Ok(pb::PointerButtonProto::PointerButtonLeft) => Ok(PointerButton::Left),
+        Ok(pb::PointerButtonProto::PointerButtonRight) => Ok(PointerButton::Right),
+        Ok(pb::PointerButtonProto::PointerButtonMiddle) => Ok(PointerButton::Middle),
+        Ok(pb::PointerButtonProto::PointerButtonUnspecified) | Err(_) => Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "invalid pointer button",
+        )),
+    }
+}
+
+fn input_envelope_to_pb(env: InputEnvelope) -> pb::InputEnvelope {
+    pb::InputEnvelope {
+        lease_id: Bytes::copy_from_slice(&env.lease_id),
+        generation: env.generation,
+        seq: env.seq,
+        action: Some(input_action_to_pb(env.action)),
+    }
+}
+
+fn input_envelope_from_pb(env: pb::InputEnvelope) -> Result<InputEnvelope, RasError> {
+    Ok(InputEnvelope {
+        lease_id: arr16(&env.lease_id, "input.lease_id")?,
+        generation: env.generation,
+        seq: env.seq,
+        action: input_action_from_pb(
+            env.action
+                .ok_or_else(|| RasError::fatal(ErrorCode::InvalidMessage, "input action unset"))?,
+        )?,
+    })
+}
+
+fn input_action_to_pb(a: InputAction) -> pb::InputAction {
+    use pb::input_action::Action;
+    let action = match a {
+        InputAction::PointerMove {
+            display_id,
+            nx,
+            ny,
+            layout_version,
+        } => Action::PointerMove(pb::PointerMove {
+            display_id,
+            nx: u32::from(nx),
+            ny: u32::from(ny),
+            layout_version,
+        }),
+        InputAction::PointerButton {
+            display_id,
+            nx,
+            ny,
+            layout_version,
+            button,
+            down,
+        } => Action::PointerButton(pb::PointerButtonEvent {
+            display_id,
+            nx: u32::from(nx),
+            ny: u32::from(ny),
+            layout_version,
+            button: i32::from(pointerbutton_to_pb(button)),
+            down,
+        }),
+        InputAction::PointerWheel { dx, dy } => Action::PointerWheel(pb::PointerWheel {
+            dx: i32::from(dx),
+            dy: i32::from(dy),
+        }),
+        InputAction::KeyEvent {
+            hid_usage,
+            down,
+            modifiers,
+        } => Action::KeyEvent(pb::KeyEvent {
+            hid_usage: u32::from(hid_usage),
+            down,
+            modifiers: u32::from(modifiers),
+        }),
+        InputAction::TextInput { utf8 } => Action::TextInput(pb::TextInput { utf8 }),
+        InputAction::ReleaseAllKeys => Action::ReleaseAllKeys(pb::ReleaseAllKeys {}),
+    };
+    pb::InputAction {
+        action: Some(action),
+    }
+}
+
+/// Decode a normalized coordinate (`u16` fixed-point carried in `uint32`); out-of-range → malformed.
+fn norm_coord(v: u32, ctx: &'static str) -> Result<u16, RasError> {
+    u16::try_from(v).map_err(|_| RasError::fatal(ErrorCode::InvalidMessage, ctx))
+}
+
+fn input_action_from_pb(a: pb::InputAction) -> Result<InputAction, RasError> {
+    use pb::input_action::Action;
+    match a.action {
+        Some(Action::PointerMove(m)) => Ok(InputAction::PointerMove {
+            display_id: m.display_id,
+            nx: norm_coord(m.nx, "pointer_move.nx out of range")?,
+            ny: norm_coord(m.ny, "pointer_move.ny out of range")?,
+            layout_version: m.layout_version,
+        }),
+        Some(Action::PointerButton(b)) => Ok(InputAction::PointerButton {
+            display_id: b.display_id,
+            nx: norm_coord(b.nx, "pointer_button.nx out of range")?,
+            ny: norm_coord(b.ny, "pointer_button.ny out of range")?,
+            layout_version: b.layout_version,
+            button: pointerbutton_from_pb(b.button)?,
+            down: b.down,
+        }),
+        Some(Action::PointerWheel(w)) => Ok(InputAction::PointerWheel {
+            dx: i16::try_from(w.dx)
+                .map_err(|_| RasError::fatal(ErrorCode::InvalidMessage, "wheel dx out of range"))?,
+            dy: i16::try_from(w.dy)
+                .map_err(|_| RasError::fatal(ErrorCode::InvalidMessage, "wheel dy out of range"))?,
+        }),
+        Some(Action::KeyEvent(k)) => Ok(InputAction::KeyEvent {
+            hid_usage: u16::try_from(k.hid_usage).map_err(|_| {
+                RasError::fatal(ErrorCode::InvalidMessage, "key hid_usage out of range")
+            })?,
+            down: k.down,
+            modifiers: u8::try_from(k.modifiers).map_err(|_| {
+                RasError::fatal(ErrorCode::InvalidMessage, "key modifiers out of range")
+            })?,
+        }),
+        Some(Action::TextInput(t)) => {
+            if t.utf8.len() > MAX_TEXT_INPUT {
+                return Err(RasError::fatal(
+                    ErrorCode::InvalidMessage,
+                    "text input too long",
+                ));
+            }
+            Ok(InputAction::TextInput { utf8: t.utf8 })
+        }
+        Some(Action::ReleaseAllKeys(_)) => Ok(InputAction::ReleaseAllKeys),
+        None => Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "input action unset",
         )),
     }
 }
@@ -719,6 +925,215 @@ mod tests {
                 _ => panic!("wrong variant"),
             }
         }
+    }
+
+    #[test]
+    fn roundtrip_control_request_and_granted() {
+        use crate::InputEnvelope;
+        let req = ControlMsg::ControlRequest {
+            capabilities: vec!["pointer.move".to_string(), "keyboard.key".to_string()],
+        };
+        assert_roundtrip(&req);
+
+        let granted = ControlMsg::ControlGranted {
+            lease_id: [7u8; 16],
+            generation: 42,
+            capabilities: vec!["pointer.move".to_string()],
+            expires_at: 1_700_000_000_000,
+            signature: Bytes::from_static(&[1, 2, 3, 4]),
+        };
+        assert_roundtrip(&granted);
+        match decode(&encode(&granted)).unwrap() {
+            ControlMsg::ControlGranted {
+                lease_id,
+                generation,
+                capabilities,
+                expires_at,
+                signature,
+            } => {
+                assert_eq!(lease_id, [7u8; 16]);
+                assert_eq!(generation, 42);
+                assert_eq!(capabilities, vec!["pointer.move".to_string()]);
+                assert_eq!(expires_at, 1_700_000_000_000);
+                assert_eq!(signature.as_ref(), &[1, 2, 3, 4]);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let revoked = ControlMsg::ControlRevoked {
+            code: ErrorCode::ConsentDenied,
+        };
+        assert_roundtrip(&revoked);
+
+        // A minimal ReleaseAllKeys envelope also round-trips (empty inner action message).
+        let rel = ControlMsg::Input(InputEnvelope {
+            lease_id: [0u8; 16],
+            generation: 1,
+            seq: 9,
+            action: InputAction::ReleaseAllKeys,
+        });
+        assert_roundtrip(&rel);
+    }
+
+    #[test]
+    fn roundtrip_all_input_actions() {
+        use crate::InputEnvelope;
+        let actions = [
+            InputAction::PointerMove {
+                display_id: 3,
+                nx: 0,
+                ny: 65535,
+                layout_version: 5,
+            },
+            InputAction::PointerButton {
+                display_id: 0,
+                nx: 32000,
+                ny: 100,
+                layout_version: 1,
+                button: PointerButton::Right,
+                down: true,
+            },
+            InputAction::PointerWheel { dx: -120, dy: 240 },
+            InputAction::KeyEvent {
+                hid_usage: 0x04, // 'a'
+                down: true,
+                modifiers: 0b0000_0010,
+            },
+            InputAction::TextInput {
+                utf8: "héllo, 世界".to_string(),
+            },
+            InputAction::ReleaseAllKeys,
+        ];
+        for (i, action) in actions.into_iter().enumerate() {
+            let m = ControlMsg::Input(InputEnvelope {
+                lease_id: [(i as u8); 16],
+                generation: i as u32,
+                seq: i as u64 * 1000,
+                action: action.clone(),
+            });
+            assert_roundtrip(&m);
+            match decode(&encode(&m)).unwrap() {
+                ControlMsg::Input(env) => assert_eq!(env.action, action),
+                _ => panic!("wrong variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn input_coordinate_and_button_out_of_range_are_rejected() {
+        // nx > u16::MAX in the wire uint32 → InvalidMessage (fail-closed, never truncated).
+        let bad_coord = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::Input(pb::InputEnvelope {
+                lease_id: Bytes::copy_from_slice(&[0u8; 16]),
+                generation: 0,
+                seq: 0,
+                action: Some(pb::InputAction {
+                    action: Some(pb::input_action::Action::PointerMove(pb::PointerMove {
+                        display_id: 0,
+                        nx: 70_000, // > 65535
+                        ny: 0,
+                        layout_version: 0,
+                    })),
+                }),
+            })),
+        };
+        assert_eq!(
+            control_from_pb(bad_coord).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+
+        // UNSPECIFIED button tag → InvalidMessage (never silently defaulted to Left).
+        let bad_button = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::Input(pb::InputEnvelope {
+                lease_id: Bytes::copy_from_slice(&[0u8; 16]),
+                generation: 0,
+                seq: 0,
+                action: Some(pb::InputAction {
+                    action: Some(pb::input_action::Action::PointerButton(
+                        pb::PointerButtonEvent {
+                            display_id: 0,
+                            nx: 0,
+                            ny: 0,
+                            layout_version: 0,
+                            button: 0, // UNSPECIFIED
+                            down: true,
+                        },
+                    )),
+                }),
+            })),
+        };
+        assert_eq!(
+            control_from_pb(bad_button).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+    }
+
+    #[test]
+    fn oversized_text_capabilities_and_lease_id_are_rejected() {
+        // Text input over MAX_TEXT_INPUT → rejected.
+        let long_text = "x".repeat(MAX_TEXT_INPUT + 1);
+        let m = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::Input(pb::InputEnvelope {
+                lease_id: Bytes::copy_from_slice(&[0u8; 16]),
+                generation: 0,
+                seq: 0,
+                action: Some(pb::InputAction {
+                    action: Some(pb::input_action::Action::TextInput(pb::TextInput {
+                        utf8: long_text,
+                    })),
+                }),
+            })),
+        };
+        assert_eq!(
+            control_from_pb(m).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+
+        // A 15-byte lease id (wrong length) → rejected, never zero-padded.
+        let short_lease = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::Input(pb::InputEnvelope {
+                lease_id: Bytes::copy_from_slice(&[0u8; 15]),
+                generation: 0,
+                seq: 0,
+                action: Some(pb::InputAction {
+                    action: Some(pb::input_action::Action::ReleaseAllKeys(
+                        pb::ReleaseAllKeys {},
+                    )),
+                }),
+            })),
+        };
+        assert_eq!(
+            control_from_pb(short_lease).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+
+        // Too many capabilities → rejected.
+        let too_many = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::ControlRequest(pb::ControlRequest {
+                capabilities: (0..=MAX_CAPABILITIES).map(|i| format!("c.{i}")).collect(),
+            })),
+        };
+        assert_eq!(
+            control_from_pb(too_many).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+    }
+
+    #[test]
+    fn input_action_with_unset_oneof_is_rejected() {
+        // An InputEnvelope with no action set (unset nested oneof) → InvalidMessage, never defaulted.
+        let m = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::Input(pb::InputEnvelope {
+                lease_id: Bytes::copy_from_slice(&[0u8; 16]),
+                generation: 0,
+                seq: 0,
+                action: None,
+            })),
+        };
+        assert_eq!(
+            control_from_pb(m).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
     }
 
     #[test]

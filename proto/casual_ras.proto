@@ -121,6 +121,96 @@ message PointerUpdate {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 3 — OS input (ADR-067). Coordinates are normalized fixed-point u16
+// (0..=65535 = 0.0..=1.0 of a display) carried in uint32; the codec validates
+// the u16/i16/u8 ranges on decode and rejects out-of-range as InvalidMessage.
+// ---------------------------------------------------------------------------
+
+// Closed set of injectable pointer buttons. UNSPECIFIED is a proto3-default sentinel the codec
+// rejects (never silently defaulted). Mirrors ras_protocol::PointerButton.
+enum PointerButtonProto {
+  POINTER_BUTTON_UNSPECIFIED = 0;
+  POINTER_BUTTON_LEFT        = 1;
+  POINTER_BUTTON_RIGHT       = 2;
+  POINTER_BUTTON_MIDDLE      = 3;
+}
+
+message PointerMove {
+  uint32 display_id     = 1;
+  uint32 nx             = 2; // 0..=65535
+  uint32 ny             = 3; // 0..=65535
+  uint32 layout_version = 4;
+}
+
+message PointerButtonEvent {
+  uint32             display_id     = 1;
+  uint32             nx             = 2; // 0..=65535
+  uint32             ny             = 3; // 0..=65535
+  uint32             layout_version = 4;
+  PointerButtonProto button         = 5;
+  bool               down           = 6;
+}
+
+message PointerWheel {
+  int32 dx = 1; // i16 range; right positive
+  int32 dy = 2; // i16 range; down positive
+}
+
+message KeyEvent {
+  uint32 hid_usage = 1; // u16 USB-HID usage
+  bool   down      = 2;
+  uint32 modifiers = 3; // u8 modifier bitset
+}
+
+message TextInput {
+  string utf8 = 1; // bounded by MAX_TEXT_INPUT; content-bearing, never logged
+}
+
+message ReleaseAllKeys {}
+
+// One OS-input action. Exactly one variant is set; an unset oneof decodes to InvalidMessage.
+message InputAction {
+  oneof action {
+    PointerMove        pointer_move     = 1;
+    PointerButtonEvent pointer_button   = 2;
+    PointerWheel       pointer_wheel    = 3;
+    KeyEvent           key_event        = 4;
+    TextInput          text_input       = 5;
+    ReleaseAllKeys     release_all_keys = 6;
+  }
+}
+
+// One OS-input event bound to the lease that authorizes it. Mirrors ras_protocol::InputEnvelope.
+message InputEnvelope {
+  bytes       lease_id   = 1; // exactly 16 bytes; other lengths are InvalidMessage
+  uint32      generation = 2;
+  uint64      seq        = 3;
+  InputAction action      = 4;
+}
+
+// Controller -> host: request the single OS-input control lease. Mirrors ras_protocol::ControlMsg::
+// ControlRequest. `capabilities` bounded by MAX_CAPABILITIES × MAX_CAPABILITY_LEN.
+message ControlRequest {
+  repeated string capabilities = 1;
+}
+
+// Host -> controller: the lease was granted (host-signed, forward-compat; not trusted as authority
+// yet — ADR-069). Mirrors ras_protocol::ControlMsg::ControlGranted.
+message ControlGranted {
+  bytes           lease_id     = 1; // exactly 16 bytes
+  uint32          generation   = 2;
+  repeated string capabilities = 3;
+  uint64          expires_at   = 4;
+  bytes           signature    = 5; // opaque
+}
+
+// Host -> controller: the lease was revoked / transferred / denied. Mirrors
+// ras_protocol::ControlMsg::ControlRevoked.
+message ControlRevoked {
+  ErrorCodeProto code = 1;
+}
+
+// ---------------------------------------------------------------------------
 // Top-level control-channel message
 // ---------------------------------------------------------------------------
 
@@ -136,6 +226,10 @@ message ControlMsg {
     AuthEnvelope    auth_envelope    = 5;
     Bye             bye              = 6;
     PointerUpdate   pointer          = 7;
+    ControlRequest  control_request  = 8;
+    ControlGranted  control_granted  = 9;
+    ControlRevoked  control_revoked  = 10;
+    InputEnvelope   input            = 11;
   }
 }
 

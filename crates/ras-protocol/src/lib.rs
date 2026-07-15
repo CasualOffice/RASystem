@@ -193,6 +193,133 @@ pub enum ControlMsg {
     /// Controller → host: remote-pointer position for a "look here" overlay on the host. **Not OS
     /// input** — a purely visual cursor; nothing reaches the host's input system.
     Pointer(PointerUpdate),
+    /// Controller → host: request the single OS-input **control lease** (Phase 3, ADR-069). Carries
+    /// the capabilities the controller wants; the host clamps to `grant ∩ policy ∩ consent` and never
+    /// trusts this list as authority (Inv 15). Escalation past the session grant is refused.
+    ControlRequest {
+        /// Requested capability identifiers (bounded — [`MAX_CAPABILITIES`] × [`MAX_CAPABILITY_LEN`]).
+        capabilities: Vec<String>,
+    },
+    /// Host → controller: the lease was granted. Host-signed for the future privileged-input-helper
+    /// split (S4); MVP enforcement reads the host's own live state, not this token (ADR-069).
+    ControlGranted {
+        /// The lease identifier the controller echoes on every [`InputEnvelope`].
+        lease_id: [u8; 16],
+        /// The session generation at issuance; a mismatch on any input is rejected (Inv 5).
+        generation: u32,
+        /// The capabilities actually granted (⊆ requested); bounded as in [`ControlMsg::ControlRequest`].
+        capabilities: Vec<String>,
+        /// Absolute expiry (`UnixMillis`); never past the session grant's expiry.
+        expires_at: u64,
+        /// Opaque host signature over the lease claims (forward-compat; not trusted as authority yet).
+        signature: Bytes,
+    },
+    /// Host → controller: the lease was revoked / transferred away / denied, with a reason code.
+    ControlRevoked {
+        /// Reason (`ConsentDenied`, `SessionRevoked`, `LeaseInvalid`, …).
+        code: ErrorCode,
+    },
+    /// Controller → host: one OS-input event, bound to the lease that authorizes it (Phase 3). Every
+    /// field is re-checked host-side, per message, before anything reaches the OS input sink (Inv 15).
+    Input(InputEnvelope),
+}
+
+/// Upper bound on the number of capability identifiers in a [`ControlMsg::ControlRequest`] /
+/// [`ControlMsg::ControlGranted`] list — a DoS guard; the catalogue is far smaller than this.
+pub const MAX_CAPABILITIES: usize = 64;
+/// Upper bound on a single capability identifier's length (bytes). Catalogue ids are dotted ASCII.
+pub const MAX_CAPABILITY_LEN: usize = 64;
+/// Upper bound on a [`InputAction::TextInput`] payload (bytes). Unicode entry is short bursts, never
+/// bulk — a longer payload is a malformed message. Content-bearing: never logged (Invariant 8).
+pub const MAX_TEXT_INPUT: usize = 256;
+
+/// One OS-input event, bound to the control lease that authorizes it (Phase 3, ADR-067).
+///
+/// The `generation`/`lease_id`/`seq` are **claims** the host matches against its own authoritative
+/// state; they are never trusted as authority (ADR-069, Inv 15). Rides the reliable, ordered control
+/// stream so clicks/keys never drop or reorder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputEnvelope {
+    /// The lease this event claims to act under (echoed from [`ControlMsg::ControlGranted`]).
+    pub lease_id: [u8; 16],
+    /// The generation this event claims; must equal the host's current generation, else rejected.
+    pub generation: u32,
+    /// Strictly-increasing per lease; the host rejects `seq ≤ last_seen` (replay / reorder guard).
+    pub seq: u64,
+    /// The normalized action to inject (the closed set — Inv 6).
+    pub action: InputAction,
+}
+
+/// The closed set of OS-input actions (Invariant 6 — never a shell command, path, OS-API name, or
+/// keysym string). Coordinates are normalized fixed-point `0..=65535` (= `0.0..=1.0`) of `display_id`'s
+/// logical bounds; the **host** maps them to device pixels after authorization (the controller never
+/// sends pixels).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InputAction {
+    /// Move the OS pointer to a normalized position on a display.
+    PointerMove {
+        /// Target display id (matches a `CaptureGeometry` display).
+        display_id: u32,
+        /// Horizontal `0..=65535` = left..right of `display_id`.
+        nx: u16,
+        /// Vertical `0..=65535` = top..bottom of `display_id`.
+        ny: u16,
+        /// The capture-geometry layout version this coordinate was computed against.
+        layout_version: u32,
+    },
+    /// Press or release a pointer button at a normalized position.
+    PointerButton {
+        /// Target display id.
+        display_id: u32,
+        /// Horizontal `0..=65535`.
+        nx: u16,
+        /// Vertical `0..=65535`.
+        ny: u16,
+        /// The capture-geometry layout version this coordinate was computed against.
+        layout_version: u32,
+        /// Which button.
+        button: PointerButton,
+        /// `true` = press, `false` = release.
+        down: bool,
+    },
+    /// Scroll by notched deltas (clamped `i16`).
+    PointerWheel {
+        /// Horizontal notches (right positive).
+        dx: i16,
+        /// Vertical notches (down positive).
+        dy: i16,
+    },
+    /// Press or release a **physical** key by USB-HID usage (layout-independent), never a keysym.
+    KeyEvent {
+        /// USB-HID usage id (Keyboard/Keypad page).
+        hid_usage: u16,
+        /// `true` = press, `false` = release.
+        down: bool,
+        /// Modifier bitset (platform-neutral); host maps to OS modifier flags.
+        modifiers: u8,
+    },
+    /// Layout-independent Unicode text entry (the separate `keyboard.text` capability). Never used for
+    /// shortcuts. Bounded by [`MAX_TEXT_INPUT`]; content-bearing, never logged (Invariant 8).
+    TextInput {
+        /// The UTF-8 text to type.
+        utf8: String,
+    },
+    /// Release every key/button the host currently holds down — key-state cleanup on
+    /// transfer/disconnect/stop. Always permitted (it only *clears* state).
+    ReleaseAllKeys,
+}
+
+/// The closed set of injectable pointer buttons (Invariant 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PointerButton {
+    /// Primary (left) button.
+    Left,
+    /// Secondary (right) button.
+    Right,
+    /// Tertiary (middle / wheel) button.
+    Middle,
 }
 
 /// The controller's pointer position over the shared screen (controller → host), for a **remote
