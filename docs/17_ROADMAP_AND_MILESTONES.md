@@ -321,8 +321,14 @@ sequence (bottom-up: policy → identity → wire → bootstrap → grant → co
   carried on the grant; the lease/generation *runtime* is Phase 3.
 - ☐ `UI` Branded consent UI (identity, reason, requested caps, recording state, duration, stop);
   approve/reduce/view-only/deny; host-shown one-time PIN (Tier 0).
-- ☐ `QA` Security tests: stolen/expired/replayed ticket, stale-generation ticket, modified request,
-  cross-endpoint grant; property tests (unknown denied, reduced never expands).
+- ☑ `QA` **Security-test matrix green** (`docs/design/phase-2-design.md §9.1`): stolen/expired/replayed
+  ticket, stale-generation ticket, modified/forged request + grant, cross-endpoint + cross-host grant,
+  replayed nonce, unknown-capability drop; property tests (unknown denied, reduced never expands) +
+  never-panic fuzz on the bootstrap/request/grant decoders. The **`insecure-no-auth` no-op
+  `AllowAllValidator` is `#[cfg]`-gated**, so the app's auth build (`default-features = false`) drops the
+  type entirely — reaching for it there is a compile error, not a silent no-auth downgrade. Verified:
+  every crate suite green (ras-bootstrap 11, ras-grant 27, ras-policy 7, ras-protocol 34, ras-core 33).
+  **Pending:** on-device GUI runtime run.
 
 **③ Exit criteria:** unknown controller cannot receive frames · replayed/expired/stale-generation
 ticket rejected · host & controller validate each other · every path has the security tests above.

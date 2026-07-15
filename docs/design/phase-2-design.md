@@ -489,6 +489,33 @@ Every row is a required test before M3 (`docs/17` Phase-2 ③). Unit + property 
 | Emergency stop during a valid grant | `Revoked` overrides grant ≤250 ms (Inv 4) | `ras-core` (exists) |
 | `insecure-no-auth` in an auth build | **does not compile** (feature-exclusive) | build gate |
 
+### 9.1 Coverage (M3 exit — every row green)
+
+Each row is discharged by concrete tests (all green as of this landing):
+
+| Row | Covering test(s) |
+|---|---|
+| Unknown controller → no frames | `ras-core::denying_validator_blocks_the_session_before_capture` (integration; blocks before capture) |
+| Stolen/reused ticket → `ReplayDetected` | `ras-bootstrap::issue_then_consume_succeeds_once` (second `consume` errors) |
+| Stale-generation ticket | `ras-bootstrap::issuing_a_new_ticket_invalidates_the_prior_generation` |
+| Expired ticket / request / grant | `ras-bootstrap::expired_ticket_is_rejected`; `ras-grant::expired_request_is_rejected`; `ras-grant::expired_and_not_yet_valid_grants_are_rejected` |
+| Replayed request nonce | `ras-grant::replayed_nonce_is_rejected` (+ `a_bad_signature_does_not_consume_the_nonce`) |
+| Grant from different endpoint | `ras-grant::grant_from_another_endpoint_is_rejected`; `ras-core::grant_session_validator_authorizes_valid_grant_and_denies_forgeries` (wrong-endpoint arm) |
+| Forged/modified request or grant signature | `ras-grant::tampered_request_fails_signature`; `ras-grant::tampered_grant_token_is_rejected` |
+| Cross-host grant | `ras-grant::grant_for_wrong_host_is_rejected`; `ras-grant::grant_verified_with_wrong_key_is_rejected` |
+| Unknown capability dropped | `ras-policy::unknown_capabilities_are_denied`, `an_unknown_cap_cannot_survive_a_permissive_policy_and_consent`; `ras-grant::only_unknown_capabilities_is_denied` |
+| Reduced grant never expands (property) | `ras-policy::reduced_grant_never_expands`, `grantable_never_expands_past_any_input` |
+| Consent Deny / timeout | `ras-core::denying_validator_blocks_the_session_before_capture`, `unsupported_consent_decision_fails_closed`; app `LocalConsent::prompt` Deny/90 s-silence path |
+| Emergency stop overrides grant | Phase-1 emergency-stop loopback test (`ras-core`, exists) |
+| `insecure-no-auth` in an auth build | `AllowAllValidator` is `#[cfg(feature = "insecure-no-auth")]`; an auth build (the app: `default-features = false`) drops it, so the type does not exist and any code reaching for it fails to compile. Verified: `cargo build -p ras-core --no-default-features` leaves no `AllowAllValidator` in `deps` |
+
+Fuzz/never-panic guards across the wire + validators: `ras-protocol::decode_bootstrap_never_panics`,
+`ras-grant::access_request_decode_never_panics`, `ras-grant::validate_grant_never_panics`.
+
+**On-device pending (not a matrix row):** GUI runtime verification of the end-to-end two-phase flow
+(Tauri/WebView + macOS Screen-Recording TCC) is the developer's on-device step — the same constraint
+as every prior app change; the logic is covered by the crate-level tests above.
+
 ---
 
 ## 10. Execution sequence

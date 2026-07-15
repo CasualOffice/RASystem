@@ -16,9 +16,11 @@ description = "Casual RAS — one desktop app that both shares this screen and c
 # Kept OUT of the root crate workspace (heavy Tauri/WebView deps; not needed for the core CI gates).
 #
 # `default-features = false` deliberately drops `ras-core`'s `insecure-no-auth` AllowAllValidator: a
-# shipping product must never link the no-op consent seam. The Share role implements a real
+# shipping product must never link the no-op consent seam. Because that validator is `#[cfg(feature =
+# "insecure-no-auth")]`, in this build the type does not exist — any code path that reached for it
+# would fail to compile, not silently downgrade to no-auth. The Share role implements a real
 # `GrantValidator` (local Allow/Deny) — Invariant 1 (the local user authorizes; a controller never
-# self-authorizes). There is no local-loopback self-mirror here (it required the no-op validator).
+# self-authorizes).
 
 [build-dependencies]
 tauri-build = { version = "2.6", features = [] }
