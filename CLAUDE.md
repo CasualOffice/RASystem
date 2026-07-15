@@ -89,9 +89,9 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   the pure `OsInputSink` trait (`ras-control`) + unprivileged macOS **CGEvent** backend
   (`ras-input-macos`, PostEvent-TCC-gated, Secure-Input-respecting); the emergency-stop / transfer /
   disconnect **key-state cleanup** (`ReleaseAllKeys`, Inv 4); and the virtual multi-cursor relay
-  (Inv 5). Three open choices closed in **ADR-067/068/069 (Proposed)**. macOS is the lead input
-  platform (ADR-054/055); Windows/Linux backends are the parallel port. **No Phase-3 code lands until
-  sign-off.**
+  (Inv 5). Three open choices closed in **ADR-067/068/069 (Accepted)**. macOS is the lead input
+  platform (ADR-054/055); Windows/Linux backends are the parallel port. **Execution in progress**
+  (bottom-up per §12): `ras-policy` Phase-3 grantable set landed.
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

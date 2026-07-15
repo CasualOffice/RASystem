@@ -350,8 +350,8 @@ capability + lease + generation + seq gate** (`LeaseManager::authorize_input`, I
 transfer / disconnect key-state-cleanup path; and the virtual multi-cursor relay. Three open choices
 closed in **ADR-067** (input wire, distinct from ADR-061's visual `Pointer`), **ADR-068**
 (unprivileged macOS CGEvent backend, PostEvent-TCC-gated), **ADR-069** (host-authoritative lease, not
-a bearer token) — all **Proposed**. macOS is the lead input platform (ADR-054/055); the `WIN` tasks
-below are the parallel port. **No Phase-3 code lands until sign-off.**
+a bearer token) — all **Accepted** (signed off). macOS is the lead input platform (ADR-054/055); the
+`WIN` tasks below are the parallel port. **Execution is in progress** (bottom-up per §12).
 
 **② Build — tasks**
 - ☐ `WIN` Input injection: `SendInput` ABSOLUTE|VIRTUALDESK, PMv2 manifest, normalized 0..1→pixel

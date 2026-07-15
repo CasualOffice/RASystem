@@ -99,10 +99,40 @@ pub fn catalogue_v1() -> CapabilitySet {
     CATALOGUE_V1.iter().map(|s| (*s).to_string()).collect()
 }
 
+/// The capabilities the **MVP host** grants once OS input lands (Phase 3 = the Phase-2 view-only set
+/// **plus** OS pointer + physical-key input, gated behind a control lease). `keyboard.text` (arbitrary
+/// Unicode injection), clipboard, file transfer, support actions, and recording stay **withheld by
+/// default** — a deployment may widen policy up to the catalogue, never past it. Physical
+/// `keyboard.key` is the default keyboard path, so shortcuts/keys work without exposing arbitrary
+/// text injection by default (`docs/design/phase-3-design.md §2.3/§10`).
+pub const PHASE3_GRANTABLE: &[&str] = &[
+    // Phase-2 view-only + visual pointer + annotation …
+    SCREEN_VIEW,
+    SCREEN_SELECT_MONITOR,
+    POINTER_VIRTUAL,
+    ANNOTATION_CREATE,
+    // … plus OS input behind a lease:
+    POINTER_MOVE,
+    POINTER_CLICK,
+    POINTER_SCROLL,
+    KEYBOARD_KEY,
+    CONTROL_REQUEST,
+    CONTROL_TRANSFER,
+];
+
 /// The MVP host's default grantable policy (view-only + visual pointer + annotation).
 #[must_use]
 pub fn phase2_default_policy() -> CapabilitySet {
     PHASE2_GRANTABLE.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// The Phase-3 host's default grantable policy: view-only + visual pointer + annotation **plus**
+/// OS pointer/physical-key input (each still only usable while the controller holds a lease and only
+/// after the per-message host-side gate — `ras-control`, Inv 15). `keyboard.text` and everything past
+/// input stay withheld unless a deployment explicitly widens policy.
+#[must_use]
+pub fn phase3_default_policy() -> CapabilitySet {
+    PHASE3_GRANTABLE.iter().map(|s| (*s).to_string()).collect()
 }
 
 /// Whether an identifier is in the recognized catalogue.
@@ -225,5 +255,64 @@ mod tests {
                 "grantable cap {cap} must be in the catalogue"
             );
         }
+    }
+
+    #[test]
+    fn phase3_default_policy_grants_os_input_but_still_withholds_text_and_beyond() {
+        let policy = phase3_default_policy();
+        // OS pointer + physical key input become grantable in Phase 3 …
+        for cap in [
+            SCREEN_VIEW,
+            POINTER_VIRTUAL,
+            ANNOTATION_CREATE,
+            POINTER_MOVE,
+            POINTER_CLICK,
+            POINTER_SCROLL,
+            KEYBOARD_KEY,
+            CONTROL_REQUEST,
+            CONTROL_TRANSFER,
+        ] {
+            assert!(policy.contains(cap), "phase 3 should grant {cap}");
+        }
+        // … but arbitrary Unicode text, clipboard, file, actions, recording stay withheld by default.
+        for cap in [
+            KEYBOARD_TEXT,
+            CLIPBOARD_READ,
+            CLIPBOARD_WRITE,
+            FILE_UPLOAD,
+            FILE_DOWNLOAD,
+            ACTION_REQUEST,
+            SESSION_INVITE,
+            RECORDING_START,
+            RECORDING_STOP,
+        ] {
+            assert!(
+                !policy.contains(cap),
+                "phase 3 must withhold {cap} by default"
+            );
+        }
+    }
+
+    #[test]
+    fn phase3_policy_is_a_superset_of_phase2_and_within_the_catalogue() {
+        let cat = catalogue_v1();
+        let p2 = phase2_default_policy();
+        let p3 = phase3_default_policy();
+        // Never a regression: Phase 3 grants everything Phase 2 did, and more.
+        assert!(p2.is_subset(&p3));
+        // Never past the catalogue (unknown-denied holds for the policy set itself).
+        assert!(p3.is_subset(&cat));
+    }
+
+    #[test]
+    fn phase3_grantable_still_drops_unknown_and_never_expands() {
+        // A request naming an unknown id plus a withheld cap: recognition + policy still contain it.
+        let requested = set(&["screen.view", "keyboard.key", "keyboard.text", "made.up"]);
+        let consented = requested.clone();
+        let granted = grantable(&requested, &phase3_default_policy(), &consented);
+        // keyboard.key survives (grantable now); keyboard.text withheld by policy; made.up unrecognized.
+        assert_eq!(granted, set(&["keyboard.key", "screen.view"]));
+        assert!(granted.is_subset(&recognize(&requested)));
+        assert!(granted.is_subset(&phase3_default_policy()));
     }
 }

@@ -365,7 +365,7 @@
 ## Phase 3 — remote control & collaboration (`docs/design/phase-3-design.md`)
 
 - **ADR-067 · Phase-3 OS-input wire = a dedicated `ControlMsg::Input(InputEnvelope)`, distinct from
-  the visual `Pointer` · Proposed** (refines docs/04 §12/§13; sibling of ADR-061). OS input rides a
+  the visual `Pointer` · Accepted** (refines docs/04 §12/§13; sibling of ADR-061). OS input rides a
   new `ControlMsg::Input` carrying `{lease_id, generation, seq, action}`, where `action` is a nested
   oneof (`PointerMove`/`PointerButton`/`PointerWheel`/`KeyEvent`/`TextInput`/`ReleaseAllKeys`).
   - **Distinct from `Pointer` (ADR-061).** The visual `Pointer` has *no* lease, is never injected, and
@@ -385,7 +385,7 @@
     stays the public API. No change to any Phase-1/2 contract.
 
 - **ADR-068 · macOS OS-input backend is a new unprivileged `ras-input-macos` crate over CGEvent; the
-  `OsInputSink` trait lives in `unsafe`-free `ras-control` · Proposed** (implements ADR-055; mirrors
+  `OsInputSink` trait lives in `unsafe`-free `ras-control` · Accepted** (implements ADR-055; mirrors
   ADR-058's `ras-media`/`ras-media-macos` split). The narrow input surface (`OsInputSink`: normalized
   coords + the closed action set only — Inv 6) is a **pure trait in `ras-control`**; the OS backend is
   a **new FFI crate** where all `unsafe` is confined (CONTRIBUTING §5), empty on non-macOS so Linux CI
@@ -407,7 +407,7 @@
     deferred, additive behind the trait.
 
 - **ADR-069 · The control lease is host-authoritative live state, not a trusted bearer token ·
-  Proposed** (operationalizes Inv 5/15, ADR-041). `ControlGranted` is **host-signed** on the wire for
+  Accepted** (operationalizes Inv 5/15, ADR-041). `ControlGranted` is **host-signed** on the wire for
   the *future* process split (S4: a separate privileged input helper will need to verify it), but MVP
   per-message enforcement (`LeaseManager::authorize_input`) checks the **host's own** generation
   counter, active-lease id, monotonic `seq`, and clamped capability set — the controller's
