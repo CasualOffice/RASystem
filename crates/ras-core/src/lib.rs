@@ -39,8 +39,8 @@ pub use abr::LatencyFirstAbr;
 #[cfg(feature = "insecure-no-auth")]
 pub use deps::AllowAllValidator;
 pub use deps::{
-    ControlChannelDyn, FrameSink, GrantDecision, GrantSessionValidator, GrantValidator, PushResult,
-    SessionAuthContext, SessionTransport, VideoSinkDyn, VideoSourceDyn,
+    ControlChannelDyn, ControlConsent, FrameSink, GrantDecision, GrantSessionValidator,
+    GrantValidator, PushResult, SessionAuthContext, SessionTransport, VideoSinkDyn, VideoSourceDyn,
 };
 pub use event::{
     LifecycleEvent, LifecycleStream, QualitySample, SessionId, StopReason, StreamDescriptor,

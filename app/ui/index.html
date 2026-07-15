@@ -36,7 +36,8 @@
           <div class="card-cta">Enter a ticket →</div>
         </button>
       </div>
-      <p class="foot-note">View-only in the alpha — no remote click or keyboard control.</p>
+      <p class="foot-note">Viewing works everywhere. Remote control (macOS host) asks the owner to
+        approve, needs macOS input permission, and can be stopped anytime.</p>
     </section>
 
     <!-- ── Share (host role) ──────────────────────────────────────────────────────────────────── -->
@@ -69,6 +70,19 @@
           </div>
         </div>
       </div>
+
+      <div id="control-consent" hidden>
+        <div class="consent-card danger-card">
+          <p class="consent-title">The viewer wants to control this screen</p>
+          <p class="consent-note">They are asking to <strong>click and type</strong> on your machine
+            (<span id="control-caps">input</span>). You stay in charge — Stop sharing ends it instantly,
+            and macOS still blocks typing into password fields.</p>
+          <div class="consent-actions">
+            <button id="control-deny">Keep view-only</button>
+            <button id="control-allow" class="danger">Allow control</button>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- ── Connect (viewer role) ──────────────────────────────────────────────────────────────── -->
@@ -83,6 +97,7 @@
           spellcheck="false"
         />
         <button id="connect">Connect</button>
+        <button id="control" disabled title="Ask the host's owner to let you click and type">Take control</button>
         <button id="stop" disabled>Disconnect</button>
       </div>
       <canvas id="screen"></canvas>

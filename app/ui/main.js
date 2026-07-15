@@ -163,6 +163,7 @@ function onFrame(bytes) {
 const ticketInput = document.getElementById("ticket");
 const connectBtn = document.getElementById("connect");
 const stopBtn = document.getElementById("stop");
+const controlBtn = document.getElementById("control");
 const banner = document.getElementById("banner");
 
 let active = false; // a viewer session is live
@@ -186,6 +187,9 @@ function setLive(isLive) {
   ticketInput.disabled = isLive;
   stopBtn.disabled = !isLive;
   annotations.show(isLive);
+  setControlling(false);
+  controlBtn.disabled = !isLive;
+  controlBtn.textContent = "Take control";
 }
 
 async function startSession(ticket) {
@@ -306,6 +310,30 @@ document.getElementById("deny").addEventListener("click", () => {
   invoke("respond_consent", { allow: false });
 });
 
+// Control-lease consent (Phase 3, Invariant 1): a distinct, higher-stakes Allow/Deny for OS input.
+const controlConsent = document.getElementById("control-consent");
+const controlCaps = document.getElementById("control-caps");
+listen("control-consent-request", (e) => {
+  const caps = Array.isArray(e.payload) ? e.payload.join(", ") : "input";
+  controlCaps.textContent = caps || "input";
+  controlConsent.hidden = false;
+});
+listen("control-consent-closed", () => { controlConsent.hidden = true; });
+document.getElementById("control-allow").addEventListener("click", () => {
+  controlConsent.hidden = true;
+  invoke("respond_control_consent", { allow: true });
+});
+document.getElementById("control-deny").addEventListener("click", () => {
+  controlConsent.hidden = true;
+  invoke("respond_control_consent", { allow: false });
+});
+// The sharer's indicator reflects whether the viewer currently has OS control.
+listen("share-control", (e) => {
+  const controlling = !!e.payload;
+  shareIndicator.textContent = controlling ? "● REMOTE CONTROL ACTIVE" : "● REMOTE VIEWING ACTIVE";
+  shareIndicator.className = controlling ? "indicator control" : "indicator live";
+});
+
 // ── Remote pointer (this viewer's cursor → shown on the host's screen) ─────────────────────────
 // Track the cursor over the shared video and stream its position to the host (throttled). Purely
 // visual — not remote control. Coordinates normalized to the *video content* rect (object-fit).
@@ -343,6 +371,106 @@ window.addEventListener("pointermove", trackPointer);
 window.addEventListener("pointerleave", () => {
   if (active) invoke("send_pointer", { x: 0, y: 0, visible: false });
 });
+
+// ── Remote control (Phase 3): forward this viewer's clicks/keys to the host's OS ─────────────────
+// Only when we hold the lease (`controlling`). The host re-checks every event (lease/generation/seq/
+// capability, Inv 15) — this is a request, never authority. Coordinates are normalized to the video
+// content rect, exactly like the visual pointer.
+let controlling = false;
+let lastMoveAt = 0;
+
+function setControlling(on) {
+  controlling = on && active;
+  if (controlBtn) {
+    controlBtn.textContent = controlling ? "Controlling — click to stop" : "Take control";
+    controlBtn.classList.toggle("armed", controlling);
+  }
+  if (banner) {
+    banner.textContent = controlling ? "● CONTROLLING remote screen" : "● LIVE — viewing remote screen";
+  }
+}
+
+// Normalized 0..=65535 of the video content rect, or null if outside it.
+function normInput(e) {
+  const r = videoContentRect();
+  if (r.width <= 0 || r.height <= 0) return null;
+  const nx = (e.clientX - r.left) / r.width;
+  const ny = (e.clientY - r.top) / r.height;
+  if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null;
+  return { nx: Math.round(nx * 65535), ny: Math.round(ny * 65535) };
+}
+
+function modifierBits(e) {
+  return (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+}
+
+// JS KeyboardEvent.code → USB-HID Keyboard/Keypad usage (page 0x07). Unmapped keys are ignored.
+function codeToHid(code) {
+  if (/^Key[A-Z]$/.test(code)) return 0x04 + (code.charCodeAt(3) - 65);
+  if (/^Digit[1-9]$/.test(code)) return 0x1e + (code.charCodeAt(5) - 49);
+  if (code === "Digit0") return 0x27;
+  return {
+    Enter: 0x28, Escape: 0x29, Backspace: 0x2a, Tab: 0x2b, Space: 0x2c,
+    Minus: 0x2d, Equal: 0x2e, BracketLeft: 0x2f, BracketRight: 0x30, Backslash: 0x31,
+    Semicolon: 0x33, Quote: 0x34, Backquote: 0x35, Comma: 0x36, Period: 0x37, Slash: 0x38,
+    CapsLock: 0x39, ArrowRight: 0x4f, ArrowLeft: 0x50, ArrowDown: 0x51, ArrowUp: 0x52,
+    ControlLeft: 0xe0, ShiftLeft: 0xe1, AltLeft: 0xe2, MetaLeft: 0xe3,
+    ControlRight: 0xe4, ShiftRight: 0xe5, AltRight: 0xe6, MetaRight: 0xe7,
+  }[code];
+}
+
+controlBtn.addEventListener("click", async () => {
+  if (!active) return;
+  if (controlling) { setControlling(false); return; }
+  controlBtn.textContent = "Requesting…";
+  invoke("request_control");
+  // Poll until the host grants (its owner must Allow) — up to ~15 s, then give up.
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    let held = false;
+    try { held = await invoke("is_controlling"); } catch (_) {}
+    if (held) { setControlling(true); return; }
+    if (!active) return;
+  }
+  setControlling(false);
+});
+
+// Pointer + keyboard forwarding. All guarded on `controlling`; when active they preventDefault so the
+// webview itself doesn't act on the input.
+window.addEventListener("pointermove", (e) => {
+  if (!controlling) return;
+  const now = performance.now();
+  if (now - lastMoveAt < 8) return; // ~120 Hz cap
+  lastMoveAt = now;
+  const p = normInput(e);
+  if (p) invoke("input_pointer_move", { nx: p.nx, ny: p.ny });
+});
+function forwardButton(e, down) {
+  if (!controlling) return;
+  const p = normInput(e);
+  if (!p) return;
+  e.preventDefault();
+  const button = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
+  invoke("input_pointer_button", { nx: p.nx, ny: p.ny, button, down });
+}
+window.addEventListener("pointerdown", (e) => forwardButton(e, true));
+window.addEventListener("pointerup", (e) => forwardButton(e, false));
+window.addEventListener("contextmenu", (e) => { if (controlling) e.preventDefault(); });
+window.addEventListener("wheel", (e) => {
+  if (!controlling) return;
+  e.preventDefault();
+  const clamp = (v) => Math.max(-32768, Math.min(32767, Math.round(-v / 40)));
+  invoke("input_pointer_wheel", { dx: clamp(e.deltaX), dy: clamp(e.deltaY) });
+}, { passive: false });
+function forwardKey(e, down) {
+  if (!controlling) return;
+  const hid = codeToHid(e.code);
+  if (hid === undefined) return;
+  e.preventDefault();
+  invoke("input_key", { hidUsage: hid, down, modifiers: modifierBits(e) });
+}
+window.addEventListener("keydown", (e) => forwardKey(e, true));
+window.addEventListener("keyup", (e) => forwardKey(e, false));
 
 // ── Annotations (viewer-side markup) ───────────────────────────────────────────────────────────
 // A transparent overlay the viewer draws on: pen / arrow / rectangle / highlighter. Not remote

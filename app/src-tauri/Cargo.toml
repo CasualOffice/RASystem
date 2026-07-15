@@ -41,6 +41,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 # with the OpenH264 software encoder. The Connect (viewer) role is decode-only and works everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
 ras-media-macos = { path = "../../crates/ras-media-macos" }
+# Phase-3 OS-input backend: the Share role feeds the viewer's input to CGEvent through this. macOS-only
+# (the parallel Windows/Linux backends are later).
+ras-input-macos = { path = "../../crates/ras-input-macos" }
 # Read each Tauri window's NSWindow.windowNumber (the CGWindowID) so we can exclude our own
 # overlay/indicator windows from the shared capture. Pure-Rust objc2, no Swift bridge.
 objc2 = "0.6"

@@ -50,6 +50,9 @@ struct ConnectedSession {
     _endpoint: Arc<Endpoint>,
     controller: Arc<ControllerSession>,
     _events: LifecycleStream,
+    /// Monotonic per-session input sequence (Phase 3): the host rejects any `seq ≤ last_seen`, so this
+    /// must strictly increase across every `Input` this viewer sends under its lease.
+    input_seq: std::sync::atomic::AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -120,7 +123,7 @@ async fn connect_to_host(
 ) -> Result<(), String> {
     use ras_core::grant::{fresh_id, AccessRequest, MAX_REQUEST_TTL_MS};
     use ras_core::identity::SoftwareKeyStore;
-    use ras_core::policy::phase2_default_policy;
+    use ras_core::policy::phase3_default_policy;
     use ras_core::transport::EndpointAddr;
     use ras_core::{ControllerSessionConfig, IrohSessionTransport};
     use ras_protocol::{AccessOutcome, BootstrapMsg, PROTOCOL_VERSION};
@@ -158,7 +161,10 @@ async fn connect_to_host(
         host_id,
         "Casual RAS viewer".to_string(),
         my_endpoint_id,
-        phase2_default_policy(), // request the view-only capability set
+        // Request the Phase-3 capability set so the grant's ceiling can include OS input. This only
+        // sets what the controller *may later ask for*; actually injecting still needs a separate
+        // control-lease consent (Invariant 1) — the grant is the coarse gate, the lease the fine one.
+        phase3_default_policy(),
         "remote support".to_string(),
         now,
         now + MAX_REQUEST_TTL_MS,
@@ -198,6 +204,7 @@ async fn connect_to_host(
         _endpoint: endpoint,
         controller,
         _events: events,
+        input_seq: std::sync::atomic::AtomicU64::new(0),
     });
     Ok(())
 }
@@ -242,6 +249,127 @@ async fn request_keyframe(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+// ─── Connect role: OS-input control (Phase 3) ────────────────────────────────────────────────────
+
+/// Request the OS-input control lease from the host (Phase 3). The host prompts its local user
+/// (Invariant 1); on Allow it replies with a lease and the viewer's subsequent input is injected.
+/// No-op unless a viewer session is live. Requesting is not controlling — input flows only once the
+/// host has granted the lease (surfaced via `is_controlling`).
+#[tauri::command]
+async fn request_control(state: State<'_, AppState>) -> Result<(), String> {
+    let c = lock(&state.session).as_ref().map(|s| s.controller.clone());
+    if let Some(c) = c {
+        c.request_control(vec![
+            "pointer.move".into(),
+            "pointer.click".into(),
+            "pointer.scroll".into(),
+            "keyboard.key".into(),
+        ]);
+    }
+    Ok(())
+}
+
+/// Whether this viewer currently holds an OS-input lease (i.e. its input is being injected). The UI
+/// polls this to reflect control state and to gate its input capture.
+#[tauri::command]
+async fn is_controlling(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(lock(&state.session)
+        .as_ref()
+        .and_then(|s| s.controller.current_lease())
+        .is_some())
+}
+
+/// Stamp and forward one OS-input action under the held lease. No-op if no lease is held (the host
+/// would reject it anyway — this just avoids the round-trip). The host re-checks lease/generation/seq/
+/// capability per message (ADR-069): this is a claim, not authority.
+fn send_input_action(state: &State<'_, AppState>, action: ras_protocol::InputAction) {
+    let guard = lock(&state.session);
+    if let Some(s) = guard.as_ref() {
+        if let Some((lease_id, generation)) = s.controller.current_lease() {
+            let seq = s
+                .input_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            s.controller.send_input(ras_protocol::InputEnvelope {
+                lease_id,
+                generation,
+                seq,
+                action,
+            });
+        }
+    }
+}
+
+/// Move the host's OS pointer to a normalized position (`0..=65535`) on the shared display.
+#[tauri::command]
+async fn input_pointer_move(state: State<'_, AppState>, nx: u16, ny: u16) -> Result<(), String> {
+    send_input_action(
+        &state,
+        ras_protocol::InputAction::PointerMove {
+            display_id: 0,
+            nx,
+            ny,
+            layout_version: 0,
+        },
+    );
+    Ok(())
+}
+
+/// Press or release a pointer button (`"left"`/`"right"`/`"middle"`) at a normalized position.
+#[tauri::command]
+async fn input_pointer_button(
+    state: State<'_, AppState>,
+    nx: u16,
+    ny: u16,
+    button: String,
+    down: bool,
+) -> Result<(), String> {
+    let button = match button.as_str() {
+        "right" => ras_protocol::PointerButton::Right,
+        "middle" => ras_protocol::PointerButton::Middle,
+        _ => ras_protocol::PointerButton::Left,
+    };
+    send_input_action(
+        &state,
+        ras_protocol::InputAction::PointerButton {
+            display_id: 0,
+            nx,
+            ny,
+            layout_version: 0,
+            button,
+            down,
+        },
+    );
+    Ok(())
+}
+
+/// Scroll by notched deltas (clamped `i16`).
+#[tauri::command]
+async fn input_pointer_wheel(state: State<'_, AppState>, dx: i16, dy: i16) -> Result<(), String> {
+    send_input_action(&state, ras_protocol::InputAction::PointerWheel { dx, dy });
+    Ok(())
+}
+
+/// Press or release a physical key by USB-HID usage (+ modifier bitset: 1 shift, 2 ctrl, 4 alt,
+/// 8 cmd). Never a keysym — the host maps HID → OS keycode (Inv 6).
+#[tauri::command]
+async fn input_key(
+    state: State<'_, AppState>,
+    hid_usage: u16,
+    down: bool,
+    modifiers: u8,
+) -> Result<(), String> {
+    send_input_action(
+        &state,
+        ras_protocol::InputAction::KeyEvent {
+            hid_usage,
+            down,
+            modifiers,
+        },
+    );
+    Ok(())
+}
+
 // ─── Share role (agent) ──────────────────────────────────────────────────────────────────────────
 
 /// The sharer side. `session` is `Some` while a share is active; `consent` is the local Allow/Deny
@@ -262,6 +390,9 @@ struct ShareSession {
 struct LocalConsent {
     app: tauri::AppHandle,
     pending: Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
+    /// A separate pending slot for the Phase-3 **control-lease** consent (Invariant 1): requesting OS
+    /// input is a distinct, higher-stakes act than viewing, so it re-prompts on its own channel.
+    pending_control: Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
 }
 
 impl LocalConsent {
@@ -269,12 +400,20 @@ impl LocalConsent {
         Self {
             app,
             pending: Mutex::new(None),
+            pending_control: Mutex::new(None),
         }
     }
 
     /// Deliver the local user's decision to a waiting `prompt`. Extra/late calls are no-ops.
     fn respond(&self, allow: bool) {
         if let Some(tx) = lock(&self.pending).take() {
+            let _ = tx.send(allow);
+        }
+    }
+
+    /// Deliver the local user's decision to a waiting control-consent prompt. Late calls are no-ops.
+    fn respond_control(&self, allow: bool) {
+        if let Some(tx) = lock(&self.pending_control).take() {
             let _ = tx.send(allow);
         }
     }
@@ -293,6 +432,34 @@ impl LocalConsent {
         *lock(&self.pending) = None;
         let _ = self.app.emit("consent-closed", ());
         allow
+    }
+}
+
+/// Phase-3 control-lease consent (Invariant 1): when a connected viewer requests OS input, prompt the
+/// local user on a distinct channel and return the consented subset (Allow ⇒ exactly what was asked,
+/// Deny or a 90 s silence ⇒ empty = denied, fail-closed). The host clamps this again to grant ∩ policy.
+#[async_trait::async_trait]
+impl ras_core::ControlConsent for LocalConsent {
+    async fn consent_to_control(
+        &self,
+        requested: &ras_core::policy::CapabilitySet,
+    ) -> ras_core::policy::CapabilitySet {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *lock(&self.pending_control) = Some(tx);
+        // Surface the human-readable requested caps so the panel can list what input is being asked for.
+        let caps: Vec<String> = requested.iter().cloned().collect();
+        let _ = self.app.emit("control-consent-request", caps);
+        let allow = matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(90), rx).await,
+            Ok(Ok(true))
+        );
+        *lock(&self.pending_control) = None;
+        let _ = self.app.emit("control-consent-closed", ());
+        if allow {
+            requested.clone()
+        } else {
+            ras_core::policy::CapabilitySet::new()
+        }
     }
 }
 
@@ -319,6 +486,12 @@ fn short_id(id: &[u8; 32]) -> String {
 #[tauri::command]
 fn respond_consent(state: State<'_, AppState>, allow: bool) {
     state.share.consent.respond(allow);
+}
+
+/// Deliver the local user's Allow/Deny for a pending **control-lease** request (Phase 3, Invariant 1).
+#[tauri::command]
+fn respond_control_consent(state: State<'_, AppState>, allow: bool) {
+    state.share.consent.respond_control(allow);
 }
 
 /// Stop the whole share (drop the ticket, stop accepting, end any live viewer). Idempotent.
@@ -414,7 +587,7 @@ async fn run_share(
     // trusted-controller registry is a later step.
     use ras_core::grant::{LocalHostGrantIssuer, NonceCache, MAX_REQUEST_TTL_MS};
     use ras_core::identity::{KeyStore, SoftwareKeyStore};
-    use ras_core::policy::phase2_default_policy;
+    use ras_core::policy::phase3_default_policy;
     let host_ks = match SoftwareKeyStore::generate() {
         Ok(k) => k,
         Err(_) => {
@@ -425,7 +598,7 @@ async fn run_share(
     };
     let host_id = host_ks.public_key();
     let host_endpoint_id = endpoint.id().0;
-    let issuer = LocalHostGrantIssuer::new(host_ks, phase2_default_policy(), 1);
+    let issuer = LocalHostGrantIssuer::new(host_ks, phase3_default_policy(), 1);
     // Shared replay cache for AccessRequest nonces across bootstrap connections (the accept loop
     // handles one connection at a time, so a `&mut` borrow suffices).
     let mut nonces = NonceCache::new(MAX_REQUEST_TTL_MS, 4096);
@@ -453,7 +626,9 @@ async fn run_share(
                 )
                 .await;
             }
-            Ok(Some(session)) => serve_one(&app, &endpoint, session, host_id, &mut stop).await,
+            Ok(Some(session)) => {
+                serve_one(&app, &endpoint, session, host_id, &consent, &mut stop).await;
+            }
             Ok(None) => break, // endpoint closed
             Err(_) => continue,
         }
@@ -515,7 +690,7 @@ async fn handle_bootstrap(
         fresh_id, validate_access_request, AccessRequest, SessionGrantIssuer, SessionParams,
         MAX_REQUEST_TTL_MS,
     };
-    use ras_core::policy::phase2_default_policy;
+    use ras_core::policy::phase3_default_policy;
     use ras_protocol::{AccessOutcome, BootstrapMsg, ErrorCode};
 
     // The controller's transport-authenticated endpoint — the identity the grant is bound to.
@@ -580,7 +755,7 @@ async fn handle_bootstrap(
         expires_at: now + MAX_REQUEST_TTL_MS,
     };
     match issuer
-        .issue(&request, &phase2_default_policy(), &params)
+        .issue(&request, &phase3_default_policy(), &params)
         .await
     {
         Ok(grant) => {
@@ -599,6 +774,7 @@ async fn serve_one(
     endpoint: &Arc<ras_transport_iroh::Endpoint>,
     session: ras_transport_iroh::Session,
     host_id: [u8; 32],
+    consent: &Arc<LocalConsent>,
     stop: &mut tokio::sync::watch::Receiver<bool>,
 ) {
     use ras_core::{
@@ -608,6 +784,16 @@ async fn serve_one(
     use ras_media::MonitorId;
 
     let _ = app.emit("share-status", "A viewer is connecting…");
+
+    // Phase-3 OS-input backend (macOS only). Prompt for PostEvent access up front so that, by the time
+    // a viewer asks for control, `input_permitted()` is true; otherwise the host refuses the lease
+    // fail-closed. Held concretely so we can feed it the shared display's bounds (below).
+    #[cfg(target_os = "macos")]
+    let input_sink = {
+        let s = Arc::new(ras_input_macos::CgEventSink::new());
+        let _ = s.request_access();
+        s
+    };
 
     let (capture, encoder) = make_backends();
     let transport = Arc::new(IrohSessionTransport::new(endpoint.clone(), session));
@@ -622,7 +808,13 @@ async fn serve_one(
         // The session-phase gate: validate the PASETO grant the controller presents against the
         // endpoint iroh just authenticated (consent already happened in the bootstrap phase).
         Arc::new(GrantSessionValidator),
-    );
+    )
+    // The control-lease consent prompt (Invariant 1) — a second, input-specific Allow/Deny.
+    .with_control_consent(consent.clone());
+    // On macOS, feed the OS-input backend so a granted lease can actually inject (elsewhere, no
+    // backend ⇒ control requests are refused fail-closed).
+    #[cfg(target_os = "macos")]
+    let host = host.with_input_sink(input_sink.clone());
 
     // `start()` runs the handshake, then blocks in the consent gate until Allow/Deny. Deny → Err.
     let mut events = match host.start().await {
@@ -667,6 +859,29 @@ async fn serve_one(
                         let _ = ov.set_position(LogicalPosition::new(x, y));
                         let _ = ov.set_size(LogicalSize::new(width, height));
                     }
+                    // Feed the same bounds to the input backend so normalized input maps to the right
+                    // pixels on the shared display (display id 0 in the single-display MVP).
+                    #[cfg(target_os = "macos")]
+                    input_sink.set_display_bounds(
+                        0,
+                        f64::from(x),
+                        f64::from(y),
+                        f64::from(width),
+                        f64::from(height),
+                    );
+                }
+                // Control-lease lifecycle (Phase 3), content-free. Surface it so the sharer's UI can
+                // show that the viewer now has (or lost) OS-input control.
+                Some(LifecycleEvent::ControlLeaseGranted { .. }) => {
+                    let _ = app.emit("share-control", true);
+                    let _ = app.emit(
+                        "share-status",
+                        "Viewer has REMOTE CONTROL of this screen.",
+                    );
+                }
+                Some(LifecycleEvent::ControlLeaseEnded { .. }) => {
+                    let _ = app.emit("share-control", false);
+                    let _ = app.emit("share-status", "Viewer connected — REMOTE VIEWING ACTIVE.");
                 }
                 Some(LifecycleEvent::SessionEnded { .. })
                 | Some(LifecycleEvent::Revoked { .. })
@@ -708,9 +923,16 @@ fn main() {
             disconnect,
             send_pointer,
             request_keyframe,
+            request_control,
+            is_controlling,
+            input_pointer_move,
+            input_pointer_button,
+            input_pointer_wheel,
+            input_key,
             start_sharing,
             stop_sharing,
             respond_consent,
+            respond_control_consent,
         ])
         .setup(|app| {
             let consent = Arc::new(LocalConsent::new(app.handle().clone()));

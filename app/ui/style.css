@@ -306,6 +306,20 @@ body {
   background: rgba(200, 30, 30, 0.9);
   color: #fff;
 }
+.indicator.control {
+  background: rgba(230, 130, 0, 0.95);
+  color: #fff;
+}
+/* The Connect-side "Take control" button, armed while this viewer holds the OS-input lease. */
+#control.armed {
+  background: rgba(230, 130, 0, 0.95);
+  color: #fff;
+  border-color: rgba(230, 130, 0, 0.95);
+}
+/* A control-consent card reads as higher-stakes than the view-only one. */
+.danger-card {
+  border: 1px solid rgba(230, 130, 0, 0.6);
+}
 .lead {
   color: #b9b9c6;
   margin-bottom: 8px;

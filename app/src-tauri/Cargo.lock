@@ -458,6 +458,7 @@ dependencies = [
  "async-trait",
  "objc2",
  "ras-core",
+ "ras-input-macos",
  "ras-media",
  "ras-media-macos",
  "ras-media-openh264",
@@ -4625,6 +4626,11 @@ dependencies = [
 [[package]]
 name = "ras-control"
 version = "0.0.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "ras-policy",
+ "ras-protocol",
+]
 
 [[package]]
 name = "ras-core"
@@ -4662,6 +4668,15 @@ version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
+ "ras-protocol",
+]
+
+[[package]]
+name = "ras-input-macos"
+version = "0.0.0"
+dependencies = [
+ "core-graphics 0.23.2",
+ "ras-control",
  "ras-protocol",
 ]
 
