@@ -49,8 +49,9 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
 - **Phase 0 complete — Milestone M0 reached.** The design doc set is done and the Cargo workspace
   skeleton builds clean. **Phases 1 and 2 are implemented and green (M1 media/transport landed, M3
   authorization reached);** the design gates (`docs/design/phase-1-design.md`, `phase-2-design.md`)
-  are written and their spines built. **Phase 3 (M4) is at the design gate** (drafted, awaiting
-  sign-off — see below).
+  are written and their spines built. **Phase 3 (M4) enforcement core is implemented and CI-green**
+  (leases + per-message gate + macOS input backend + orchestration); the app UI + on-device input
+  verification are the remaining steps (see below).
 - **Live progress tracker:** `docs/17_ROADMAP_AND_MILESTONES.md` (per-phase ☐/◐/☑ checkboxes) is the
   single source of truth for what's done; spike measurements are recorded in
   `docs/design/phase-S-design.md §4.1`. Keep both current as work lands.
@@ -81,17 +82,28 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   drop + reduced-never-expands property, plus never-panic decoder fuzz — every crate suite passing.
   **Pending:** on-device GUI runtime verification of the two-phase flow (Tauri/WebView + Screen-Recording
   TCC — developer step).
-- **Phase 3 (remote control & collaboration → M4) — design gate drafted, awaiting sign-off.**
-  `docs/design/phase-3-design.md` is written: the OS-input wire (`ControlMsg::Input(InputEnvelope)`,
-  distinct from ADR-061's visual `Pointer`); the control-lease + generation state machine with ordered
-  issue/transfer checks; the **O(1) per-message host-side capability + lease + generation + seq gate**
-  (`LeaseManager::authorize_input` — Inv 15 / ADR-041, the RustDesk-CVE fix, off the video hot path);
-  the pure `OsInputSink` trait (`ras-control`) + unprivileged macOS **CGEvent** backend
-  (`ras-input-macos`, PostEvent-TCC-gated, Secure-Input-respecting); the emergency-stop / transfer /
-  disconnect **key-state cleanup** (`ReleaseAllKeys`, Inv 4); and the virtual multi-cursor relay
-  (Inv 5). Three open choices closed in **ADR-067/068/069 (Accepted)**. macOS is the lead input
-  platform (ADR-054/055); Windows/Linux backends are the parallel port. **Execution in progress**
-  (bottom-up per §12): `ras-policy` Phase-3 grantable set landed.
+- **Phase 3 (remote control & collaboration → M4) — enforcement core IMPLEMENTED; app + on-device
+  verification pending.** The design gate `docs/design/phase-3-design.md` is signed off
+  (**ADR-067/068/069 Accepted**) and the bottom-up crate work has landed and is CI-green:
+  - `ras-policy` `phase3_default_policy` (OS input becomes grantable behind a lease; `keyboard.text`/
+    clipboard/file/recording still withheld);
+  - `ras-protocol` **OS-input wire** (ADR-067): `InputEnvelope{lease_id, generation, seq, action}` +
+    the closed `InputAction` set + `ControlRequest/Granted/Revoked/Input` `ControlMsg` variants
+    (proto oneof 8–11, fail-closed codec + fuzz);
+  - `ras-control` **`LeaseManager`** + the **O(1) per-message gate** `authorize_input` (generation →
+    lease → expiry → seq → layout → capability), host-authoritative (ADR-069, the RustDesk-CVE fix,
+    Inv 15) — pure, `unsafe`-free, 16 tests covering the M4 matrix at the logic layer;
+  - `ras-input-macos` (ADR-068): unprivileged **CGEvent** `OsInputSink`, PostEvent-TCC-gated (not
+    Accessibility), Secure-Input-respecting, tracked-key `release_all`, empty off-macOS;
+  - `ras-core` wiring: `OsInputSink` + `ControlConsent` DI seams (fail-closed default), `LeaseManager`
+    seeded at `Active`, `ControlRequest`→consent→issue and `Input`→gate→sink in the host loop,
+    `revoke_all`+`release_all` on emergency stop / teardown (Inv 4), content-free lifecycle events,
+    and an end-to-end loopback test.
+  macOS is the lead input platform (ADR-054/055). **Still pending:** the **app** "Request control" +
+  input-caps consent UI and viewer input forwarding; the **on-device** run of the real CGEvent
+  injection + PostEvent-TCC prompt + Secure-Input drop (same constraint as every prior macOS backend);
+  the macOS global-hotkey emergency stop (no kernel SAS on macOS — SAS stays the Windows path); and
+  the **Windows** input backend (parallel port of `ras-input-macos`).
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

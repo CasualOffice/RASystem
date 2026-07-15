@@ -353,18 +353,42 @@ closed in **ADR-067** (input wire, distinct from ADR-061's visual `Pointer`), **
 a bearer token) — all **Accepted** (signed off). macOS is the lead input platform (ADR-054/055); the
 `WIN` tasks below are the parallel port. **Execution is in progress** (bottom-up per §12).
 
-**② Build — tasks**
-- ☐ `WIN` Input injection: `SendInput` ABSOLUTE|VIRTUALDESK, PMv2 manifest, normalized 0..1→pixel
-  recipe, Unicode + scan-code paths, pressed-key tracking + KEYUP-on-change.
-- ☐ `CORE` Control leases: issue/renew, generation increment on transfer, old-generation rejection.
-- ☐ `SEC` **Per-message capability enforcement, host-side** (ADR-041) — the RustDesk-CVE fix.
-- ☐ `CORE` Virtual multi-cursor relay (normalized coords, latest-wins, rate-limited); pointer-only
-  participants cannot inject.
-- ☐ `SEC`+`UI` Emergency stop: SAS-bound path + always-visible session indicator; revokes all
-  leases/channels ≤250 ms.
-- ☐ `WIN` Key-state cleanup on transfer/termination/disconnect.
-- ☐ `QA` Lease-transfer race tests; "no two controllers inject concurrently"; old-lease-input
-  rejected; emergency-stop timing.
+**② Build — tasks** (execution in progress, bottom-up per §12; macOS is the lead input platform)
+- ☑ `SEC` `ras-policy`: `phase3_default_policy` — the Phase-2 view-only set **plus** OS input behind a
+  lease (`pointer.move/click/scroll`, `keyboard.key`, `control.request/transfer`); `keyboard.text`,
+  clipboard, file, recording stay withheld by default. Property-tested (superset of Phase 2, subset of
+  catalogue, never-expands). 10 tests.
+- ☑ `CORE` `ras-protocol`: the **OS-input wire** (ADR-067) — `InputEnvelope{lease_id, generation, seq,
+  action}` + the closed `InputAction` set + `PointerButton`, and the `ControlRequest`/`ControlGranted`/
+  `ControlRevoked`/`Input` `ControlMsg` variants (proto oneof 8–11, append-only). Fail-closed codec:
+  normalized u16 coords, exact 16-byte lease id, i16/u16/u8 range checks, bounded text/caps, unset-oneof
+  rejected. 39 tests incl. fuzz.
+- ☑ `CORE` `ras-control`: **`LeaseManager`** — issue/renew/transfer (generation bump), `revoke_all`
+  (emergency stop), and the **O(1) per-message gate** `authorize_input` (generation → lease → expiry →
+  seq → layout → capability). Host-authoritative (ADR-069). 16 tests (the full M4 matrix at the logic
+  layer). Pure, `unsafe`-free.
+- ☑ `SEC` **Per-message capability enforcement, host-side** (ADR-041, the RustDesk-CVE fix) — lives in
+  `authorize_input`, checked against the host's own state, never the controller's claim.
+- ☑ `MAC` `ras-input-macos` (ADR-068): **CGEvent** `OsInputSink` — unprivileged, PostEvent-TCC-gated
+  (`CGPreflightPostEventAccess`, not Accessibility), Secure-Input-respecting; normalized→points via
+  capture geometry (Inv 6); tracked pressed keys for exact `release_all`; HID→virtual-keycode table;
+  empty off-macOS. `unsafe` confined here. Unit-tested; **live injection/TCC is on-device-pending**.
+- ☑ `CORE` `ras-core` wiring: `OsInputSink` + `ControlConsent` DI seams (fail-closed `DenyAllControl`
+  default), `LeaseManager` seeded at `Active`, `ControlRequest`→consent→issue→`ControlGranted` and
+  `Input`→gate→sink in the host loop; content-free `ControlLeaseGranted`/`InputRejected` events.
+  End-to-end loopback test (request → consent → authorized move reaches sink → un-granted key rejected
+  → emergency stop flushes keys).
+- ◐ `SEC`+`UI` Emergency stop: **lease revoke + key-state cleanup wired + tested** (`revoke_all` +
+  `release_all` in `emergency_stop`/`stop`, Inv 4). **Pending:** the app's always-visible session
+  indicator + a macOS global-hotkey stop (no kernel SAS on macOS — §7; SAS stays the Windows path).
+- ☑ `CORE` Key-state cleanup on transfer/termination/disconnect (`ReleaseAllKeys` / `release_all`,
+  macOS backend + `ras-core` release path). Windows port later.
+- ☑ `QA` Lease-transfer race + "no two controllers inject concurrently" + old-lease-input-rejected +
+  replay/expiry/capability tests (ras-control 16 + ras-core loopback + ras-protocol fuzz).
+- ☐ `UI` App: "Request control" + input-caps consent panel; forward the viewer's pointer/keyboard as
+  `Input` when it holds the lease (else the visual `Pointer`); macOS global-hotkey stop. **On-device.**
+- ☐ `WIN` Windows input backend: `SendInput` ABSOLUTE|VIRTUALDESK, PMv2 manifest, scan-code paths
+  (the parallel port of `ras-input-macos`; needs Windows hardware).
 
 **③ Exit criteria:** no two controllers inject real input concurrently by default · old lease input
 rejected after transfer · emergency stop within target time · virtual cursors responsive during video
