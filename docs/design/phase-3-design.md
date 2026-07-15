@@ -416,9 +416,12 @@ cover single-controller + one or two virtual cursors.
 Steps 1–2 also run on **transfer**, **grant expiry**, **disconnect/transport loss**, and **consent
 Deny** — anywhere the current holder loses the lease, its keys are released first.
 
-**Ordering guarantee (Inv 4):** `revoke_all` bumps the generation *before* `release_all` injects, and
-the input task checks the generation *before* every injection — so there is no window where a
-post-stop event lands. Stop is never gated behind a lease or capability check.
+**Ordering guarantee (Inv 4):** `revoke_all` bumps the generation *before* `release_all` injects, so a
+newly-arriving event fails the gate's generation check. The one remaining window — an event that
+passed the gate (advancing `last_seq`) but has not yet been dispatched when the stop lands — is closed
+by re-checking the `stop` flag *immediately before* dispatch (`emergency_stop`/`stop` set it before
+`release_input` runs): the already-authorized in-flight event is dropped, not injected. So no post-stop
+event reaches the OS. Stop is never gated behind a lease or capability check.
 
 **Platform honesty (Inv 14 caveat):** ADR-048's SAS binding (Ctrl+Alt+Del) is **Windows-specific**;
 macOS has no kernel SAS. On macOS the emergency stop is the always-visible indicator's **Stop**
