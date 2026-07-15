@@ -131,6 +131,34 @@ pub enum GrantDecision {
     Denied(ErrorCode),
 }
 
+// ---------------------------------------------------------------------------------------------
+// Phase-3 control-lease consent seam (Invariant 1). Requesting OS **input** is a distinct, higher-
+// stakes act than viewing, so it re-prompts the local user before a lease is issued. Object-safe so
+// it is injectable as `Arc<dyn ControlConsent>`.
+// ---------------------------------------------------------------------------------------------
+
+/// The local-user consent hook for an OS-input control request (Invariant 1 — the local user is the
+/// final owner; a controller never self-authorizes). Given the capabilities a controller requested,
+/// it returns the **subset** the local user consents to (empty ⇒ denied). The host then clamps that
+/// subset again against the session grant and policy (`ras-policy::grantable`) — consent can only
+/// *narrow*, never widen. Fail-closed: a timeout or dismissal returns the empty set.
+#[async_trait]
+pub trait ControlConsent: Send + Sync {
+    /// Prompt the local user; return the consented subset of `requested` (empty ⇒ denied).
+    async fn consent_to_control(&self, requested: &CapabilitySet) -> CapabilitySet;
+}
+
+/// Fail-closed default: with no consent seam wired, **no** OS-input lease is ever granted. A host that
+/// wants input must inject a real [`ControlConsent`] (the app's local Allow/Deny prompt).
+pub struct DenyAllControl;
+
+#[async_trait]
+impl ControlConsent for DenyAllControl {
+    async fn consent_to_control(&self, _requested: &CapabilitySet) -> CapabilitySet {
+        CapabilitySet::new()
+    }
+}
+
 /// The **real** session-phase authorization gate (Phase 2). Parses `access_request` as the PASETO
 /// v4.public session grant and calls [`ras_grant::validate_grant`] against the endpoint the transport
 /// just authenticated — enforcing the sender-constraint (ADR-040) at the exact moment the endpoint is

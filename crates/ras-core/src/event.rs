@@ -164,6 +164,24 @@ pub enum LifecycleEvent {
         /// Display height, logical units.
         height: u32,
     },
+    /// Host-side (Phase 3): the OS-input control lease was granted to the connected controller, at the
+    /// given generation. Content-free (no holder identity, no capability values) — audit-ready.
+    ControlLeaseGranted {
+        /// The session generation the lease was issued at (bumped on every issue/transfer).
+        generation: u32,
+    },
+    /// Host-side (Phase 3): the OS-input control lease ended or a control request was refused, with a
+    /// stable reason code. Content-free.
+    ControlLeaseEnded {
+        /// Reason (`ConsentDenied`, `CapabilityDenied`, `SessionRevoked`, …).
+        code: ErrorCode,
+    },
+    /// Host-side (Phase 3): an inbound OS-input event was rejected by the per-message gate (Inv 15),
+    /// with the stable reason code. **Content-free** — never the coordinate, key, or text (Inv 8).
+    InputRejected {
+        /// Why the event was refused (`LeaseInvalid`, `ReplayDetected`, `CapabilityDenied`, …).
+        code: ErrorCode,
+    },
 }
 
 /// The lifecycle event stream handed to the embedding app. A bounded receiver: latest-wins-ish, so

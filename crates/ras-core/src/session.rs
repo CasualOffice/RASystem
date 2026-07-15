@@ -19,7 +19,8 @@ use tokio::sync::mpsc;
 
 use crate::abr::LatencyFirstAbr;
 use crate::deps::{
-    ControlChannelDyn, DialTarget, FrameSink, GrantValidator, SessionAuthContext, SessionTransport,
+    ControlChannelDyn, ControlConsent, DenyAllControl, DialTarget, FrameSink, GrantValidator,
+    SessionAuthContext, SessionTransport,
 };
 use crate::event::{
     LifecycleEvent, LifecycleSink, LifecycleStream, QualitySample, SessionId, StopReason,
@@ -29,12 +30,22 @@ use crate::{
     deps::GrantDecision, transition, AdaptiveBitrateController, CoreError, SessionEvent,
     SessionState, Transition,
 };
+use ras_control::{LeaseManager, OsInputSink, LEASE_DEFAULT_TTL_MS};
 use ras_media::{
     CaptureOptions, ColorSpace, MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec,
     VideoEncoderBackend, VideoTransportKind, WindowId,
 };
-use ras_protocol::{ControlMsg, DecoderFeedback, ErrorCode, KeyframeReason, StreamConfigWire};
+use ras_policy::CapabilitySet;
+use ras_protocol::{
+    ControlMsg, DecoderFeedback, ErrorCode, InputEnvelope, KeyframeReason, StreamConfigWire,
+};
 use ras_transport_iroh::{DropReason, EndpointAddr, EndpointId, VideoEvent};
+
+/// The grant window the host seeds the [`LeaseManager`] with (ms). MVP is **attended-only**: the real
+/// grant `expires_at`/`session_generation` are not threaded through the authorize decision yet (there
+/// is no mid-session grant-expiry enforcement — Phase-2 Q-GEN-STORE), so the operative bound on a
+/// lease is its own ≤120 s TTL. This ceiling only prevents an absurd clamp; leases are far shorter.
+const LEASE_GRANT_WINDOW_MS: u64 = 60 * 60 * 1000;
 
 /// Phase-1 host capture rate (no fps field on `HostSessionConfig` yet).
 pub const HOST_TARGET_FPS: u32 = 30;
@@ -208,6 +219,17 @@ struct HostInner<C, E> {
     /// to the controller (it owns the control channel). Best-effort — a wedged peer must never
     /// delay the local teardown.
     bye_tx: Mutex<Option<mpsc::Sender<ErrorCode>>>,
+    /// Phase-3 OS-input backend (`ras-input-macos` in the app). `None` ⇒ this host cannot inject, so a
+    /// control request is refused. Injected via [`HostSession::with_input_sink`].
+    input_sink: Mutex<Option<Arc<dyn OsInputSink>>>,
+    /// Phase-3 control-lease consent (Invariant 1). Defaults to [`DenyAllControl`] (fail-closed — no
+    /// lease without a real local prompt). Injected via [`HostSession::with_control_consent`].
+    control_consent: Mutex<Arc<dyn ControlConsent>>,
+    /// The single OS-input lease + generation state (Inv 5/15, ADR-069). Seeded at `Active` from the
+    /// authorized capability set; `None` before authorization.
+    lease: Mutex<Option<LeaseManager>>,
+    /// The authenticated peer endpoint, captured at `Active` — the lease holder identity (informational).
+    peer_endpoint: Mutex<[u8; 32]>,
 }
 
 /// Host-side view-only session. Owns capture+encode+transmit on their own thread.
@@ -249,8 +271,36 @@ where
                 control_task: Mutex::new(None),
                 stats_task: Mutex::new(None),
                 bye_tx: Mutex::new(None),
+                input_sink: Mutex::new(None),
+                control_consent: Mutex::new(Arc::new(DenyAllControl)),
+                lease: Mutex::new(None),
+                peer_endpoint: Mutex::new([0u8; 32]),
             }),
         }
+    }
+
+    /// Inject the Phase-3 OS-input backend (e.g. `ras-input-macos`). Without one, this host refuses
+    /// every control request (it cannot inject). Additive; call before [`Self::start`].
+    #[must_use]
+    pub fn with_input_sink(self, sink: Arc<dyn OsInputSink>) -> Self {
+        *self
+            .inner
+            .input_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+        self
+    }
+
+    /// Inject the Phase-3 control-lease consent prompt (Invariant 1). Without one, control requests
+    /// are denied by the fail-closed [`DenyAllControl`]. Additive; call before [`Self::start`].
+    #[must_use]
+    pub fn with_control_consent(self, consent: Arc<dyn ControlConsent>) -> Self {
+        *self
+            .inner
+            .control_consent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = consent;
+        self
     }
 
     /// Current session state.
@@ -327,10 +377,26 @@ where
             host_id: inner.config.host_id,
             now: now_ms(),
         };
+        // The holder identity for any control lease this session issues (informational — the
+        // generation + transport authentication are what bind input). Captured before `ctx` moves it.
+        let holder = ctx.peer_identity.0;
         match inner.validator.authorize(&ctx).await? {
-            GrantDecision::Authorized(_caps) => {
-                // _caps drives the per-message capability checks in Phase 3 (view-only today).
+            GrantDecision::Authorized(caps) => {
+                // The granted capability set is the ceiling for any OS-input lease (Inv 15). Seed the
+                // per-message gate with it; a lease can only ever be a subset (Phase 3).
                 apply(&inner.state, SessionEvent::Authorized);
+                *inner
+                    .peer_endpoint
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = holder;
+                *inner
+                    .lease
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(LeaseManager::new(
+                    caps,
+                    now_ms().saturating_add(LEASE_GRANT_WINDOW_MS),
+                    0,
+                ));
             }
             GrantDecision::Denied(code) => {
                 apply(&inner.state, SessionEvent::Reject { code });
@@ -457,6 +523,8 @@ where
         if inner.stop.swap(true, Ordering::SeqCst) {
             return; // already stopped
         }
+        // Release any held keys/buttons and revoke the lease on a clean teardown too (Inv 4 cleanup).
+        release_input(inner);
         apply(&inner.state, SessionEvent::LocalStop);
         if let Some(sink) = inner
             .lifecycle
@@ -516,6 +584,9 @@ where
         if inner.stop.swap(true, Ordering::SeqCst) {
             return; // already stopping/stopped — first caller wins, revoke can't be downgraded
         }
+        // Invariant 4: revoke the lease + flush held keys before anything else — a post-stop input
+        // event is now stale at the gate (generation bumped) and every held key is released.
+        release_input(inner);
         // Audit-distinct terminal. Revoke overrides every non-terminal state.
         apply(&inner.state, SessionEvent::Revoke { code });
         if let Some(sink) = inner
@@ -720,6 +791,45 @@ async fn host_control_loop<C, E>(
                     });
                 }
             }
+            // Controller requests the OS-input control lease (Phase 3). Refuse fail-closed if this
+            // host has no input backend or lacks OS permission; else prompt the local user (Inv 1),
+            // clamp to grant ∩ policy ∩ consent, and issue. Never trust the requested caps as
+            // authority (Inv 15) — `LeaseManager::issue` re-clamps against the seeded grant caps.
+            Ok(ControlMsg::ControlRequest { capabilities }) => {
+                let requested: CapabilitySet = capabilities.into_iter().collect();
+                let decision = host_handle_control_request(inner, &requested).await;
+                match decision {
+                    Ok(lease) => {
+                        let _ = control
+                            .send(ControlMsg::ControlGranted {
+                                lease_id: lease.lease_id.0,
+                                generation: lease.generation,
+                                capabilities: lease.capabilities.iter().cloned().collect(),
+                                expires_at: lease.expires_at,
+                                signature: bytes::Bytes::new(),
+                            })
+                            .await;
+                        emit_lifecycle(
+                            inner,
+                            LifecycleEvent::ControlLeaseGranted {
+                                generation: lease.generation,
+                            },
+                        );
+                    }
+                    Err(code) => {
+                        let _ = control.send(ControlMsg::ControlRevoked { code }).await;
+                        emit_lifecycle(inner, LifecycleEvent::ControlLeaseEnded { code });
+                    }
+                }
+            }
+            // One OS-input event. The per-message gate (Inv 15 / ADR-041) runs against the host's own
+            // lease state; only a fully-authorized action reaches the sink. A rejection is surfaced as
+            // a content-free lifecycle event (never the coordinate/key/text — Inv 8).
+            Ok(ControlMsg::Input(env)) => {
+                if let Err(code) = host_handle_input(inner, &env) {
+                    emit_lifecycle(inner, LifecycleEvent::InputRejected { code });
+                }
+            }
             // Any Bye from the controller is a clean peer close — deliberately code-agnostic. A
             // controller cannot revoke the host, so a controller-claimed `SessionRevoked` is treated
             // as an ordinary close, never a privileged action (Invariants 1/15: never trust the
@@ -764,6 +874,114 @@ async fn host_control_loop<C, E>(
             }
             } // end `match msg`
         } // end tokio::select!
+    }
+}
+
+/// Emit a lifecycle event if a sink is attached (advisory — never backpressures the control loop).
+fn emit_lifecycle<C, E>(inner: &HostInner<C, E>, ev: LifecycleEvent) {
+    if let Some(sink) = inner
+        .lifecycle
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        sink.emit(ev);
+    }
+}
+
+/// Handle a `ControlRequest`: fail-closed if this host cannot inject, else local consent (Inv 1) then
+/// issue a lease clamped to grant ∩ policy ∩ consent. Consent is awaited **outside** any lock.
+async fn host_handle_control_request<C, E>(
+    inner: &HostInner<C, E>,
+    requested: &CapabilitySet,
+) -> Result<ras_control::ControlLease, ErrorCode> {
+    // Fail-closed: no backend, or the OS won't permit injection ⇒ no lease.
+    let sink = inner
+        .input_sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if !sink.is_some_and(|s| s.input_permitted()) {
+        return Err(ErrorCode::CapabilityDenied);
+    }
+    // Local consent (Invariant 1). Clone the Arc out of the lock, then await with no lock held.
+    let consent = inner
+        .control_consent
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let consented = consent.consent_to_control(requested).await;
+    if consented.is_empty() {
+        return Err(ErrorCode::ConsentDenied);
+    }
+    let holder = *inner
+        .peer_endpoint
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_ms();
+    let mut guard = inner
+        .lease
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match guard.as_mut() {
+        Some(lm) => lm
+            .issue(holder, requested, &consented, now, LEASE_DEFAULT_TTL_MS)
+            .map_err(ras_control::ControlError::code),
+        None => Err(ErrorCode::Internal),
+    }
+}
+
+/// Run one inbound `Input` event through the per-message gate (Inv 15) and, only if fully authorized,
+/// dispatch it to the OS sink. The lease lock is released before dispatch. Returns the reason code on
+/// any rejection (content-free — the caller never logs the payload, Inv 8).
+fn host_handle_input<C, E>(inner: &HostInner<C, E>, env: &InputEnvelope) -> Result<(), ErrorCode> {
+    let now = now_ms();
+    // Authorize under the lease lock (sync); `map(|_| ())` drops the borrowed action so the guard can
+    // release before we dispatch.
+    let verdict = {
+        let mut guard = inner
+            .lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.as_mut() {
+            Some(lm) => lm
+                .authorize_input(env, now)
+                .map(|_| ())
+                .map_err(ras_control::ControlError::code),
+            None => Err(ErrorCode::LeaseInvalid),
+        }
+    };
+    verdict?;
+    let sink = inner
+        .input_sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    match sink {
+        Some(s) => ras_control::dispatch(s.as_ref(), &env.action).map_err(|e| e.code),
+        None => Err(ErrorCode::InputFailed),
+    }
+}
+
+/// Revoke any active lease and flush the OS key-state (Invariant 4 key-state cleanup). Called on
+/// emergency stop and graceful teardown, before the media halt is reported to the peer. Idempotent,
+/// never blocks, never fails.
+fn release_input<C, E>(inner: &HostInner<C, E>) {
+    if let Some(lm) = inner
+        .lease
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        lm.revoke_all();
+    }
+    if let Some(sink) = inner
+        .input_sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        let _ = sink.release_all();
     }
 }
 
@@ -816,6 +1034,10 @@ enum ControlCommand {
     Feedback(DecoderFeedback),
     /// Remote-pointer position to forward to the host (best-effort; dropped if the task is behind).
     Pointer(ras_protocol::PointerUpdate),
+    /// Request the OS-input control lease from the host (Phase 3).
+    ControlRequest(Vec<String>),
+    /// One OS-input event to forward to the host (Phase 3), under a held lease.
+    Input(InputEnvelope),
     Bye,
 }
 
@@ -834,6 +1056,10 @@ struct ControllerInner {
     frames_dropped: AtomicU32,
     session_id: SessionId,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// The OS-input control lease the host granted us, if any: `(lease_id, generation)`. Set on
+    /// `ControlGranted`, cleared on `ControlRevoked` (Phase 3). The controller echoes these on each
+    /// `Input` — they are claims the host re-checks, never authority (ADR-069).
+    lease: Mutex<Option<([u8; 16], u32)>>,
 }
 
 /// Controller-side view-only session. Owns receive+decode-feed; the renderer attaches separately so
@@ -860,6 +1086,7 @@ impl ControllerSession {
                 frames_dropped: AtomicU32::new(0),
                 session_id: next_session_id(),
                 tasks: Mutex::new(Vec::new()),
+                lease: Mutex::new(None),
             }),
         }
     }
@@ -1034,6 +1261,44 @@ impl ControllerSession {
         }
     }
 
+    /// Request the OS-input control lease from the host (Phase 3). The host prompts its local user and
+    /// replies with `ControlGranted` (→ [`Self::current_lease`]) or `ControlRevoked`. Best-effort.
+    pub fn request_control(&self, capabilities: Vec<String>) {
+        let tx = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(ControlCommand::ControlRequest(capabilities));
+        }
+    }
+
+    /// Forward one OS-input event to the host under the held lease (Phase 3). The caller stamps the
+    /// envelope's `lease_id`/`generation`/`seq`; the host re-checks all of them (ADR-069). Best-effort.
+    pub fn send_input(&self, env: InputEnvelope) {
+        let tx = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(ControlCommand::Input(env));
+        }
+    }
+
+    /// The OS-input lease the host has granted this controller, if any: `(lease_id, generation)`.
+    #[must_use]
+    pub fn current_lease(&self) -> Option<([u8; 16], u32)> {
+        *self
+            .inner
+            .lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Cooperative disconnect. Applies `LocalStop`, closes tasks, emits `SessionEnded`. Returns
     /// promptly even mid-decode.
     pub async fn disconnect(&self, reason: StopReason) {
@@ -1091,6 +1356,12 @@ async fn controller_control_loop(
                 Some(ControlCommand::Pointer(p)) => {
                     if control.send(ControlMsg::Pointer(p)).await.is_err() { break; }
                 }
+                Some(ControlCommand::ControlRequest(capabilities)) => {
+                    if control.send(ControlMsg::ControlRequest { capabilities }).await.is_err() { break; }
+                }
+                Some(ControlCommand::Input(env)) => {
+                    if control.send(ControlMsg::Input(env)).await.is_err() { break; }
+                }
                 Some(ControlCommand::Bye) => {
                     // A controller leaving is a clean peer close, never a revoke — a controller
                     // cannot revoke the host (Invariants 1/13). Use the benign closure code.
@@ -1118,6 +1389,21 @@ async fn controller_control_loop(
                         sink.emit(LifecycleEvent::SessionEnded { reason });
                     }
                     break;
+                }
+                // Host granted us the OS-input lease (Phase 3): remember it so `send_input` can stamp
+                // envelopes. These are claims the host re-checks per message (ADR-069), never authority.
+                Ok(ControlMsg::ControlGranted { lease_id, generation, .. }) => {
+                    *inner
+                        .lease
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((lease_id, generation));
+                }
+                // Host revoked / refused the lease: drop it (further input will be rejected host-side).
+                Ok(ControlMsg::ControlRevoked { .. }) => {
+                    *inner
+                        .lease
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 }
                 Ok(_) => {}
                 Err(_) => {

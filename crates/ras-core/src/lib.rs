@@ -611,6 +611,191 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
+    /// End-to-end Phase-3 input: a controller requests the lease, the host consents + issues it, an
+    /// authorized pointer move reaches the OS sink, an un-granted key is rejected at the gate (Inv 15),
+    /// and an emergency stop flushes held keys + stales further input (Inv 4).
+    #[tokio::test]
+    async fn controller_input_flows_through_the_lease_gate_to_the_sink() {
+        use crate::deps::{ControlConsent, GrantDecision, GrantValidator, SessionAuthContext};
+        use ras_control::OsInputSink;
+        use ras_policy::CapabilitySet;
+        use ras_protocol::{InputAction, InputEnvelope, PointerButton};
+        use std::sync::atomic::{AtomicU32, Ordering as O};
+
+        #[derive(Default)]
+        struct RecordingSink {
+            calls: std::sync::Mutex<Vec<&'static str>>,
+            released: AtomicU32,
+        }
+        impl RecordingSink {
+            fn calls(&self) -> Vec<&'static str> {
+                self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+            }
+        }
+        impl OsInputSink for RecordingSink {
+            fn pointer_move(&self, _d: u32, _x: f32, _y: f32) -> Result<(), crate::CoreError> {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push("move");
+                Ok(())
+            }
+            fn pointer_button(
+                &self,
+                _d: u32,
+                _x: f32,
+                _y: f32,
+                _b: PointerButton,
+                _down: bool,
+            ) -> Result<(), crate::CoreError> {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push("button");
+                Ok(())
+            }
+            fn pointer_wheel(&self, _dx: i16, _dy: i16) -> Result<(), crate::CoreError> {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push("wheel");
+                Ok(())
+            }
+            fn key(&self, _u: u16, _down: bool, _m: u8) -> Result<(), crate::CoreError> {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push("key");
+                Ok(())
+            }
+            fn text(&self, _s: &str) -> Result<(), crate::CoreError> {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push("text");
+                Ok(())
+            }
+            fn release_all(&self) -> Result<(), crate::CoreError> {
+                self.released.fetch_add(1, O::Relaxed);
+                Ok(())
+            }
+            fn input_permitted(&self) -> bool {
+                true
+            }
+        }
+
+        struct AllowControl;
+        #[async_trait::async_trait]
+        impl ControlConsent for AllowControl {
+            async fn consent_to_control(&self, requested: &CapabilitySet) -> CapabilitySet {
+                requested.clone() // the local user consents to exactly what was asked
+            }
+        }
+
+        // Authorize with the full Phase-3 policy so the seeded lease manager's grant ceiling includes
+        // control.request + the input caps.
+        struct Phase3Validator;
+        #[async_trait::async_trait]
+        impl GrantValidator for Phase3Validator {
+            async fn authorize(
+                &self,
+                _ctx: &SessionAuthContext,
+            ) -> Result<GrantDecision, crate::CoreError> {
+                Ok(GrantDecision::Authorized(
+                    ras_policy::phase3_default_policy(),
+                ))
+            }
+        }
+
+        let sink = Arc::new(RecordingSink::default());
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(Phase3Validator),
+        )
+        .with_input_sink(sink.clone())
+        .with_control_consent(Arc::new(AllowControl));
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let mut host_events = host_r.unwrap();
+        let _ctrl_events = ctrl_r.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        // Request a lease for pointer only (not keyboard).
+        controller.request_control(vec!["pointer.move".into(), "pointer.click".into()]);
+        assert!(
+            wait_until(|| controller.current_lease().is_some(), 500).await,
+            "controller should receive a ControlGranted lease"
+        );
+        let (lease_id, generation) = controller.current_lease().unwrap();
+
+        // An authorized pointer move reaches the sink.
+        controller.send_input(InputEnvelope {
+            lease_id,
+            generation,
+            seq: 1,
+            action: InputAction::PointerMove {
+                display_id: 0,
+                nx: 100,
+                ny: 200,
+                layout_version: 0,
+            },
+        });
+        assert!(
+            wait_until(|| sink.calls().contains(&"move"), 500).await,
+            "an authorized pointer move must reach the OS sink"
+        );
+
+        // A key event is OUTSIDE the granted caps → rejected at the gate; never reaches the sink.
+        controller.send_input(InputEnvelope {
+            lease_id,
+            generation,
+            seq: 2,
+            action: InputAction::KeyEvent {
+                hid_usage: 0x04,
+                down: true,
+                modifiers: 0,
+            },
+        });
+        let mut saw_reject = false;
+        for _ in 0..50 {
+            while let Ok(ev) = host_events.try_recv() {
+                if let LifecycleEvent::InputRejected {
+                    code: ras_protocol::ErrorCode::CapabilityDenied,
+                } = ev
+                {
+                    saw_reject = true;
+                }
+            }
+            if saw_reject {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(saw_reject, "an un-granted key must be rejected (Inv 15)");
+        assert!(
+            !sink.calls().contains(&"key"),
+            "a rejected key must never reach the OS sink"
+        );
+
+        // Emergency stop flushes held keys (release_all) and stales any further input (Inv 4).
+        host.emergency_stop(ras_protocol::ErrorCode::SessionRevoked)
+            .await;
+        assert!(
+            sink.released.load(O::Relaxed) >= 1,
+            "emergency stop must flush held keys via release_all"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+    }
+
     #[tokio::test]
     async fn controller_suspends_then_terminates_when_transport_drops() {
         let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
