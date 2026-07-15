@@ -18,12 +18,14 @@ mod paseto;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use ras_bootstrap::{NonceCache, UnixMillis};
 use ras_identity::{verify, KeyStore};
 use ras_policy::{grantable, recognize, CapabilitySet};
 use ras_protocol::{ErrorCode, RasError, PROTOCOL_VERSION};
 
 pub use paseto::V4_PUBLIC_HEADER;
+// Re-exported: `validate_access_request` takes `&mut NonceCache`, and `UnixMillis` is the time unit
+// across this crate's public API, so downstream callers reach both without a direct `ras-bootstrap` dep.
+pub use ras_bootstrap::{NonceCache, UnixMillis};
 
 /// Grant/request errors reuse the shared taxonomy.
 pub type GrantError = RasError;

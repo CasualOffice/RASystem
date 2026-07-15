@@ -294,8 +294,20 @@ sequence (bottom-up: policy → identity → wire → bootstrap → grant → co
   grant in `ControlMsg::AuthEnvelope`; the host reads it before authorizing. Loopback e2e tests moved
   to concurrent `join!` (the host now needs the controller mid-handshake, as over real iroh). Direct
   validator test proves valid→Authorized, wrong-endpoint→IdentityMismatch, tampered→GrantInvalid; full
-  ras-core suite (32 incl. real-iroh e2e) green. **Pending:** the app's two-phase bootstrap wiring +
-  M3 security-test matrix (next).
+  ras-core suite (32 incl. real-iroh e2e) green.
+- ◐ `UI` **App two-phase authorization flow wired (`app/`).** Connect now runs the real bootstrap
+  handshake before any session: it dials the **bootstrap ALPN**, sends `ClientHello`, receives
+  `HostHello`, builds and **signs** an `AccessRequest` with its controller keystore, and only on an
+  `AccessDecision{grant}` opens the session ALPN with `.with_grant(grant)` — no grant, no pixels.
+  Share builds a per-share host identity + `LocalHostGrantIssuer` (view-only `phase2_default_policy`)
+  + a `NonceCache`, branches its accept loop on `session.is_bootstrap()` to a `handle_bootstrap`
+  routine that decodes the `AccessRequest`, runs `validate_access_request` (version→signature→host→
+  endpoint→freshness→nonce→capability), gates on **real local Allow/Deny consent** (Invariant 1;
+  `LocalConsent::prompt`, replacing the old `GrantValidator` shim), and issues the PASETO grant on
+  Allow (fail-closed `deny` on every rejected check). Session serving now uses `GrantSessionValidator`
+  + `.with_host_id`, so the sender-constraint is re-checked at the session gate. **Pending:** the M3
+  security-test matrix write-up, and on-device GUI runtime verification of the flow (Tauri/WebView +
+  Screen-Recording TCC — the developer's on-device step, same as every prior app change).
 - ◐ `NET` `ras-transport-iroh` **bootstrap ALPN** (`casual-ras/bootstrap/1`): the endpoint advertises
   it alongside the session ALPN; `connect_bootstrap`/`connect_direct_bootstrap` dial it and
   `Session::is_bootstrap()` routes an accepted connection to the consent/issuance handler (fail-closed:
@@ -303,7 +315,7 @@ sequence (bottom-up: policy → identity → wire → bootstrap → grant → co
   codec over one bidi stream — **controller opens + speaks first** (`ClientHello → AccessRequest`), host
   accepts (mirror of the session channel's host-first order). Hermetic tests: a real two-endpoint iroh
   bootstrap handshake (ClientHello/AccessRequest → HostHello/AccessDecision, grant opaque) + an
-  in-memory framed round-trip + the session-ALPN negative-routing assertion. **Pending:** app wiring.
+  in-memory framed round-trip + the session-ALPN negative-routing assertion.
 - ◐ `SEC` Replay defense: **nonce cache** (bounded, TTL-swept, fail-closed) shared by request
   validation; **ticket generation + consumed set** (in `ras-bootstrap`). Session-generation field is
   carried on the grant; the lease/generation *runtime* is Phase 3.

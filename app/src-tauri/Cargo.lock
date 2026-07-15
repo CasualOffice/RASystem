@@ -4614,6 +4614,15 @@ name = "ras-audit"
 version = "0.0.0"
 
 [[package]]
+name = "ras-bootstrap"
+version = "0.0.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "ras-identity",
+ "ras-protocol",
+]
+
+[[package]]
 name = "ras-control"
 version = "0.0.0"
 
@@ -4637,10 +4646,24 @@ dependencies = [
 [[package]]
 name = "ras-grant"
 version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "getrandom 0.2.17",
+ "ras-bootstrap",
+ "ras-identity",
+ "ras-policy",
+ "ras-protocol",
+]
 
 [[package]]
 name = "ras-identity"
 version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "ras-protocol",
+]
 
 [[package]]
 name = "ras-media"

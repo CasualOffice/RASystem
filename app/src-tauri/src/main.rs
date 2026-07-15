@@ -56,6 +56,16 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Wall-clock ms since the Unix epoch, for the Phase-2 authorization timestamps (request/grant
+/// validity windows). A pre-epoch clock saturates to 0 (fail-closed: everything reads "not yet
+/// valid" rather than silently valid).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 // ─── Connect role (viewer) ─────────────────────────────────────────────────────────────────────
 
 /// A [`FrameSink`] forwarding the decoded-stream config + each encoded access unit to the webview
@@ -96,25 +106,85 @@ impl FrameSink for ChannelFrameSink {
 
 /// Dial a host's **connection ticket** over iroh and render its screen. Works on any platform (the
 /// viewer only decodes).
+///
+/// Phase 2 is a **two-phase** dial from **one** endpoint (so both connections share the controller's
+/// authenticated endpoint id, which the sender-constraint binds): first the **bootstrap ALPN** —
+/// prove identity, send a signed `AccessRequest`, and receive a PASETO grant (or a denial) — then the
+/// **session ALPN**, presenting that grant in the `AuthEnvelope`. No pixels flow until the host has
+/// validated the grant against this endpoint.
 #[tauri::command]
 async fn connect_to_host(
     state: State<'_, AppState>,
     ticket: String,
     on_frame: Channel<InvokeResponseBody>,
 ) -> Result<(), String> {
+    use ras_core::grant::{fresh_id, AccessRequest, MAX_REQUEST_TTL_MS};
+    use ras_core::identity::SoftwareKeyStore;
+    use ras_core::policy::phase2_default_policy;
     use ras_core::transport::EndpointAddr;
     use ras_core::{ControllerSessionConfig, IrohSessionTransport};
+    use ras_protocol::{AccessOutcome, BootstrapMsg, PROTOCOL_VERSION};
 
     // Tear down any prior viewer session first.
     let _ = disconnect(state.clone()).await;
 
     let target = EndpointAddr::from_ticket(ticket.trim()).map_err(|e| e.to_string())?;
     let endpoint = Arc::new(Endpoint::bind().await.map_err(|e| e.to_string())?);
-    // Dial the host: tries direct addrs + relay from the ticket, falls back to discovery-by-id.
+    let my_endpoint_id = endpoint.id().0;
+    // The controller's application identity (ephemeral per run in the MVP — persistence + a paired
+    // trusted-controller registry is a later step).
+    let ks = SoftwareKeyStore::generate().map_err(|e| e.to_string())?;
+
+    // ── Bootstrap phase (casual-ras/bootstrap/1): request access, receive a grant. ──
+    let boot_conn = endpoint
+        .connect_bootstrap(&target)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut boot = boot_conn.bootstrap().await.map_err(|e| e.to_string())?;
+    boot.send(BootstrapMsg::ClientHello {
+        protocol_version: PROTOCOL_VERSION,
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let host_id = match boot.recv().await.map_err(|e| e.to_string())? {
+        BootstrapMsg::HostHello { host_id, .. } => host_id,
+        _ => return Err("unexpected bootstrap reply from host".into()),
+    };
+    let now = now_ms();
+    let request = AccessRequest::signed(
+        &ks,
+        fresh_id().map_err(|e| e.to_string())?,
+        PROTOCOL_VERSION,
+        host_id,
+        "Casual RAS viewer".to_string(),
+        my_endpoint_id,
+        phase2_default_policy(), // request the view-only capability set
+        "remote support".to_string(),
+        now,
+        now + MAX_REQUEST_TTL_MS,
+        fresh_id().map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    boot.send(BootstrapMsg::AccessRequest {
+        canonical: request.encode(),
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let grant = match boot.recv().await.map_err(|e| e.to_string())? {
+        BootstrapMsg::AccessDecision(AccessOutcome::Allowed { grant }) => grant,
+        BootstrapMsg::AccessDecision(AccessOutcome::Denied { code }) => {
+            return Err(format!("access denied ({code})"));
+        }
+        _ => return Err("unexpected bootstrap decision from host".into()),
+    };
+    drop(boot);
+    drop(boot_conn); // close the bootstrap connection; the endpoint lives on for the session dial
+
+    // ── Session phase (casual-ras/1): present the grant, then render. ──
     let session = endpoint.connect(&target).await.map_err(|e| e.to_string())?;
     let transport = Arc::new(IrohSessionTransport::new(endpoint.clone(), session));
     let controller = Arc::new(ControllerSession::new(
-        ControllerSessionConfig::new(target),
+        ControllerSessionConfig::new(target).with_grant(grant),
         transport,
     ));
 
@@ -202,41 +272,27 @@ impl LocalConsent {
         }
     }
 
-    /// Deliver the local user's decision to a waiting `authorize`. Extra/late calls are no-ops.
+    /// Deliver the local user's decision to a waiting `prompt`. Extra/late calls are no-ops.
     fn respond(&self, allow: bool) {
         if let Some(tx) = lock(&self.pending).take() {
             let _ = tx.send(allow);
         }
     }
-}
 
-#[async_trait::async_trait]
-impl ras_core::GrantValidator for LocalConsent {
-    async fn authorize(
-        &self,
-        ctx: &ras_core::SessionAuthContext,
-    ) -> Result<ras_core::GrantDecision, CoreError> {
-        use ras_core::GrantDecision;
-        use ras_protocol::ErrorCode;
-
+    /// Prompt the local user (Invariant 1) and block until they answer, emitting `consent-request`
+    /// with the requester's short identity. A 90 s silence **denies** (fail-closed) so a pending
+    /// request can't hang the share forever. Returns `true` only on an explicit Allow.
+    async fn prompt(&self, peer_short: String) -> bool {
         let (tx, rx) = tokio::sync::oneshot::channel();
         *lock(&self.pending) = Some(tx);
-
-        // Ask the local user. The panel shows Allow/Deny with the peer's short identity.
-        let _ = self
-            .app
-            .emit("consent-request", short_id(&ctx.peer_identity.0));
-
-        // Wait for the click; a 90 s silence denies (fail-closed) so a session can't hang forever.
-        // On Allow the local user consents to the Phase-2 view-only capability set (screen view +
-        // visual pointer + annotation); the session carries it for the per-message checks (Inv 15).
-        let decision = match tokio::time::timeout(std::time::Duration::from_secs(90), rx).await {
-            Ok(Ok(true)) => GrantDecision::Authorized(ras_core::policy::phase2_default_policy()),
-            _ => GrantDecision::Denied(ErrorCode::ConsentDenied),
-        };
+        let _ = self.app.emit("consent-request", peer_short);
+        let allow = matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(90), rx).await,
+            Ok(Ok(true))
+        );
         *lock(&self.pending) = None;
         let _ = self.app.emit("consent-closed", ());
-        Ok(decision)
+        allow
     }
 }
 
@@ -352,6 +408,28 @@ async fn run_share(
     let _ = app.emit("share-ticket", endpoint.addr().to_ticket());
     let _ = app.emit("share-status", "Waiting for a viewer to connect…");
 
+    // This host's application identity + grant issuer (Phase 2). Ephemeral per share in the MVP; the
+    // issuer's key IS the host id, so the grants it mints verify against the same key the session-phase
+    // validator checks (`GrantSessionValidator` uses `ctx.host_id`). A persistent identity + a
+    // trusted-controller registry is a later step.
+    use ras_core::grant::{LocalHostGrantIssuer, NonceCache, MAX_REQUEST_TTL_MS};
+    use ras_core::identity::{KeyStore, SoftwareKeyStore};
+    use ras_core::policy::phase2_default_policy;
+    let host_ks = match SoftwareKeyStore::generate() {
+        Ok(k) => k,
+        Err(_) => {
+            let _ = app.emit("share-status", "Failed to create a host identity.");
+            let _ = app.emit("share-active", false);
+            return;
+        }
+    };
+    let host_id = host_ks.public_key();
+    let host_endpoint_id = endpoint.id().0;
+    let issuer = LocalHostGrantIssuer::new(host_ks, phase2_default_policy(), 1);
+    // Shared replay cache for AccessRequest nonces across bootstrap connections (the accept loop
+    // handles one connection at a time, so a `&mut` borrow suffices).
+    let mut nonces = NonceCache::new(MAX_REQUEST_TTL_MS, 4096);
+
     loop {
         if *stop.borrow() {
             break;
@@ -361,7 +439,21 @@ async fn run_share(
             a = endpoint.accept() => a,
         };
         match accepted {
-            Ok(Some(session)) => serve_one(&app, &endpoint, session, &mut stop, &consent).await,
+            // Route by negotiated ALPN: a bootstrap connection runs consent + issuance; a session
+            // connection presents the resulting grant and streams frames.
+            Ok(Some(session)) if session.is_bootstrap() => {
+                handle_bootstrap(
+                    &app,
+                    session,
+                    host_id,
+                    host_endpoint_id,
+                    &issuer,
+                    &mut nonces,
+                    &consent,
+                )
+                .await;
+            }
+            Ok(Some(session)) => serve_one(&app, &endpoint, session, host_id, &mut stop).await,
             Ok(None) => break, // endpoint closed
             Err(_) => continue,
         }
@@ -404,30 +496,132 @@ fn host_excluded_windows(_app: &tauri::AppHandle) -> Vec<ras_media::WindowId> {
     Vec::new()
 }
 
+/// Handle a **bootstrap-ALPN** connection (Phase 2): read the controller's `ClientHello` +
+/// signed `AccessRequest`, validate it host-side (signature, endpoint sender-constraint, freshness,
+/// replay, capability recognition), get local consent (Invariant 1), and — only on Allow — issue a
+/// PASETO grant bound to this controller's endpoint. Every failure sends a content-free `Denied`
+/// reason and returns; no session/pixels are involved here.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+async fn handle_bootstrap(
+    app: &tauri::AppHandle,
+    session: ras_transport_iroh::Session,
+    host_id: [u8; 32],
+    host_endpoint_id: [u8; 32],
+    issuer: &ras_core::grant::LocalHostGrantIssuer<ras_core::identity::SoftwareKeyStore>,
+    nonces: &mut ras_core::grant::NonceCache,
+    consent: &Arc<LocalConsent>,
+) {
+    use ras_core::grant::{
+        fresh_id, validate_access_request, AccessRequest, SessionGrantIssuer, SessionParams,
+        MAX_REQUEST_TTL_MS,
+    };
+    use ras_core::policy::phase2_default_policy;
+    use ras_protocol::{AccessOutcome, BootstrapMsg, ErrorCode};
+
+    // The controller's transport-authenticated endpoint — the identity the grant is bound to.
+    let peer_endpoint = session.remote().0;
+    let Ok(mut boot) = session.bootstrap().await else {
+        return;
+    };
+
+    // Small helper: send a content-free denial and stop.
+    macro_rules! deny {
+        ($boot:expr, $code:expr) => {{
+            let _ = $boot
+                .send(BootstrapMsg::AccessDecision(AccessOutcome::Denied {
+                    code: $code,
+                }))
+                .await;
+            return;
+        }};
+    }
+
+    // ClientHello → HostHello (advertise our identity + Tier 0).
+    match boot.recv().await {
+        Ok(BootstrapMsg::ClientHello { .. }) => {}
+        _ => return,
+    }
+    if boot
+        .send(BootstrapMsg::HostHello { host_id, tier: 0 })
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    // AccessRequest (opaque, signed) → decode + validate.
+    let canonical = match boot.recv().await {
+        Ok(BootstrapMsg::AccessRequest { canonical }) => canonical,
+        _ => return,
+    };
+    let request = match AccessRequest::decode(&canonical) {
+        Ok(r) => r,
+        Err(code) => deny!(boot, code),
+    };
+    let now = now_ms();
+    if let Err(code) = validate_access_request(&request, &host_id, &peer_endpoint, now, nonces) {
+        deny!(boot, code);
+    }
+
+    // Local human consent (Invariant 1) — no grant is minted until the user clicks Allow.
+    let _ = app.emit("share-status", "A viewer is requesting access…");
+    if !consent.prompt(short_id(&request.controller_id)).await {
+        deny!(boot, ErrorCode::ConsentDenied);
+    }
+
+    // Issue a sender-constrained grant for the consented (view-only) capabilities.
+    let params = SessionParams {
+        session_id: fresh_id().unwrap_or([0u8; 16]),
+        host_endpoint_id,
+        session_generation: 1,
+        session_nonce: fresh_id().unwrap_or([0u8; 16]),
+        issued_at: now,
+        not_before: now,
+        expires_at: now + MAX_REQUEST_TTL_MS,
+    };
+    match issuer
+        .issue(&request, &phase2_default_policy(), &params)
+        .await
+    {
+        Ok(grant) => {
+            let _ = boot
+                .send(BootstrapMsg::AccessDecision(AccessOutcome::Allowed {
+                    grant,
+                }))
+                .await;
+        }
+        Err(e) => deny!(boot, e.code),
+    }
+}
+
 async fn serve_one(
     app: &tauri::AppHandle,
     endpoint: &Arc<ras_transport_iroh::Endpoint>,
     session: ras_transport_iroh::Session,
+    host_id: [u8; 32],
     stop: &mut tokio::sync::watch::Receiver<bool>,
-    consent: &Arc<LocalConsent>,
 ) {
     use ras_core::{
-        HostSession, HostSessionConfig, IrohSessionTransport, LifecycleEvent, StopReason,
+        GrantSessionValidator, HostSession, HostSessionConfig, IrohSessionTransport,
+        LifecycleEvent, StopReason,
     };
     use ras_media::MonitorId;
 
-    let _ = app.emit("share-status", "A viewer is requesting access…");
+    let _ = app.emit("share-status", "A viewer is connecting…");
 
     let (capture, encoder) = make_backends();
     let transport = Arc::new(IrohSessionTransport::new(endpoint.clone(), session));
     let host = HostSession::new(
         // Exclude our own overlay/indicator windows from the shared feed (privacy + no feedback loop).
-        HostSessionConfig::new(MonitorId(0)).with_excluded_windows(host_excluded_windows(app)),
+        HostSessionConfig::new(MonitorId(0))
+            .with_excluded_windows(host_excluded_windows(app))
+            .with_host_id(host_id),
         transport,
         capture,
         encoder,
-        // Real consent: no frame flows until the local user clicks Allow (Invariant 1).
-        consent.clone(),
+        // The session-phase gate: validate the PASETO grant the controller presents against the
+        // endpoint iroh just authenticated (consent already happened in the bootstrap phase).
+        Arc::new(GrantSessionValidator),
     );
 
     // `start()` runs the handshake, then blocks in the consent gate until Allow/Deny. Deny → Err.
