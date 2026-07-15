@@ -309,6 +309,20 @@
   bootstrap artifact, **not** the endpoint private key (that stays covered by TPM storage +
   revocation + generation bump + emergency stop), and a ticket never grants access without local
   consent. TOTP/FIDO2 are the optional Tier 1+ upgrade, not a prerequisite (`docs/16 §1.5`).
+- **ADR-064 · MVP `SessionGrant` = PASETO v4.public, not Biscuit · Proposed** (needs sign-off;
+  refines ADR-040). In the MVP the **issuer and validator are the same host**, so Biscuit's headline
+  features — offline attenuation, Datalog delegation, third-party blocks — buy nothing yet while
+  adding a heavier dependency and a larger audit surface on the security-critical path. Use **PASETO
+  v4.public**: a pinned Ed25519 signature (libsodium) over a small typed claims/footer blob —
+  trivially auditable and sufficient, because capability **reduction** is done by *re-issuing a
+  lower-generation grant* (the host is online), not by client-side attenuation. All of ADR-040's
+  requirements are preserved: algorithm-pinned, endpoint+identity-bound, **sender-constrained** (the
+  grant binds `controller_endpoint_id` to the iroh `EndpointId` the QUIC/TLS handshake already
+  authenticated — so a stolen grant is inert, no separate DPoP proof needed). **Biscuit is adopted
+  later**, behind the unchanged `SessionGrantIssuer` seam, when a `ControlPlaneGrantIssuer` must mint
+  a broad grant that the host/edge **attenuates offline** (Phase 9) — no wire change to the
+  *validator*. If sign-off prefers Biscuit now, only `ras-grant`'s encoder/decoder changes; every
+  other Phase-2 contract is format-agnostic. See `docs/design/phase-2-design.md §0`.
 
 ## Licensing
 

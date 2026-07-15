@@ -250,9 +250,14 @@ video stall.
 **Goal:** no frames without authorization. Rotating single-use tickets, consent, signed grants,
 replay defense.
 
-**① Design gate (`docs/design/phase-2-design.md`):** ticket/grant/lease wire structures (`docs/04`);
-grant format decision (Biscuit vs PASETO, ADR-040); `SessionGrantIssuer` trait + `LocalHostGrantIssuer`;
-consent-UI contract; replay-state schema (`consumed_tickets`, nonces, generations).
+**① Design gate (`docs/design/phase-2-design.md`) — ◐ drafted, awaiting sign-off.** Written: the
+bootstrap→session authorization flow; ticket/grant/lease wire structures (per `docs/04`); the grant
+**format decision concretized in ADR-064** (MVP = PASETO v4.public, sender-constrained; Biscuit
+reserved for the offline-attenuating control-plane issuer); `SessionGrantIssuer` + `LocalHostGrantIssuer`;
+how the Phase-1 §5.5 `GrantValidator` seam is filled additively; the ordered validation checks;
+consent-UI contract; replay-state schema (`consumed_tickets`, nonce cache, generations); the M3
+security-test matrix; and the crate execution sequence. Open questions (grant format, TOFU strength,
+nonce window, generation durability) are flagged for sign-off before build.
 
 **② Build — tasks**
 - ☐ `SEC` `ras-identity`: persistent Ed25519 host + controller identities; TPM-sealed storage (DPAPI

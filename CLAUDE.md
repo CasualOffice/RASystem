@@ -64,6 +64,14 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   Mac↔Linux two-machine run) and the minor rVFC compositor-penalty delta. The media go/no-go is
   independently cleared, so the **real macOS media backend has landed** (`ras-media-macos`, see below);
   only the concrete **iroh transport** stays stubbed behind its trait until the network go/no-go.
+- **Phase 2 (identity/pairing/authorization → M3) — design gate drafted, awaiting sign-off.**
+  `docs/design/phase-2-design.md` is written: the bootstrap→session authorization flow, the
+  ticket/AccessRequest/SessionGrant contracts (per `docs/04`), how the Phase-1 §5.5 `GrantValidator`
+  seam is filled *additively* (no renamed states, `Active` still reachable only via `Authorized`),
+  the ordered validation checks + replay-state schema, the consent-UI contract, and the M3
+  security-test matrix. The one open format choice is closed in **ADR-064 (Proposed)** — MVP
+  `SessionGrant` = **PASETO v4.public**, sender-constrained to the iroh `EndpointId` (Biscuit reserved
+  for the later offline-attenuating control-plane issuer). **No Phase-2 code lands until sign-off.**
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.
