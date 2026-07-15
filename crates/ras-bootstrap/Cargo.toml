@@ -1,0 +1,18 @@
+[package]
+name = "ras-bootstrap"
+description = "Casual RAS bootstrap: rotating single-use connection tickets + replay state (nonce cache)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ras-protocol = { path = "../ras-protocol" }
+# Host-signed tickets + strict verification go through the KeyStore/verify seam (no dalek types leak).
+ras-identity = { path = "../ras-identity" }
+# Random ticket ids without coupling to a signing-crate rand_core version.
+getrandom = "0.2"
+
+[lints]
+workspace = true

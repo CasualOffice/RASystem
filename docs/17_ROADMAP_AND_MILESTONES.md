@@ -272,8 +272,14 @@ sequence (bottom-up: policy → identity → wire → bootstrap → grant → co
   `SoftwareKeyStore` (**Tier 0**, ephemeral or `0600`-persisted, redacted, fail-closed) + strict
   `verify` + in-memory `TrustedControllers` (de-list kill-switch). **Pending:** TPM/Keychain-sealed
   storage + key attestation for Tier ≥1; SQLite-durable registry.
-- ☐ `SEC` `ras-bootstrap`: **rotating single-use connection tickets** (`docs/16 §1.5`) — issue,
-  generation bump/invalidate-prior, single-use consume, expiry; CBOR+Base64URL/QR encoding.
+- ◐ `SEC` `ras-bootstrap`: **rotating single-use connection tickets** (`docs/16 §1.5`) — `TicketAuthority`
+  issue (generation bump + invalidate-prior + consumed-set clear), fail-closed `consume` (host match →
+  signature → expiry → current-generation → not-consumed, each a stable `ErrorCode`), host-signed via
+  the `KeyStore`/`verify` seam with a domain-separation tag, opaque dial blob (iroh-free), and the
+  `NonceCache` (bounded, TTL-swept, fail-closed on saturation) shared with AccessRequest validation.
+  11 tests. **Deviation:** ticket string is the hand-rolled `CASUALRAST1:<hex>` layout (matching the
+  Phase-1 `CASUALRAS1:` codec, dependency-free), not CBOR+Base64URL — same fail-closed guarantees, no
+  new dep. **Pending:** QR rendering.
 - ☐ `SEC` Pairing flow + trusted-controller registry + revocation.
 - ☐ `SEC` Signed `AccessRequest` validation (signature, endpoint binding, expiry ≤5 min, nonce,
   capability recognition) + `SessionGrant` issuance/validation, **sender-constrained** (DPoP-style).
