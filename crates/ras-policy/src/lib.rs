@@ -1,23 +1,149 @@
-//! Local policy for Casual RAS: capability intersection and (later) consent/duration rules.
+//! Local policy for Casual RAS: the capability catalogue, recognition, and intersection.
 //!
-//! Invariant (`CLAUDE.md` §5.2, `docs/04 §8`): unknown capabilities are always denied, and a
-//! reduced grant never expands beyond what was requested or what policy allows.
+//! Invariants (`CLAUDE.md` §5, `docs/04 §8`): **unknown capabilities are always denied** (Inv 2),
+//! and a reduced grant **never expands** beyond what was requested, recognized, allowed, and
+//! consented. Capabilities are namespaced dotted strings from a versioned, centrally-documented
+//! catalogue; recognition drops anything not in it *before* any intersection, so an unrecognized
+//! identifier can never survive into a grant.
 
 use std::collections::BTreeSet;
 
 /// A set of capability identifiers (e.g. `"screen.view"`).
 ///
-/// Opaque strings for now; a typed, versioned registry lands with the protobuf message set.
+/// Opaque strings; the catalogue below is the source of truth for which are *recognized*.
 pub type CapabilitySet = BTreeSet<String>;
+
+// ── Capability catalogue v1 (`docs/04 §8/§14`) ─────────────────────────────────────────────────
+//
+// Grantable in Phase 2 (view-only + visual pointer + annotation):
+/// View the shared screen.
+pub const SCREEN_VIEW: &str = "screen.view";
+/// Choose which monitor is shared.
+pub const SCREEN_SELECT_MONITOR: &str = "screen.select_monitor";
+/// A rendered, non-OS-input "look here" pointer.
+pub const POINTER_VIRTUAL: &str = "pointer.virtual";
+/// Draw annotations over the shared screen.
+pub const ANNOTATION_CREATE: &str = "annotation.create";
+//
+// Recognized but NOT grantable until Phase 3+ (OS input / clipboard / file / control / recording).
+// They are in the catalogue so a request naming them is *understood* (and then denied by policy),
+// versus an unknown identifier which is dropped outright.
+/// OS pointer move (Phase 3).
+pub const POINTER_MOVE: &str = "pointer.move";
+/// OS pointer click (Phase 3).
+pub const POINTER_CLICK: &str = "pointer.click";
+/// OS pointer scroll (Phase 3).
+pub const POINTER_SCROLL: &str = "pointer.scroll";
+/// OS key input (Phase 3).
+pub const KEYBOARD_KEY: &str = "keyboard.key";
+/// OS text input (Phase 3).
+pub const KEYBOARD_TEXT: &str = "keyboard.text";
+/// Read the host clipboard (later).
+pub const CLIPBOARD_READ: &str = "clipboard.read";
+/// Write the host clipboard (later).
+pub const CLIPBOARD_WRITE: &str = "clipboard.write";
+/// Upload a file to the host (later).
+pub const FILE_UPLOAD: &str = "file.upload";
+/// Download a file from the host (later).
+pub const FILE_DOWNLOAD: &str = "file.download";
+/// Request a catalogued support action (later).
+pub const ACTION_REQUEST: &str = "action.request";
+/// Request the OS-input control lease (Phase 3).
+pub const CONTROL_REQUEST: &str = "control.request";
+/// Transfer the OS-input control lease (Phase 3).
+pub const CONTROL_TRANSFER: &str = "control.transfer";
+/// Invite another participant (later).
+pub const SESSION_INVITE: &str = "session.invite";
+/// Start session recording (separate, separately-consented product — ADR-052).
+pub const RECORDING_START: &str = "recording.start";
+/// Stop session recording.
+pub const RECORDING_STOP: &str = "recording.stop";
+
+/// The full set of **recognized** capability identifiers (catalogue version 1). Anything not here is
+/// unknown and denied. Versioned: a new identifier means a new catalogue version, never a silent add.
+pub const CATALOGUE_V1: &[&str] = &[
+    SCREEN_VIEW,
+    SCREEN_SELECT_MONITOR,
+    POINTER_VIRTUAL,
+    ANNOTATION_CREATE,
+    POINTER_MOVE,
+    POINTER_CLICK,
+    POINTER_SCROLL,
+    KEYBOARD_KEY,
+    KEYBOARD_TEXT,
+    CLIPBOARD_READ,
+    CLIPBOARD_WRITE,
+    FILE_UPLOAD,
+    FILE_DOWNLOAD,
+    ACTION_REQUEST,
+    CONTROL_REQUEST,
+    CONTROL_TRANSFER,
+    SESSION_INVITE,
+    RECORDING_START,
+    RECORDING_STOP,
+];
+
+/// The capabilities the **MVP host** will actually grant (Phase 2 = view-only + visual pointer +
+/// annotation). This is the default host policy; a deployment may narrow it, never widen past the
+/// catalogue. Input/clipboard/file/control/recording are recognized but withheld until their phase.
+pub const PHASE2_GRANTABLE: &[&str] = &[
+    SCREEN_VIEW,
+    SCREEN_SELECT_MONITOR,
+    POINTER_VIRTUAL,
+    ANNOTATION_CREATE,
+];
+
+/// The recognized-capability catalogue as a set.
+#[must_use]
+pub fn catalogue_v1() -> CapabilitySet {
+    CATALOGUE_V1.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// The MVP host's default grantable policy (view-only + visual pointer + annotation).
+#[must_use]
+pub fn phase2_default_policy() -> CapabilitySet {
+    PHASE2_GRANTABLE.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Whether an identifier is in the recognized catalogue.
+#[must_use]
+pub fn is_recognized(cap: &str) -> bool {
+    CATALOGUE_V1.contains(&cap)
+}
+
+/// Drop every requested identifier not in the versioned catalogue (default-deny unknown, Inv 2).
+///
+/// This runs **before** any policy/consent intersection, so an unrecognized capability can never
+/// survive into a grant regardless of what a buggy or hostile policy/consent set contains.
+#[must_use]
+pub fn recognize(requested: &CapabilitySet) -> CapabilitySet {
+    requested
+        .iter()
+        .filter(|c| is_recognized(c))
+        .cloned()
+        .collect()
+}
 
 /// Intersect the controller's `requested` capabilities with what local `policy` allows.
 ///
-/// Only capabilities present in **both** are granted. A requested capability absent from `policy`
-/// — including any unknown/unrecognized identifier — is denied. The result is always a subset of
-/// both `requested` and `policy`.
+/// Only capabilities present in **both** are granted. The result is always a subset of both.
 #[must_use]
 pub fn intersect(requested: &CapabilitySet, policy: &CapabilitySet) -> CapabilitySet {
     requested.intersection(policy).cloned().collect()
+}
+
+/// The capabilities a grant may carry: `recognize(requested) ∩ policy ∩ consented`.
+///
+/// Recognition first (unknown-denied), then the host policy, then what the local user actually
+/// consented to. The result never expands beyond any of the three inputs (property-tested).
+#[must_use]
+pub fn grantable(
+    requested: &CapabilitySet,
+    policy: &CapabilitySet,
+    consented: &CapabilitySet,
+) -> CapabilitySet {
+    let recognized = recognize(requested);
+    intersect(&intersect(&recognized, policy), consented)
 }
 
 #[cfg(test)]
@@ -45,5 +171,59 @@ mod tests {
         let granted = intersect(&requested, &policy);
         assert!(granted.is_subset(&requested));
         assert!(granted.is_subset(&policy));
+    }
+
+    #[test]
+    fn recognize_drops_unknown_but_keeps_known_non_grantable() {
+        // `keyboard.key` is recognized (in the catalogue) even though it is not grantable in Phase 2;
+        // `made.up` is not recognized and is dropped.
+        let requested = set(&["screen.view", "keyboard.key", "made.up", "x.y.z"]);
+        let recognized = recognize(&requested);
+        assert_eq!(recognized, set(&["screen.view", "keyboard.key"]));
+    }
+
+    #[test]
+    fn grantable_never_expands_past_any_input() {
+        let requested = set(&["screen.view", "pointer.virtual", "keyboard.key", "made.up"]);
+        let policy = phase2_default_policy();
+        let consented = set(&["screen.view", "keyboard.key"]); // user consented to less
+        let granted = grantable(&requested, &policy, &consented);
+        // Only screen.view survives: recognized ∩ policy (view-only) ∩ consent.
+        assert_eq!(granted, set(&["screen.view"]));
+        assert!(granted.is_subset(&recognize(&requested)));
+        assert!(granted.is_subset(&policy));
+        assert!(granted.is_subset(&consented));
+    }
+
+    #[test]
+    fn grantable_withholds_input_even_if_requested_and_consented() {
+        // Phase-2 policy withholds OS input regardless of request/consent (Phase-3 gate).
+        let requested = set(&["screen.view", "keyboard.key", "pointer.click"]);
+        let consented = requested.clone(); // user said yes to everything asked
+        let granted = grantable(&requested, &phase2_default_policy(), &consented);
+        assert_eq!(granted, set(&["screen.view"]));
+        assert!(!granted.contains("keyboard.key"));
+        assert!(!granted.contains("pointer.click"));
+    }
+
+    #[test]
+    fn an_unknown_cap_cannot_survive_a_permissive_policy_and_consent() {
+        // Even if a (buggy) policy and consent both name an unknown id, recognition drops it first.
+        let requested = set(&["made.up"]);
+        let policy = set(&["made.up", "screen.view"]);
+        let consented = set(&["made.up"]);
+        assert!(grantable(&requested, &policy, &consented).is_empty());
+    }
+
+    #[test]
+    fn catalogue_and_default_policy_are_consistent() {
+        // Everything grantable must be recognized.
+        let cat = catalogue_v1();
+        for cap in phase2_default_policy() {
+            assert!(
+                cat.contains(&cap),
+                "grantable cap {cap} must be in the catalogue"
+            );
+        }
     }
 }
