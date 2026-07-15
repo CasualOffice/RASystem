@@ -793,6 +793,26 @@ mod e2e {
             "emergency stop must flush held keys via release_all"
         );
 
+        // No input reaches the sink after an emergency stop, even under the (now stale) lease.
+        let before = sink.calls().len();
+        controller.send_input(InputEnvelope {
+            lease_id,
+            generation,
+            seq: 3,
+            action: InputAction::PointerMove {
+                display_id: 0,
+                nx: 1,
+                ny: 1,
+                layout_version: 0,
+            },
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            sink.calls().len(),
+            before,
+            "no input may reach the OS after an emergency stop (Inv 4)"
+        );
+
         controller.disconnect(StopReason::UserRequested).await;
     }
 

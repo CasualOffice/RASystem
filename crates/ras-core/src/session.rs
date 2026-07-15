@@ -895,6 +895,10 @@ async fn host_handle_control_request<C, E>(
     inner: &HostInner<C, E>,
     requested: &CapabilitySet,
 ) -> Result<ras_control::ControlLease, ErrorCode> {
+    // A session that is stopping (emergency or graceful) must never mint a fresh lease.
+    if inner.stop.load(Ordering::SeqCst) {
+        return Err(ErrorCode::SessionRevoked);
+    }
     // Fail-closed: no backend, or the OS won't permit injection ⇒ no lease.
     let sink = inner
         .input_sink
@@ -952,6 +956,13 @@ fn host_handle_input<C, E>(inner: &HostInner<C, E>, env: &InputEnvelope) -> Resu
         }
     };
     verdict?;
+    // Invariant 4 closes the authorize→dispatch gap: an emergency stop that lands *after* this event
+    // was authorized (advancing the gate's `last_seq`) but *before* it is injected must still override
+    // it. `emergency_stop`/`stop` set `stop` before `release_input` runs, so re-checking it here drops
+    // the already-authorized in-flight event rather than injecting one frame past the stop.
+    if inner.stop.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let sink = inner
         .input_sink
         .lock()
