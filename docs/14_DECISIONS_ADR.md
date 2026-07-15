@@ -309,7 +309,7 @@
   bootstrap artifact, **not** the endpoint private key (that stays covered by TPM storage +
   revocation + generation bump + emergency stop), and a ticket never grants access without local
   consent. TOTP/FIDO2 are the optional Tier 1+ upgrade, not a prerequisite (`docs/16 §1.5`).
-- **ADR-064 · MVP `SessionGrant` = PASETO v4.public, not Biscuit · Proposed** (needs sign-off;
+- **ADR-064 · MVP `SessionGrant` = PASETO v4.public, not Biscuit · Accepted** (signed off;
   refines ADR-040). In the MVP the **issuer and validator are the same host**, so Biscuit's headline
   features — offline attenuation, Datalog delegation, third-party blocks — buy nothing yet while
   adding a heavier dependency and a larger audit surface on the security-critical path. Use **PASETO

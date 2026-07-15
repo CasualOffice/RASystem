@@ -49,7 +49,7 @@
 | MVP assurance tier | **Tier 0** (Ed25519 + rotating ticket + local consent + host-shown one-time PIN). Tier ≥1 (TPM attestation) is designed-for but not required to ship Phase 2. | docs/16, Inv 16, §3.1 |
 | Consent mechanism | The existing interactive `GrantValidator` seam (§4); the app's real `LocalConsent` is extended to also **carry the AccessRequest** and **trigger grant issuance** on Allow. | phase-1 §5.5, §4 |
 
-**ADR-064 (Proposed — needs sign-off).** *MVP grant = PASETO v4.public, not Biscuit.* Rationale: in
+**ADR-064 (Accepted — signed off).** *MVP grant = PASETO v4.public, not Biscuit.* Rationale: in
 the MVP the **issuer and validator are the same host**, so Biscuit's headline features (offline
 attenuation, Datalog delegation, third-party blocks) buy nothing yet, while adding a heavier Datalog
 dependency and a larger audit surface on the security-critical path. PASETO v4.public is a pinned
@@ -434,18 +434,21 @@ the current `LocalConsent`) ⇒ `ConsentDenied`, fail-closed, no grant.
 
 ---
 
-## 8. Open questions (for sign-off)
+## 8. Open questions — resolutions
 
-- **Q-GRANT-FMT.** ADR-064 proposes PASETO v4.public for the MVP over Biscuit. Confirm, or elect
-  Biscuit now to exercise attenuation early (only `ras-grant`'s codec changes).
-- **Q-PAIR-TOFU.** First-pairing is trust-on-first-use gated by human fingerprint check + one-time
-  PIN. Is a stronger out-of-band channel (short-authentication-string / numeric compare) wanted for
-  Tier 0, or deferred to the tier ladder?
-- **Q-NONCE-WINDOW.** Nonce-cache retention = max(AccessRequest TTL) is minimal-correct; do we want a
-  longer window (defense-in-depth vs memory) for high-churn fleets?
-- **Q-GEN-STORE.** `session_generation` / `consumed_tickets` durability: in-memory is enough for
-  attended MVP; unattended/fleet needs the SQLite mirror to survive host restart. Confirm MVP scope
-  is attended-only (in-memory acceptable).
+- **Q-GRANT-FMT — RESOLVED.** MVP `SessionGrant` = **PASETO v4.public** (ADR-064 Accepted). Biscuit
+  reserved for the later offline-attenuating control-plane issuer, behind the unchanged
+  `SessionGrantIssuer` seam.
+- **Q-PAIR-TOFU — MVP default.** First-pairing is trust-on-first-use gated by human key-fingerprint
+  check **+ host-shown one-time PIN** (Tier 0). A stronger out-of-band channel (short-authentication-
+  string / numeric compare) is deferred to the tier ladder (Tier ≥1), not required for the attended
+  MVP.
+- **Q-NONCE-WINDOW — MVP default.** Nonce-cache retention = `max(AccessRequest TTL)` (i.e. ≥5 min),
+  TTL-swept. A longer defense-in-depth window is a fleet-hardening knob, not MVP.
+- **Q-GEN-STORE — MVP default.** MVP scope is **attended-only**: `session_generation` /
+  `consumed_tickets` live in-memory (a host restart ends live sessions anyway). The SQLite mirror for
+  restart-survival lands with unattended/fleet (Phase 9). `trusted_controllers` **is** persisted
+  (SQLite) from the MVP, since pairings must survive restart.
 
 ---
 
