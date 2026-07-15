@@ -99,11 +99,17 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     seeded at `Active`, `ControlRequest`→consent→issue and `Input`→gate→sink in the host loop,
     `revoke_all`+`release_all` on emergency stop / teardown (Inv 4), content-free lifecycle events,
     and an end-to-end loopback test.
-  macOS is the lead input platform (ADR-054/055). **Still pending:** the **app** "Request control" +
-  input-caps consent UI and viewer input forwarding; the **on-device** run of the real CGEvent
-  injection + PostEvent-TCC prompt + Secure-Input drop (same constraint as every prior macOS backend);
-  the macOS global-hotkey emergency stop (no kernel SAS on macOS — SAS stays the Windows path); and
-  the **Windows** input backend (parallel port of `ras-input-macos`).
+  - **app** wiring: the bootstrap request + host issuer now use `phase3_default_policy` (so the grant
+    ceiling can include input); a **second** control-lease consent (`LocalConsent` → `ControlConsent`,
+    Inv 1) gates injection; Share builds a macOS `CgEventSink` (`with_input_sink`) fed capture geometry
+    and surfaces a "REMOTE CONTROL ACTIVE" indicator; Connect has a "Take control" button + forwards
+    the viewer's pointer/keyboard/wheel as `Input` (normalized to the video rect, JS→USB-HID map,
+    monotonic seq) when it holds the lease. App `check`/`clippy`/`fmt` clean.
+  macOS is the lead input platform (ADR-054/055). **Still pending:** the **on-device** GUI run of the
+  real CGEvent injection + PostEvent-TCC prompt + Secure-Input drop (same constraint as every prior
+  macOS backend); a macOS **global-hotkey** emergency stop (baseline stop is the always-visible Stop
+  button, which already drives `revoke_all` + `release_all`; no kernel SAS on macOS — SAS stays the
+  Windows path); and the **Windows** input backend (parallel port of `ras-input-macos`).
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

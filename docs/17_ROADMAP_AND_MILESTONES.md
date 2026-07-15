@@ -385,8 +385,15 @@ a bearer token) — all **Accepted** (signed off). macOS is the lead input platf
   macOS backend + `ras-core` release path). Windows port later.
 - ☑ `QA` Lease-transfer race + "no two controllers inject concurrently" + old-lease-input-rejected +
   replay/expiry/capability tests (ras-control 16 + ras-core loopback + ras-protocol fuzz).
-- ☐ `UI` App: "Request control" + input-caps consent panel; forward the viewer's pointer/keyboard as
-  `Input` when it holds the lease (else the visual `Pointer`); macOS global-hotkey stop. **On-device.**
+- ◐ `UI` App: **"Take control" + input-caps consent panel wired.** The bootstrap request + host issuer
+  use `phase3_default_policy` (grant ceiling can include input); a **second** control-lease consent
+  (`LocalConsent` → `ControlConsent`, Invariant 1) gates injection. Share builds a macOS `CgEventSink`
+  (with_input_sink) + feeds it capture geometry; Connect forwards the viewer's pointer/keyboard/wheel as
+  `Input` (normalized to the video rect, JS→USB-HID map, monotonic seq) when it holds the lease, else the
+  visual `Pointer`. App `check`/`clippy`/`fmt` clean; workspace `--all-features` + `test --all` green.
+  **Pending (on-device):** the live GUI run (Tauri/WebView + Screen-Recording & PostEvent TCC); the
+  macOS **global-hotkey** emergency stop (baseline stop = the always-visible indicator's Stop button,
+  which already drives `revoke_all` + `release_all`); "reduce to view-only" consent.
 - ☐ `WIN` Windows input backend: `SendInput` ABSOLUTE|VIRTUALDESK, PMv2 manifest, scan-code paths
   (the parallel port of `ras-input-macos`; needs Windows hardware).
 
