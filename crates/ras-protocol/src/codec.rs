@@ -21,8 +21,9 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use prost::Message;
 
 use crate::{
-    ControlMsg, DecoderFeedback, ErrorCode, KeyframeReason, KeyframeRequest, PointerUpdate,
-    RasError, StreamConfigWire, MAX_CONTROL_FRAME,
+    AccessOutcome, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode, KeyframeReason,
+    KeyframeRequest, PointerUpdate, RasError, StreamConfigWire, MAX_CONTROL_FRAME,
+    MAX_DISPLAY_NAME,
 };
 
 /// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
@@ -272,6 +273,138 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
 }
 
 // ---------------------------------------------------------------------------
+// Bootstrap-channel mappings (Phase-2 authorization handshake).
+// ---------------------------------------------------------------------------
+
+/// Decode a wire `bytes` field to a fixed 32-byte Ed25519 key; wrong length → malformed message.
+/// Fail-closed: a key of any other length can never be silently truncated or zero-padded.
+fn arr32(bytes: &Bytes, ctx: &'static str) -> Result<[u8; 32], RasError> {
+    <[u8; 32]>::try_from(bytes.as_ref())
+        .map_err(|_| RasError::fatal(ErrorCode::InvalidMessage, ctx))
+}
+
+/// Rust [`BootstrapMsg`] → wire. Total and infallible (every value has a valid wire form). Fixed
+/// 32-byte ids widen to `bytes`; the `AssuranceTier` tag widens `u8` → `u32`.
+fn bootstrap_to_pb(msg: BootstrapMsg) -> pb::BootstrapMsg {
+    use pb::bootstrap_msg::Kind;
+    let kind = match msg {
+        BootstrapMsg::ClientHello { protocol_version } => {
+            Kind::ClientHello(pb::ClientHello { protocol_version })
+        }
+        BootstrapMsg::HostHello { host_id, tier } => Kind::HostHello(pb::HostHello {
+            host_id: Bytes::copy_from_slice(&host_id),
+            tier: u32::from(tier),
+        }),
+        BootstrapMsg::PairingRequest {
+            controller_id,
+            display_name,
+            pubkey,
+            signature,
+        } => Kind::PairingRequest(pb::PairingRequest {
+            controller_id: Bytes::copy_from_slice(&controller_id),
+            display_name,
+            pubkey: Bytes::copy_from_slice(&pubkey),
+            signature,
+        }),
+        BootstrapMsg::PairingDecision { accepted } => {
+            Kind::PairingDecision(pb::PairingDecision { accepted })
+        }
+        BootstrapMsg::AccessRequest { canonical } => {
+            Kind::AccessRequest(pb::AccessRequestMsg { canonical })
+        }
+        BootstrapMsg::AccessDecision(outcome) => {
+            let decision = match outcome {
+                // Allowed: grant present, denied left UNSPECIFIED (0).
+                AccessOutcome::Allowed { grant } => pb::AccessDecision {
+                    grant: Some(grant),
+                    denied: i32::from(pb::ErrorCodeProto::ErrorCodeUnspecified),
+                },
+                // Denied: no grant, a concrete non-UNSPECIFIED reason.
+                AccessOutcome::Denied { code } => pb::AccessDecision {
+                    grant: None,
+                    denied: i32::from(errorcode_to_pb(code)),
+                },
+            };
+            Kind::AccessDecision(decision)
+        }
+        BootstrapMsg::CancelRequest => Kind::CancelRequest(pb::CancelRequest {}),
+        BootstrapMsg::ProtocolError { code } => Kind::ProtocolError(pb::ProtocolError {
+            code: i32::from(errorcode_to_pb(code)),
+        }),
+    };
+    pb::BootstrapMsg { kind: Some(kind) }
+}
+
+/// Wire → Rust [`BootstrapMsg`]. Partial: unset oneof, wrong-length id, over-long display name, an
+/// out-of-range tier tag, or a malformed [`AccessOutcome`] is a typed [`RasError`]
+/// ([`ErrorCode::InvalidMessage`], except the mapped [`ErrorCode`]s which round-trip exactly).
+fn bootstrap_from_pb(proto: pb::BootstrapMsg) -> Result<BootstrapMsg, RasError> {
+    use pb::bootstrap_msg::Kind;
+    match proto.kind {
+        Some(Kind::ClientHello(h)) => Ok(BootstrapMsg::ClientHello {
+            protocol_version: h.protocol_version,
+        }),
+        Some(Kind::HostHello(h)) => {
+            let tier = u8::try_from(h.tier)
+                .ok()
+                .filter(|t| *t <= 3)
+                .ok_or_else(|| {
+                    RasError::fatal(ErrorCode::InvalidMessage, "tier tag out of range")
+                })?;
+            Ok(BootstrapMsg::HostHello {
+                host_id: arr32(&h.host_id, "host_id not 32 bytes")?,
+                tier,
+            })
+        }
+        Some(Kind::PairingRequest(p)) => {
+            if p.display_name.len() > MAX_DISPLAY_NAME {
+                return Err(RasError::fatal(
+                    ErrorCode::InvalidMessage,
+                    "display name too long",
+                ));
+            }
+            Ok(BootstrapMsg::PairingRequest {
+                controller_id: arr32(&p.controller_id, "controller_id not 32 bytes")?,
+                display_name: p.display_name,
+                pubkey: arr32(&p.pubkey, "pubkey not 32 bytes")?,
+                signature: p.signature,
+            })
+        }
+        Some(Kind::PairingDecision(d)) => Ok(BootstrapMsg::PairingDecision {
+            accepted: d.accepted,
+        }),
+        Some(Kind::AccessRequest(a)) => Ok(BootstrapMsg::AccessRequest {
+            canonical: a.canonical,
+        }),
+        Some(Kind::AccessDecision(d)) => {
+            // Exactly one of {grant, denied}: reject both-set and neither-set. `denied` UNSPECIFIED
+            // (0) means "no denial"; any other value is a concrete reason.
+            let denied_set = d.denied != i32::from(pb::ErrorCodeProto::ErrorCodeUnspecified);
+            match (d.grant, denied_set) {
+                (Some(grant), false) => Ok(BootstrapMsg::AccessDecision(AccessOutcome::Allowed {
+                    grant,
+                })),
+                (None, true) => Ok(BootstrapMsg::AccessDecision(AccessOutcome::Denied {
+                    code: errorcode_from_pb(d.denied)?,
+                })),
+                _ => Err(RasError::fatal(
+                    ErrorCode::InvalidMessage,
+                    "access decision must set exactly one of grant/denied",
+                )),
+            }
+        }
+        Some(Kind::CancelRequest(_)) => Ok(BootstrapMsg::CancelRequest),
+        Some(Kind::ProtocolError(e)) => Ok(BootstrapMsg::ProtocolError {
+            code: errorcode_from_pb(e.code)?,
+        }),
+        None => Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "empty bootstrap message",
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public codec API — synchronous.
 // ---------------------------------------------------------------------------
 
@@ -339,6 +472,59 @@ pub fn try_read_frame(buf: &mut BytesMut) -> Result<Option<ControlMsg>, RasError
     buf.advance(4); // consume prefix
     let body = buf.split_to(len); // consume body
     decode(&body).map(Some)
+}
+
+/// Serialize one [`BootstrapMsg`] to protobuf bytes (no length prefix). Infallible.
+#[must_use]
+pub fn encode_bootstrap(msg: &BootstrapMsg) -> Bytes {
+    Bytes::from(bootstrap_to_pb(msg.clone()).encode_to_vec())
+}
+
+/// Decode one protobuf [`BootstrapMsg`] (no length prefix).
+///
+/// Every malformed input — bad protobuf, unset oneof, wrong-length id, over-long display name,
+/// out-of-range tier, a both-set/neither-set access decision, `UNSPECIFIED`/unknown enum — returns
+/// a typed [`RasError`]. Never panics; error `context` never embeds decoded bytes (Invariant 8).
+pub fn decode_bootstrap(bytes: &[u8]) -> Result<BootstrapMsg, RasError> {
+    let proto = pb::BootstrapMsg::decode(bytes)
+        .map_err(|_| RasError::fatal(ErrorCode::InvalidMessage, "bootstrap decode failed"))?;
+    bootstrap_from_pb(proto)
+}
+
+/// Frame one [`BootstrapMsg`]: 4-byte big-endian length prefix + protobuf body. Same framing and
+/// [`MAX_CONTROL_FRAME`] DoS guard as the session control channel.
+#[must_use]
+pub fn frame_bootstrap(msg: &BootstrapMsg) -> Bytes {
+    let body = encode_bootstrap(msg);
+    let mut out = BytesMut::with_capacity(4 + body.len());
+    let len = u32::try_from(body.len()).unwrap_or(u32::MAX);
+    out.put_u32(len);
+    out.put_slice(&body);
+    out.freeze()
+}
+
+/// Try to read one framed [`BootstrapMsg`] from `buf`, consuming exactly one frame on success.
+///
+/// Same contract as [`try_read_frame`]: `Ok(Some)` on a full frame (consumed), `Ok(None)` if more
+/// bytes are needed (`buf` untouched), `Err` if the length prefix exceeds [`MAX_CONTROL_FRAME`]
+/// (DoS guard, before allocation) or the body is malformed.
+pub fn try_read_bootstrap_frame(buf: &mut BytesMut) -> Result<Option<BootstrapMsg>, RasError> {
+    if buf.len() < 4 {
+        return Ok(None);
+    }
+    let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if len > MAX_CONTROL_FRAME {
+        return Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "bootstrap frame too large",
+        ));
+    }
+    if buf.len() < 4 + len {
+        return Ok(None);
+    }
+    buf.advance(4);
+    let body = buf.split_to(len);
+    decode_bootstrap(&body).map(Some)
 }
 
 #[cfg(test)]
@@ -690,6 +876,161 @@ mod tests {
         assert_eq!(i32::from(reason_to_pb(KeyframeReason::StreamStart)), 1);
         assert_eq!(i32::from(reason_to_pb(KeyframeReason::PeriodicRefresh)), 5);
     }
+
+    // ── Bootstrap-channel codec ────────────────────────────────────────────────────────────────
+
+    /// encode → decode is the identity for a bootstrap message (compared via re-encode).
+    fn assert_bootstrap_roundtrip(msg: &BootstrapMsg) {
+        let decoded = decode_bootstrap(&encode_bootstrap(msg)).expect("roundtrip decode");
+        assert_eq!(
+            encode_bootstrap(&decoded).as_ref(),
+            encode_bootstrap(msg).as_ref(),
+            "re-encode mismatch"
+        );
+    }
+
+    #[test]
+    fn roundtrip_all_bootstrap_variants() {
+        let msgs = [
+            BootstrapMsg::ClientHello {
+                protocol_version: 1,
+            },
+            BootstrapMsg::HostHello {
+                host_id: [0xAB; 32],
+                tier: 0,
+            },
+            BootstrapMsg::HostHello {
+                host_id: [0x01; 32],
+                tier: 3,
+            },
+            BootstrapMsg::PairingRequest {
+                controller_id: [0x22; 32],
+                display_name: "Alice's Laptop — ünïcode".to_string(),
+                pubkey: [0x33; 32],
+                signature: Bytes::from_static(&[9u8; 64]),
+            },
+            BootstrapMsg::PairingDecision { accepted: true },
+            BootstrapMsg::PairingDecision { accepted: false },
+            BootstrapMsg::AccessRequest {
+                canonical: Bytes::from_static(b"opaque-signed-access-request"),
+            },
+            BootstrapMsg::AccessDecision(AccessOutcome::Allowed {
+                grant: Bytes::from_static(b"v4.public.opaque-paseto"),
+            }),
+            BootstrapMsg::AccessDecision(AccessOutcome::Denied {
+                code: ErrorCode::ConsentDenied,
+            }),
+            BootstrapMsg::CancelRequest,
+            BootstrapMsg::ProtocolError {
+                code: ErrorCode::UnsupportedVersion,
+            },
+        ];
+        for m in &msgs {
+            assert_bootstrap_roundtrip(m);
+        }
+    }
+
+    #[test]
+    fn bootstrap_frame_roundtrips_and_consumes() {
+        let m = BootstrapMsg::ClientHello {
+            protocol_version: 7,
+        };
+        let mut buf = BytesMut::from(frame_bootstrap(&m).as_ref());
+        let got = try_read_bootstrap_frame(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            encode_bootstrap(&got).as_ref(),
+            encode_bootstrap(&m).as_ref()
+        );
+        assert!(buf.is_empty(), "frame fully consumed");
+    }
+
+    #[test]
+    fn bootstrap_rejects_wrong_length_id() {
+        // Hand-build a HostHello proto with a 31-byte host_id → must fail closed.
+        let proto = pb::BootstrapMsg {
+            kind: Some(pb::bootstrap_msg::Kind::HostHello(pb::HostHello {
+                host_id: Bytes::from_static(&[0u8; 31]),
+                tier: 0,
+            })),
+        };
+        let bytes = proto.encode_to_vec();
+        let err = decode_bootstrap(&bytes).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+    }
+
+    #[test]
+    fn bootstrap_rejects_out_of_range_tier() {
+        let proto = pb::BootstrapMsg {
+            kind: Some(pb::bootstrap_msg::Kind::HostHello(pb::HostHello {
+                host_id: Bytes::from_static(&[0u8; 32]),
+                tier: 4, // only 0..=3 are valid tiers
+            })),
+        };
+        let err = decode_bootstrap(&proto.encode_to_vec()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+    }
+
+    #[test]
+    fn bootstrap_rejects_overlong_display_name() {
+        let proto = pb::BootstrapMsg {
+            kind: Some(pb::bootstrap_msg::Kind::PairingRequest(
+                pb::PairingRequest {
+                    controller_id: Bytes::from_static(&[0u8; 32]),
+                    display_name: "x".repeat(MAX_DISPLAY_NAME + 1),
+                    pubkey: Bytes::from_static(&[0u8; 32]),
+                    signature: Bytes::new(),
+                },
+            )),
+        };
+        let err = decode_bootstrap(&proto.encode_to_vec()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+    }
+
+    #[test]
+    fn access_decision_rejects_both_and_neither() {
+        // Both set → ambiguous → reject.
+        let both = pb::BootstrapMsg {
+            kind: Some(pb::bootstrap_msg::Kind::AccessDecision(
+                pb::AccessDecision {
+                    grant: Some(Bytes::from_static(b"g")),
+                    denied: i32::from(pb::ErrorCodeProto::ErrorCodeConsentDenied),
+                },
+            )),
+        };
+        assert_eq!(
+            decode_bootstrap(&both.encode_to_vec()).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+        // Neither set (no grant, denied UNSPECIFIED) → reject.
+        let neither = pb::BootstrapMsg {
+            kind: Some(pb::bootstrap_msg::Kind::AccessDecision(
+                pb::AccessDecision {
+                    grant: None,
+                    denied: i32::from(pb::ErrorCodeProto::ErrorCodeUnspecified),
+                },
+            )),
+        };
+        assert_eq!(
+            decode_bootstrap(&neither.encode_to_vec()).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+    }
+
+    #[test]
+    fn bootstrap_empty_oneof_is_rejected() {
+        let empty = pb::BootstrapMsg { kind: None };
+        let err = decode_bootstrap(&empty.encode_to_vec()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+    }
+
+    #[test]
+    fn bootstrap_frame_guard_rejects_oversize_prefix() {
+        let mut buf = BytesMut::new();
+        buf.put_u32(u32::try_from(MAX_CONTROL_FRAME + 1).unwrap());
+        buf.put_slice(&[0u8; 8]);
+        let err = try_read_bootstrap_frame(&mut buf).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidMessage);
+    }
 }
 
 /// Generative (property) tests. The control codec parses **untrusted** bytes off the wire, so the
@@ -801,6 +1142,14 @@ mod proptests {
         fn try_read_frame_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
             let mut buf = BytesMut::from(bytes.as_slice());
             let _ = try_read_frame(&mut buf);
+        }
+
+        /// The bootstrap decoder parses untrusted handshake bytes — it must never panic either.
+        #[test]
+        fn decode_bootstrap_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            let _ = decode_bootstrap(&bytes);
+            let mut buf = BytesMut::from(bytes.as_slice());
+            let _ = try_read_bootstrap_frame(&mut buf);
         }
 
         /// Every well-formed message round-trips: decode(encode(m)) re-encodes to the same bytes.

@@ -291,6 +291,23 @@ CancelRequest
 ProtocolError { code: ErrorCode }
 ```
 
+**Implementation note (landed).** These are homed in a **separate `ras_protocol::BootstrapMsg` enum
++ `BootstrapMsg` proto oneof**, *not* folded into the session `ControlMsg` (the conceptual draft
+above said "additive to the existing enum"). Rationale — the bootstrap and session phases run on
+**different ALPNs/streams**, and keeping their vocabularies in distinct types means a bootstrap
+message can never be injected into the session control stream or vice versa **at the type level**
+(a security-positive separation; Security > UX). This is an enum-organization refinement, not a
+wire-*semantics* change — the field set, `ErrorCode` reuse, framing (`u32-BE len | protobuf`, same
+`MAX_CONTROL_FRAME` guard), and codec posture (fail-closed, no panics, content-free errors) are
+exactly as specified, so **no ADR** is required. Layering is respected: `ras-protocol` stays at the
+bottom of the graph — ids are raw `[u8; 32]`, `tier` is a `u8` projection of `AssuranceTier`, and the
+`AccessRequest` / PASETO grant ride as **opaque `Bytes`** (owned by `ras-grant`), exactly like the
+existing `AuthEnvelope`. `AccessDecision` carries `Allowed { grant } | Denied { code }` and the codec
+enforces **exactly-one** on the wire (both-set/neither-set → `InvalidMessage`). Codec adds
+`encode_bootstrap`/`decode_bootstrap`/`frame_bootstrap`/`try_read_bootstrap_frame`; validated
+round-trip + fuzz (`decode_bootstrap_never_panics`) + fail-closed unit tests (wrong-length id,
+over-long `display_name` > `MAX_DISPLAY_NAME`, out-of-range tier, ambiguous decision) all green.
+
 ---
 
 ## 3. Crate interfaces (conceptual, `todo!()` bodies)

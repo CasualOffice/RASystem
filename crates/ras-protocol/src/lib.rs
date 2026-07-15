@@ -270,6 +270,93 @@ pub struct StreamConfigWire {
     pub video_transport: u8,
 }
 
+/// Upper bound on a controller's self-declared display name on the bootstrap channel (bytes).
+///
+/// A DoS/abuse guard on top of [`MAX_CONTROL_FRAME`]: the display name is attacker-controlled and
+/// only ever shown in the consent prompt, so it never needs to be large. The codec rejects a longer
+/// name as a malformed message. It is untrusted UI text — never a path, command, or capability.
+pub const MAX_DISPLAY_NAME: usize = 128;
+
+/// Bootstrap-ALPN (`casual-ras/bootstrap/1`) message set — the Phase-2 authorization handshake.
+///
+/// **Deliberately separate from [`ControlMsg`]** (the session-phase channel): the two run on
+/// different ALPNs, and keeping their vocabularies in distinct types means a bootstrap message can
+/// never be injected into the session control stream, or vice versa, at the type level (a
+/// security-positive separation — Inv 9 authenticates identity, the *host* authorizes).
+///
+/// Payloads that carry a signed, canonically-encoded artifact — the `AccessRequest` and the PASETO
+/// grant — ride as **opaque [`Bytes`]** owned by `ras-grant`; this crate frames them (exactly like
+/// [`ControlMsg::AuthEnvelope`]) and never interprets them. Ids are raw 32-byte Ed25519 public keys;
+/// `tier` is a small projection of `ras_identity::AssuranceTier` (this crate does not depend on
+/// `ras-identity`). Nothing here is authoritative: it is a request/response envelope, not a decision.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum BootstrapMsg {
+    /// Controller → host: open the bootstrap phase with the controller's protocol version.
+    ClientHello {
+        /// Controller's protocol major version.
+        protocol_version: u32,
+    },
+    /// Host → controller: the host identity + the assurance tier it may advertise (Inv 16).
+    HostHello {
+        /// Host's 32-byte Ed25519 public key.
+        host_id: [u8; 32],
+        /// Assurance-tier tag: `0..=3` = Tier0..Tier3 (projection of `AssuranceTier`).
+        tier: u8,
+    },
+    /// Controller → host: first-contact pairing for an unknown controller (local user accepts).
+    PairingRequest {
+        /// Controller's 32-byte Ed25519 public key (its identity).
+        controller_id: [u8; 32],
+        /// Untrusted, length-bounded UI text shown in the pairing prompt — never a path/command.
+        display_name: String,
+        /// Controller's 32-byte Ed25519 public key offered for pairing.
+        pubkey: [u8; 32],
+        /// Opaque signature over the pairing challenge; verified by `ras-identity`.
+        signature: Bytes,
+    },
+    /// Host → controller: the local user's pairing accept/deny (Inv 1).
+    PairingDecision {
+        /// `true` ⇒ paired and stored in `trusted_controllers`.
+        accepted: bool,
+    },
+    /// Controller → host: the signed, canonically-encoded `AccessRequest` (opaque; `ras-grant` owns
+    /// the encoding + embedded controller signature).
+    AccessRequest {
+        /// Canonical signed AccessRequest bytes.
+        canonical: Bytes,
+    },
+    /// Host → controller: the consent outcome — exactly one of allowed/denied.
+    AccessDecision(AccessOutcome),
+    /// Controller → host: abandon the in-flight request.
+    CancelRequest,
+    /// Either side: a typed protocol error on the bootstrap channel.
+    ProtocolError {
+        /// Stable reason code.
+        code: ErrorCode,
+    },
+}
+
+/// The host's decision on an `AccessRequest` (payload of [`BootstrapMsg::AccessDecision`]).
+///
+/// Exactly one outcome: on Allow the controller receives an opaque PASETO grant to present on the
+/// session channel; on refuse it receives only a content-free reason code (never *why* the human
+/// declined). The codec enforces the exactly-one invariant on the wire.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum AccessOutcome {
+    /// Consent granted: opaque PASETO v4.public grant bytes to present in [`ControlMsg::AuthEnvelope`].
+    Allowed {
+        /// Opaque PASETO grant.
+        grant: Bytes,
+    },
+    /// Consent refused (deny or timeout): a stable, content-free reason code.
+    Denied {
+        /// Reason (e.g. [`ErrorCode::ConsentDenied`]).
+        code: ErrorCode,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

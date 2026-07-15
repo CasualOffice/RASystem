@@ -250,18 +250,28 @@ video stall.
 **Goal:** no frames without authorization. Rotating single-use tickets, consent, signed grants,
 replay defense.
 
-**① Design gate (`docs/design/phase-2-design.md`) — ◐ drafted, awaiting sign-off.** Written: the
+**① Design gate (`docs/design/phase-2-design.md`) — ☑ signed off.** Written & approved: the
 bootstrap→session authorization flow; ticket/grant/lease wire structures (per `docs/04`); the grant
-**format decision concretized in ADR-064** (MVP = PASETO v4.public, sender-constrained; Biscuit
-reserved for the offline-attenuating control-plane issuer); `SessionGrantIssuer` + `LocalHostGrantIssuer`;
-how the Phase-1 §5.5 `GrantValidator` seam is filled additively; the ordered validation checks;
-consent-UI contract; replay-state schema (`consumed_tickets`, nonce cache, generations); the M3
-security-test matrix; and the crate execution sequence. Open questions (grant format, TOFU strength,
-nonce window, generation durability) are flagged for sign-off before build.
+**format decision concretized in ADR-064** (MVP = PASETO v4.public, sender-constrained, **Accepted**;
+Biscuit reserved for the offline-attenuating control-plane issuer); the Ed25519-primitive decision
+(**ADR-065** — `ed25519-dalek` behind the `KeyStore` seam, not a new libsodium binding);
+`SessionGrantIssuer` + `LocalHostGrantIssuer`; how the Phase-1 §5.5 `GrantValidator` seam is filled
+additively; the ordered validation checks; consent-UI contract; replay-state schema
+(`consumed_tickets`, nonce cache, generations); the M3 security-test matrix; and the crate execution
+sequence (bottom-up: policy → identity → wire → bootstrap → grant → core → app).
 
-**② Build — tasks**
-- ☐ `SEC` `ras-identity`: persistent Ed25519 host + controller identities; TPM-sealed storage (DPAPI
-  fallback), key attestation for tier advertising.
+**② Build — tasks** (execution in progress, bottom-up)
+- ☑ `SEC` `ras-policy`: capability **catalogue v1** + `recognize` (default-deny unknown, Inv 2) +
+  `grantable` (`recognize ∩ policy ∩ consented`, never-expands) + `phase2_default_policy`
+  (view-only + visual pointer + annotation). 7 tests.
+- ☑ `CORE` `ras-protocol`: the **bootstrap-ALPN wire message set** (`BootstrapMsg` enum + proto oneof
+  + codec) — separate from session `ControlMsg` for type-level channel separation; fail-closed decode
+  (32-byte ids, bounded display name, tier range, exactly-one `AccessDecision`) + fuzz. No new
+  `ErrorCode`s.
+- ◐ `SEC` `ras-identity`: Ed25519 identities + `KeyStore` (sign/public only, no export — Inv 8) +
+  `SoftwareKeyStore` (**Tier 0**, ephemeral or `0600`-persisted, redacted, fail-closed) + strict
+  `verify` + in-memory `TrustedControllers` (de-list kill-switch). **Pending:** TPM/Keychain-sealed
+  storage + key attestation for Tier ≥1; SQLite-durable registry.
 - ☐ `SEC` `ras-bootstrap`: **rotating single-use connection tickets** (`docs/16 §1.5`) — issue,
   generation bump/invalidate-prior, single-use consume, expiry; CBOR+Base64URL/QR encoding.
 - ☐ `SEC` Pairing flow + trusted-controller registry + revocation.
@@ -270,7 +280,6 @@ nonce window, generation durability) are flagged for sign-off before build.
 - ☐ `SEC` Replay defense: nonce cache, ticket generation + consumed set, session generation.
 - ☐ `UI` Branded consent UI (identity, reason, requested caps, recording state, duration, stop);
   approve/reduce/view-only/deny; host-shown one-time PIN (Tier 0).
-- ☐ `SEC` `ras-policy`: capability intersection + local policy (default-deny unknown).
 - ☐ `QA` Security tests: stolen/expired/replayed ticket, stale-generation ticket, modified request,
   cross-endpoint grant; property tests (unknown denied, reduced never expands).
 

@@ -138,3 +138,81 @@ message ControlMsg {
     PointerUpdate   pointer          = 7;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Bootstrap ALPN (casual-ras/bootstrap/1) message set — Phase 2 authorization
+// handshake. DELIBERATELY SEPARATE from the session-phase ControlMsg: it runs on
+// a different ALPN/stream, and keeping the two message sets in distinct oneofs
+// means a bootstrap message can never be injected into the session control stream
+// (or vice versa) at the type level. Payloads that carry a signed,
+// canonically-encoded artifact (the AccessRequest, the PASETO grant) ride as
+// opaque `bytes` owned by ras-grant — this crate frames them, exactly like
+// AuthEnvelope, and NEVER interprets them. See docs/04 §9, docs/design/phase-2.
+// ---------------------------------------------------------------------------
+
+// Controller -> host: open the bootstrap phase.
+message ClientHello {
+  uint32 protocol_version = 1;
+}
+
+// Host -> controller: identify the host + the assurance tier it may advertise.
+// host_id is a 32-byte Ed25519 public key (the codec rejects any other length).
+// tier is a small tag 0..=3 projecting ras_identity::AssuranceTier (proto has no
+// u8 and we avoid a dependency on ras-identity); the codec rejects tier > 3.
+message HostHello {
+  bytes  host_id = 1; // 32-byte Ed25519 public key
+  uint32 tier    = 2; // 0=Tier0 .. 3=Tier3
+}
+
+// Controller -> host: first-contact pairing (unknown controller). controller_id
+// and pubkey are 32-byte Ed25519 public keys; signature is opaque here (verified
+// by ras-identity). display_name is length-bounded on decode (DoS).
+message PairingRequest {
+  bytes  controller_id = 1; // 32-byte Ed25519 public key
+  string display_name  = 2; // length-bounded on decode
+  bytes  pubkey        = 3; // 32-byte Ed25519 public key
+  bytes  signature     = 4; // opaque; verified by ras-identity
+}
+
+// Host -> controller: the local user's pairing accept/deny (Invariant 1).
+message PairingDecision {
+  bool accepted = 1;
+}
+
+// Controller -> host: the signed, canonically-encoded AccessRequest. ras-grant
+// owns the encoding + the embedded controller signature; opaque here.
+message AccessRequestMsg {
+  bytes canonical = 1;
+}
+
+// Host -> controller: the consent outcome. EXACTLY ONE of {grant, denied} is
+// meaningful: on Allow, grant = PASETO v4.public bytes (opaque) and denied is
+// UNSPECIFIED; on refuse, grant is absent and denied is a non-UNSPECIFIED code.
+// The codec rejects both-set and neither-set as InvalidMessage.
+message AccessDecision {
+  optional bytes grant  = 1; // PASETO grant (opaque) — present iff allowed
+  ErrorCodeProto denied = 2; // reason — UNSPECIFIED (0) iff allowed
+}
+
+// Controller -> host: abandon the in-flight request.
+message CancelRequest {}
+
+// Either side: a typed protocol error on the bootstrap channel.
+message ProtocolError {
+  ErrorCodeProto code = 1;
+}
+
+// Top-level bootstrap-channel message. Exactly one variant is set (mirrors the
+// Rust `BootstrapMsg` enum). An unset oneof decodes to RasError(InvalidMessage).
+message BootstrapMsg {
+  oneof kind {
+    ClientHello      client_hello     = 1;
+    HostHello        host_hello       = 2;
+    PairingRequest   pairing_request  = 3;
+    PairingDecision  pairing_decision = 4;
+    AccessRequestMsg access_request   = 5;
+    AccessDecision   access_decision  = 6;
+    CancelRequest    cancel_request   = 7;
+    ProtocolError    protocol_error   = 8;
+  }
+}
