@@ -16,7 +16,7 @@ use iroh::{
     Endpoint as IrohEndpoint, EndpointAddr as IrohEndpointAddr, EndpointId as IrohEndpointId,
 };
 use ras_media::{ColorSpace, EncodedFrame, FrameId, StreamConfig, VideoCodec, VideoTransportKind};
-use ras_protocol::{ControlMsg, ErrorCode, RasError};
+use ras_protocol::{BootstrapMsg, ControlMsg, ErrorCode, RasError};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -27,6 +27,12 @@ pub type TransportError = ras_protocol::RasError;
 /// mismatched ALPN cannot connect (fail-closed at the TLS layer, before any app bytes). Bumped only
 /// on a breaking transport-wire change (ADR-059).
 pub const ALPN: &[u8] = b"casual-ras/1";
+
+/// Bootstrap-phase ALPN (Phase 2) — the `AccessRequest → consent → grant` handshake runs on this,
+/// separate from the session [`ALPN`]. Keeping them distinct ALPNs means the host's accept loop
+/// routes a connection to the bootstrap handler vs. the session handler by the TLS-negotiated
+/// protocol id, and a peer can never present bootstrap traffic on the session path or vice versa.
+pub const BOOTSTRAP_ALPN: &[u8] = b"casual-ras/bootstrap/1";
 
 /// Ed25519 public key of a peer (newtype over `iroh::EndpointId`, the 1.x rename of `NodeId`).
 /// This is identity — authenticates *who*, never *what they may do*.
@@ -243,10 +249,12 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Bind a new endpoint advertising the Casual RAS [`ALPN`] (n0 discovery + default relay preset).
+    /// Bind a new endpoint advertising both the session [`ALPN`] and the [`BOOTSTRAP_ALPN`] (n0
+    /// discovery + default relay preset). Advertising both lets one endpoint accept a bootstrap
+    /// connection and a session connection and route them by their negotiated ALPN.
     pub async fn bind() -> Result<Self, TransportError> {
         let inner = IrohEndpoint::builder(presets::N0)
-            .alpns(vec![ALPN.to_vec()])
+            .alpns(vec![ALPN.to_vec(), BOOTSTRAP_ALPN.to_vec()])
             .bind()
             .await
             .map_err(|_| RasError::fatal(ErrorCode::TransportError, "endpoint bind failed"))?;
@@ -291,6 +299,41 @@ impl Endpoint {
     /// hints, and fall back to n0 discovery-by-id when they don't reach. QUIC/TLS authenticates the
     /// peer's identity — never its authorization (Invariant 9).
     pub async fn connect(&self, target: &EndpointAddr) -> Result<Session, TransportError> {
+        self.dial(self.full_addr(target)?, ALPN).await
+    }
+
+    /// Dial a peer by explicit direct address(es), bypassing discovery — the same-network / loopback
+    /// path (and what the hermetic tests use). Relay/NAT-traversal dialing rides [`Self::connect`].
+    pub async fn connect_direct(
+        &self,
+        id: &EndpointId,
+        addrs: &[std::net::SocketAddr],
+    ) -> Result<Session, TransportError> {
+        self.dial(self.direct_addr(id, addrs)?, ALPN).await
+    }
+
+    /// Dial a peer on the **bootstrap** ALPN (Phase 2 authorization handshake). Same reachability as
+    /// [`Self::connect`] but negotiates [`BOOTSTRAP_ALPN`], so the host routes it to the bootstrap
+    /// handler. Identity is authenticated by QUIC/TLS, never authorization (Invariant 9).
+    pub async fn connect_bootstrap(
+        &self,
+        target: &EndpointAddr,
+    ) -> Result<Session, TransportError> {
+        self.dial(self.full_addr(target)?, BOOTSTRAP_ALPN).await
+    }
+
+    /// Dial the bootstrap ALPN by explicit direct address(es) (the hermetic-test / same-network path).
+    pub async fn connect_direct_bootstrap(
+        &self,
+        id: &EndpointId,
+        addrs: &[std::net::SocketAddr],
+    ) -> Result<Session, TransportError> {
+        self.dial(self.direct_addr(id, addrs)?, BOOTSTRAP_ALPN)
+            .await
+    }
+
+    /// Build an iroh address from a full [`EndpointAddr`] (id + direct + relay hints).
+    fn full_addr(&self, target: &EndpointAddr) -> Result<IrohEndpointAddr, TransportError> {
         let peer = iroh_id(&target.id)?;
         let mut addr = target
             .direct_addrs
@@ -302,30 +345,28 @@ impl Endpoint {
                 addr = addr.with_relay_url(relay);
             }
         }
-        self.dial(addr).await
+        Ok(addr)
     }
 
-    /// Dial a peer by explicit direct address(es), bypassing discovery — the same-network / loopback
-    /// path (and what the hermetic tests use). Relay/NAT-traversal dialing rides [`Self::connect`].
-    pub async fn connect_direct(
+    /// Build an iroh address from an id + explicit direct socket address(es), bypassing discovery.
+    fn direct_addr(
         &self,
         id: &EndpointId,
         addrs: &[std::net::SocketAddr],
-    ) -> Result<Session, TransportError> {
+    ) -> Result<IrohEndpointAddr, TransportError> {
         let peer = iroh_id(id)?;
         // `TransportAddr` is `#[non_exhaustive]` (not externally constructible); the public
         // `with_ip_addr` builder wraps each socket address into a direct-path hint for us.
-        let addr = addrs
+        Ok(addrs
             .iter()
             .copied()
-            .fold(IrohEndpointAddr::new(peer), |a, s| a.with_ip_addr(s));
-        self.dial(addr).await
+            .fold(IrohEndpointAddr::new(peer), |a, s| a.with_ip_addr(s)))
     }
 
-    async fn dial(&self, addr: IrohEndpointAddr) -> Result<Session, TransportError> {
+    async fn dial(&self, addr: IrohEndpointAddr, alpn: &[u8]) -> Result<Session, TransportError> {
         let conn = self
             .inner
-            .connect(addr, ALPN)
+            .connect(addr, alpn)
             .await
             .map_err(|_| RasError::recoverable(ErrorCode::TransportError, "connect failed"))?;
         Ok(Session {
@@ -436,6 +477,85 @@ where
                 return Err(RasError::recoverable(
                     ErrorCode::TransportError,
                     "control channel closed",
+                ));
+            }
+            self.read_buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+}
+
+/// Reliable, ordered **bootstrap** channel over one bidi QUIC stream, carrying `BootstrapMsg` (the
+/// Phase-2 `AccessRequest → consent → grant` handshake). The iroh stream types stay quarantined
+/// inside. Runs the same DoS-safe framing as [`ControlChannel`], but with the bootstrap codec.
+pub struct BootstrapChannel {
+    framed: FramedBootstrapChannel<RecvStream, SendStream>,
+}
+
+impl BootstrapChannel {
+    /// Send one bootstrap message.
+    pub async fn send(&mut self, msg: BootstrapMsg) -> Result<(), TransportError> {
+        self.framed.send(&msg).await
+    }
+
+    /// Await the next bootstrap message.
+    pub async fn recv(&mut self) -> Result<BootstrapMsg, TransportError> {
+        self.framed.recv().await
+    }
+}
+
+/// The [`FramedControlChannel`] analogue for `BootstrapMsg`: runs the `ras-protocol` bootstrap framing
+/// codec (`u32-BE length | protobuf(BootstrapMsg)`) over any async byte streams, so it is testable
+/// over an in-memory duplex and wires onto iroh's `(RecvStream, SendStream)` unchanged. The read side
+/// buffers across reads; the codec's `MAX_CONTROL_FRAME` guard rejects an oversized prefix before the
+/// body is read. Payloads (AccessRequest, PASETO grant) stay opaque here (Invariant 9).
+pub struct FramedBootstrapChannel<R, W> {
+    reader: R,
+    writer: W,
+    read_buf: BytesMut,
+}
+
+impl<R, W> FramedBootstrapChannel<R, W>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    /// Build over a read half and a write half (e.g. iroh `RecvStream` + `SendStream`).
+    pub fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader,
+            writer,
+            read_buf: BytesMut::with_capacity(4096),
+        }
+    }
+
+    /// Frame and send one bootstrap message, flushing so the peer observes it promptly.
+    pub async fn send(&mut self, msg: &BootstrapMsg) -> Result<(), TransportError> {
+        let framed = ras_protocol::codec::frame_bootstrap(msg);
+        self.writer.write_all(&framed).await.map_err(|_| {
+            RasError::recoverable(ErrorCode::TransportError, "bootstrap write failed")
+        })?;
+        self.writer.flush().await.map_err(|_| {
+            RasError::recoverable(ErrorCode::TransportError, "bootstrap flush failed")
+        })?;
+        Ok(())
+    }
+
+    /// Await the next complete bootstrap message. Incremental reads; the `MAX_CONTROL_FRAME` guard
+    /// fires on the length prefix before an oversized body is read. A clean peer close (EOF, empty
+    /// buffer) and a truncated frame both surface as a typed error.
+    pub async fn recv(&mut self) -> Result<BootstrapMsg, TransportError> {
+        loop {
+            if let Some(msg) = ras_protocol::codec::try_read_bootstrap_frame(&mut self.read_buf)? {
+                return Ok(msg);
+            }
+            let mut chunk = [0u8; 4096];
+            let n = self.reader.read(&mut chunk).await.map_err(|_| {
+                RasError::recoverable(ErrorCode::TransportError, "bootstrap read failed")
+            })?;
+            if n == 0 {
+                return Err(RasError::recoverable(
+                    ErrorCode::TransportError,
+                    "bootstrap channel closed",
                 ));
             }
             self.read_buf.extend_from_slice(&chunk[..n]);
@@ -774,6 +894,31 @@ impl Session {
     #[must_use]
     pub fn remote(&self) -> EndpointId {
         EndpointId(*self.conn.remote_id().as_bytes())
+    }
+
+    /// Whether this connection negotiated the [`BOOTSTRAP_ALPN`] (Phase-2 authorization handshake)
+    /// rather than the session [`ALPN`]. The host's accept loop routes on this. Fail-closed: an
+    /// absent/unrecognized ALPN is treated as **not** bootstrap (never mis-routed into the
+    /// consent/issuance path).
+    #[must_use]
+    pub fn is_bootstrap(&self) -> bool {
+        self.conn.alpn() == BOOTSTRAP_ALPN
+    }
+
+    /// The reliable **bootstrap** channel over one bidi QUIC stream, carrying `BootstrapMsg`. Here the
+    /// **controller opens** the stream and speaks first (`ClientHello` → `AccessRequest`) and the
+    /// **host accepts** — the mirror of the session control channel (ADR-059), because on the bootstrap
+    /// ALPN it is the *controller* that speaks first, so making it the opener is what unblocks the
+    /// host's accept with no dead wait.
+    pub async fn bootstrap(&self) -> Result<BootstrapChannel, TransportError> {
+        let (send, recv) = match self.role {
+            Role::Controller => self.conn.open_bi().await,
+            Role::Host => self.conn.accept_bi().await,
+        }
+        .map_err(|_| RasError::recoverable(ErrorCode::TransportError, "bootstrap stream failed"))?;
+        Ok(BootstrapChannel {
+            framed: FramedBootstrapChannel::new(recv, send),
+        })
     }
 
     /// The reliable control channel over one bidi QUIC stream. The **host opens** it and the
@@ -1144,6 +1289,10 @@ mod iroh_session_tests {
         // `accept_bi`. Then read the controller's reply.
         let host_task = tokio::spawn(async move {
             let session = host.accept().await.unwrap().expect("an inbound session");
+            assert!(
+                !session.is_bootstrap(),
+                "a session-ALPN connection must not be routed to the bootstrap handler"
+            );
             let remote = session.remote();
             let mut control = session.control().await.unwrap();
             control
@@ -1190,6 +1339,88 @@ mod iroh_session_tests {
         let host_saw = host_task.await.unwrap();
         // The acceptor authenticated the controller's identity in turn.
         assert_eq!(host_saw, controller_id);
+        controller.close().await;
+    }
+
+    /// End-to-end over a **real iroh connection** on the **bootstrap** ALPN (Phase 2): the controller
+    /// dials `connect_direct_bootstrap`, the host accepts and confirms `is_bootstrap()` (routing by
+    /// negotiated ALPN), and a full `BootstrapMsg` exchange round-trips — the **controller speaks
+    /// first** (`ClientHello` → `AccessRequest`), the host replies (`HostHello` → `AccessDecision`).
+    /// The AccessRequest and grant ride as **opaque bytes** (Invariant 9): the transport moves them,
+    /// never interprets them.
+    #[tokio::test]
+    async fn bootstrap_handshake_round_trips_over_a_real_iroh_connection() {
+        use ras_protocol::AccessOutcome;
+
+        let host = Endpoint::bind().await.unwrap();
+        let controller = Endpoint::bind().await.unwrap();
+        let host_id = host.id();
+        let host_addrs = to_loopback(&host.bound_addrs());
+
+        let host_task = tokio::spawn(async move {
+            let session = host.accept().await.unwrap().expect("an inbound session");
+            assert!(
+                session.is_bootstrap(),
+                "host must route a bootstrap-ALPN connection to the bootstrap handler"
+            );
+            let mut boot = session.bootstrap().await.unwrap();
+            // Read the controller's ClientHello, then its (opaque) AccessRequest.
+            assert!(matches!(
+                boot.recv().await.unwrap(),
+                BootstrapMsg::ClientHello {
+                    protocol_version: 1
+                }
+            ));
+            match boot.recv().await.unwrap() {
+                BootstrapMsg::AccessRequest { canonical } => {
+                    assert_eq!(&canonical[..], b"signed-access-request");
+                }
+                other => panic!("expected AccessRequest, got {other:?}"),
+            }
+            // Reply: HostHello, then an Allow decision carrying an opaque PASETO grant.
+            boot.send(BootstrapMsg::HostHello {
+                host_id: [7u8; 32],
+                tier: 0,
+            })
+            .await
+            .unwrap();
+            boot.send(BootstrapMsg::AccessDecision(AccessOutcome::Allowed {
+                grant: Bytes::from_static(b"v4.public.opaque-grant"),
+            }))
+            .await
+            .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            host.close().await;
+        });
+
+        let session = controller
+            .connect_direct_bootstrap(&host_id, &host_addrs)
+            .await
+            .unwrap();
+        assert_eq!(session.remote(), host_id);
+        let mut boot = session.bootstrap().await.unwrap();
+        boot.send(BootstrapMsg::ClientHello {
+            protocol_version: 1,
+        })
+        .await
+        .unwrap();
+        boot.send(BootstrapMsg::AccessRequest {
+            canonical: Bytes::from_static(b"signed-access-request"),
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            boot.recv().await.unwrap(),
+            BootstrapMsg::HostHello { tier: 0, .. }
+        ));
+        match boot.recv().await.unwrap() {
+            BootstrapMsg::AccessDecision(AccessOutcome::Allowed { grant }) => {
+                assert_eq!(&grant[..], b"v4.public.opaque-grant");
+            }
+            other => panic!("expected an Allowed decision, got {other:?}"),
+        }
+
+        host_task.await.unwrap();
         controller.close().await;
     }
 
@@ -1567,6 +1798,40 @@ mod framed_control_tests {
         for _ in 0..3 {
             let err = reader.recv().await.unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidMessage);
+        }
+    }
+
+    /// The bootstrap channel frames `BootstrapMsg` over the same duplex shape, both directions.
+    #[tokio::test]
+    async fn bootstrap_channel_round_trips_both_directions() {
+        let (a, b) = tokio::io::duplex(8192);
+        let (ar, aw) = split(a);
+        let (br, bw) = split(b);
+        let mut a = FramedBootstrapChannel::new(ar, aw);
+        let mut b = FramedBootstrapChannel::new(br, bw);
+
+        a.send(&BootstrapMsg::ClientHello {
+            protocol_version: 1,
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            b.recv().await.unwrap(),
+            BootstrapMsg::ClientHello {
+                protocol_version: 1
+            }
+        ));
+
+        b.send(&BootstrapMsg::AccessRequest {
+            canonical: Bytes::from_static(b"opaque-request"),
+        })
+        .await
+        .unwrap();
+        match a.recv().await.unwrap() {
+            BootstrapMsg::AccessRequest { canonical } => {
+                assert_eq!(&canonical[..], b"opaque-request")
+            }
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 }

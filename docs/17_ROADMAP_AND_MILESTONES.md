@@ -296,6 +296,14 @@ sequence (bottom-up: policy → identity → wire → bootstrap → grant → co
   validator test proves valid→Authorized, wrong-endpoint→IdentityMismatch, tampered→GrantInvalid; full
   ras-core suite (32 incl. real-iroh e2e) green. **Pending:** the app's two-phase bootstrap wiring +
   M3 security-test matrix (next).
+- ◐ `NET` `ras-transport-iroh` **bootstrap ALPN** (`casual-ras/bootstrap/1`): the endpoint advertises
+  it alongside the session ALPN; `connect_bootstrap`/`connect_direct_bootstrap` dial it and
+  `Session::is_bootstrap()` routes an accepted connection to the consent/issuance handler (fail-closed:
+  an unknown ALPN is never treated as bootstrap). A `BootstrapChannel` runs the `BootstrapMsg` framing
+  codec over one bidi stream — **controller opens + speaks first** (`ClientHello → AccessRequest`), host
+  accepts (mirror of the session channel's host-first order). Hermetic tests: a real two-endpoint iroh
+  bootstrap handshake (ClientHello/AccessRequest → HostHello/AccessDecision, grant opaque) + an
+  in-memory framed round-trip + the session-ALPN negative-routing assertion. **Pending:** app wiring.
 - ◐ `SEC` Replay defense: **nonce cache** (bounded, TTL-swept, fail-closed) shared by request
   validation; **ticket generation + consumed set** (in `ras-bootstrap`). Session-generation field is
   carried on the grant; the lease/generation *runtime* is Phase 3.
