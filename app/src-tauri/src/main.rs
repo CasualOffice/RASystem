@@ -448,6 +448,16 @@ async fn serve_one(
 // ─── Entrypoint ──────────────────────────────────────────────────────────────────────────────────
 
 fn main() {
+    // WebKitGTK's DMABUF renderer crashes or paints white artifacts on many Linux
+    // GPU/driver/compositor combinations — a well-known Tauri-on-Linux failure, and worse here
+    // because we use transparent overlay windows. Force the stable non-DMABUF path before the
+    // WebView (and any GTK thread) initializes, unless the user has explicitly chosen a value.
+    // Costs a little GPU compositing, never correctness. See issue #1.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     // App entrypoint: a failed event loop is an unrecoverable startup fault, not a request path.
     #[allow(clippy::expect_used)]
     tauri::Builder::default()
