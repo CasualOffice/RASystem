@@ -134,6 +134,16 @@ pub struct SoftwareKeyStore {
 }
 
 impl SoftwareKeyStore {
+    /// Build a store from a known 32-byte Ed25519 seed. This is a key **import**, never an export
+    /// (Inv 8): there is still no path to read the secret back out. Used to load a persisted identity
+    /// and to drive standard test vectors; it does not weaken the non-exporting guarantee.
+    #[must_use]
+    pub fn from_seed(seed: [u8; SECRET_KEY_LEN]) -> Self {
+        Self {
+            signing: SigningKey::from_bytes(&seed),
+        }
+    }
+
     /// A fresh in-memory key (ephemeral; not persisted). Used for tests and one-off sessions.
     pub fn generate() -> Result<Self, IdentityError> {
         let mut secret = [0u8; SECRET_KEY_LEN];

@@ -281,9 +281,16 @@ sequence (bottom-up: policy → identity → wire → bootstrap → grant → co
   Phase-1 `CASUALRAS1:` codec, dependency-free), not CBOR+Base64URL — same fail-closed guarantees, no
   new dep. **Pending:** QR rendering.
 - ☐ `SEC` Pairing flow + trusted-controller registry + revocation.
-- ☐ `SEC` Signed `AccessRequest` validation (signature, endpoint binding, expiry ≤5 min, nonce,
-  capability recognition) + `SessionGrant` issuance/validation, **sender-constrained** (DPoP-style).
-- ☐ `SEC` Replay defense: nonce cache, ticket generation + consumed set, session generation.
+- ◐ `SEC` Signed `AccessRequest` validation (ordered fail-closed: version → signature → host match →
+  endpoint binding → freshness ≤5 min/no-future → nonce → capability recognition) + `SessionGrant`
+  **PASETO v4.public** issuance/validation, **sender-constrained** to the controller endpoint
+  (ADR-040). `LocalHostGrantIssuer` behind the `SessionGrantIssuer` seam; grant caps =
+  `recognize(requested) ∩ policy ∩ consented`. PASETO envelope hand-written over dalek (**ADR-066**)
+  and verified byte-exact against the official v4 vectors (4-S-1/2/3). 27 tests (incl. property/fuzz).
+  **Pending:** wiring into `ras-core` + the app (next).
+- ◐ `SEC` Replay defense: **nonce cache** (bounded, TTL-swept, fail-closed) shared by request
+  validation; **ticket generation + consumed set** (in `ras-bootstrap`). Session-generation field is
+  carried on the grant; the lease/generation *runtime* is Phase 3.
 - ☐ `UI` Branded consent UI (identity, reason, requested caps, recording state, duration, stop);
   approve/reduce/view-only/deny; host-shown one-time PIN (Tier 0).
 - ☐ `QA` Security tests: stolen/expired/replayed ticket, stale-generation ticket, modified request,

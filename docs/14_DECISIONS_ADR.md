@@ -337,6 +337,31 @@
   reuse this same primitive. *If sign-off prefers a libsodium binding, only the `KeyStore` impl
   changes.* Pinned `=3.0.0-rc.0` to match iroh 1.0.2's tree (the RC iroh already ships).
 
+- **ADR-066 · PASETO v4.public envelope is implemented in-crate over `ed25519-dalek`, not via a
+  PASETO library · Accepted** (implements ADR-064; consistent with ADR-065). The MVP grant format is
+  fixed (ADR-064 = PASETO v4.public). For the *implementation*, `ras-grant` writes the deterministic
+  PASETO **envelope** itself — PAE (pre-authentication encoding), unpadded base64url, and the
+  header/footer framing (~120 lines) — and signs via the existing `ras-identity` `KeyStore`/`verify`
+  seam. The signature **primitive is not hand-rolled**: `ed25519-dalek` does the signing/verification,
+  exactly as ADR-065 mandates.
+  - **Why not a PASETO crate.** `rusty_paseto` pulls a **second** `ed25519-dalek` (2.x) *and* `ring`,
+    directly violating ADR-065's single-audited-impl posture and enlarging the security-critical tree.
+    `pasetors` avoids the dalek skew but introduces `orion` as a **separate** Ed25519 implementation
+    used only for the grant path — two audited-but-distinct Ed25519 stacks in one binary. The
+    in-crate envelope keeps **one** Ed25519 implementation (dalek), adds **zero** new supply-chain
+    surface (nothing new to license-gate, Inv 18), and keeps the whole grant path auditable in a
+    single small module.
+  - **Why this is safe despite "don't roll your own crypto."** The hand-written part is a
+    length-prefixed byte concatenation + base64, **not** a cryptographic primitive. It is pinned to
+    the spec and verified **byte-for-byte against the official PASETO v4 test vectors** (`4-S-1`
+    no-footer, `4-S-2` footer, `4-S-3` footer+implicit) in `ras-grant`'s tests — sign reproduces each
+    official token exactly and verify recovers each payload, so a spec deviation fails the build.
+  - **Reversibility.** The format is unchanged, so swapping to a PASETO library later (or to Biscuit
+    for the offline-attenuating control-plane issuer, ADR-064) touches only `ras-grant`'s
+    encoder/decoder — no wire or validator change. *Decision made under a priorities call
+    (Security 1 > Latency 2 > UX 3): an internal grant-token format is not user-facing, so UX is
+    unaffected; the single-impl, zero-new-dep security posture wins.*
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
