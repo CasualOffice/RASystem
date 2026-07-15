@@ -179,9 +179,15 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     (BSD-2) — the safe wrapper exposes no bitrate setter. So the `LatencyFirstAbr` in `ras-core` now
     actually adapts both backends. Unit-verified: after a runtime `set_bitrate` drop the encoder emits
     substantially smaller access units for the same content (no reconfigure, no IDR).
+  - **ABR loss estimate is now windowed, not cumulative.** `HealthObserver` remembers the previous
+    `(sent, lost)` datagram counters and reports `loss_fraction` over the interval since the last
+    read (`windowed_loss`), so a burst of loss no longer stays baked into the lifetime average and
+    permanently depresses the bitrate — the ABR raises it again once the link recovers. The adapter
+    holds one persistent `HealthObserver` so the window survives across the 500 ms ticks. Pure math
+    unit-tested (recovery-after-burst, idle-interval, clamping).
   - Still stubbed / deferred (`todo!()` or additive): iroh **reset-on-stale + FEC** and the
-    `DatagramFec` video alternative (behind `StreamConfig::video_transport`), windowed (vs cumulative)
-    loss for the ABR estimate, **hardware encoders + Wayland DMA-buf zero-copy** (Linux/Windows use the
+    `DatagramFec` video alternative (behind `StreamConfig::video_transport`),
+    **hardware encoders + Wayland DMA-buf zero-copy** (Linux/Windows use the
     software OpenH264 path), the **Phase-2 grant/lease/capability
     model** (consent is now real local Allow/Deny, but authorization is still coarse — no signed
     grants/leases, no capability scoping, no TPM tiers), excluding the host overlay from capture +

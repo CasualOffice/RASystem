@@ -23,7 +23,8 @@ use crate::CoreError;
 use ras_media::EncodedFrame;
 use ras_protocol::{ControlMsg, ErrorCode};
 use ras_transport_iroh::{
-    ConnHealth, ControlChannel, Endpoint, SendOutcome, Session, VideoEvent, VideoSink, VideoSource,
+    ConnHealth, ControlChannel, Endpoint, HealthObserver, SendOutcome, Session, VideoEvent,
+    VideoSink, VideoSource,
 };
 
 /// A [`SessionTransport`] over one established iroh session. Holds a shared handle to the owning
@@ -35,6 +36,9 @@ pub struct IrohSessionTransport {
     _endpoint: Arc<Endpoint>,
     session: Session,
     remote: PeerIdentity,
+    // One persistent health observer so the windowed-loss baseline survives across ABR ticks (a
+    // fresh observer per tick would reset the window and report the lifetime loss average instead).
+    health: HealthObserver,
 }
 
 impl IrohSessionTransport {
@@ -44,10 +48,12 @@ impl IrohSessionTransport {
     #[must_use]
     pub fn new(endpoint: Arc<Endpoint>, session: Session) -> Self {
         let remote = session.remote();
+        let health = session.health();
         Self {
             _endpoint: endpoint,
             session,
             remote,
+            health,
         }
     }
 }
@@ -79,7 +85,7 @@ impl SessionTransport for IrohSessionTransport {
     }
 
     fn health(&self) -> ConnHealth {
-        self.session.health().snapshot()
+        self.health.snapshot()
     }
 }
 

@@ -8,6 +8,7 @@
 //! `iroh` directly.
 
 use core::time::Duration;
+use std::sync::Mutex;
 
 use bytes::{Bytes, BytesMut};
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream, VarInt};
@@ -811,10 +812,15 @@ impl Session {
         }
     }
     /// Connection-health observable, computed on demand from this connection's live QUIC stats.
+    ///
+    /// Hold onto the returned observer across samples: each read reports loss over the interval
+    /// since the previous read (a windowed rate), so a fresh observer per read would lose that
+    /// baseline and fall back to the lifetime average.
     #[must_use]
     pub fn health(&self) -> HealthObserver {
         HealthObserver {
             conn: self.conn.clone(),
+            prev_loss: Mutex::new(None),
         }
     }
 
@@ -828,9 +834,41 @@ impl Session {
 /// Read-only connection-health observable over one iroh [`Connection`]. Each read derives a fresh
 /// [`ConnHealth`] from the connection's live QUIC stats; it reads in-memory counters only and never
 /// awaits network I/O, so a stalled video path can never block a health read (the latency invariant).
-#[derive(Clone)]
+///
+/// It is *lightly* stateful: it remembers the previous loss counters so each read reports loss over
+/// the interval since the last read, not the connection's lifetime average (so the ABR recovers the
+/// bitrate once a loss burst passes). The state is one small baseline behind a `Mutex`; a read still
+/// never blocks on I/O.
 pub struct HealthObserver {
     conn: Connection,
+    prev_loss: Mutex<Option<LossSample>>,
+}
+
+/// Cumulative datagram counters captured at a health sample, used to window the loss rate.
+#[derive(Clone, Copy)]
+struct LossSample {
+    sent: u64,
+    lost: u64,
+}
+
+/// Loss fraction over the interval between two cumulative samples (or the lifetime ratio for the
+/// first sample, when there is no prior baseline). Pure — unit-tested without a live connection.
+/// An idle interval (no datagrams sent) reports `0.0`: no traffic, no observed loss.
+fn windowed_loss(prev: Option<LossSample>, cur: LossSample) -> f32 {
+    let frac = match prev {
+        Some(p) => {
+            let d_sent = cur.sent.saturating_sub(p.sent);
+            let d_lost = cur.lost.saturating_sub(p.lost);
+            if d_sent > 0 {
+                d_lost as f64 / d_sent as f64
+            } else {
+                0.0
+            }
+        }
+        None if cur.sent > 0 => cur.lost as f64 / cur.sent as f64,
+        None => 0.0,
+    };
+    (frac as f32).clamp(0.0, 1.0)
 }
 
 impl HealthObserver {
@@ -839,9 +877,10 @@ impl HealthObserver {
     const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
     /// The current health snapshot. Non-blocking: reads in-memory QUIC counters, never the network.
+    /// Advances the loss window (this read becomes the baseline for the next).
     #[must_use]
     pub fn snapshot(&self) -> ConnHealth {
-        map_health(&self.conn)
+        map_health(&self.conn, &self.prev_loss)
     }
 
     /// Await the next sampled health value (UI reactivity + ABR, not the hot path). iroh exposes no
@@ -857,14 +896,14 @@ impl HealthObserver {
 /// - `rtt_us` / `estimated_bandwidth_bps` / `path` come from the **selected** network path's
 ///   [`PathStats`] (`rtt`, congestion window, relay-vs-direct); bandwidth is the BDP estimate
 ///   `cwnd·8 / rtt` (bits/sec), saturating.
-/// - `loss_fraction` is the **cumulative** lost-vs-sent datagram ratio from `ConnectionStats` (a
-///   coarse lifetime average, not a recent-window rate — the windowed loss estimate lands with the
-///   FEC/ABR increment).
+/// - `loss_fraction` is the lost-vs-sent datagram ratio **over the interval since the last read**
+///   (windowed via `prev_loss`), so a burst of loss no longer depresses the estimate for the rest of
+///   the session — the ABR can raise the bitrate again once the link recovers.
 /// - `frames_dropped` is `0` here: host-side sink drops surface as a [`SendOutcome`] at send time,
 ///   not through this connection-level view.
 /// - `state` is [`LinkState::Live`] while the connection is up; the watchdog `Stalled`/`Reconnecting`
 ///   transitions are a `ras-core` timing concern, not a transport-stats one.
-fn map_health(conn: &Connection) -> ConnHealth {
+fn map_health(conn: &Connection, prev_loss: &Mutex<Option<LossSample>>) -> ConnHealth {
     let paths = conn.paths();
     // The path currently carrying application data (fall back to the first known path).
     let selected = paths
@@ -892,11 +931,17 @@ fn map_health(conn: &Connection) -> ConnHealth {
     let estimated_bandwidth_bps = u32::try_from(bw_bps).unwrap_or(u32::MAX);
 
     let cs = conn.stats();
-    let sent = cs.udp_tx.datagrams;
-    let loss_fraction = if sent > 0 {
-        (cs.lost_packets as f64 / sent as f64) as f32
-    } else {
-        0.0
+    let cur = LossSample {
+        sent: cs.udp_tx.datagrams,
+        lost: cs.lost_packets,
+    };
+    let loss_fraction = {
+        let mut prev = prev_loss
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let frac = windowed_loss(*prev, cur);
+        *prev = Some(cur);
+        frac
     };
 
     ConnHealth {
@@ -910,6 +955,53 @@ fn map_health(conn: &Connection) -> ConnHealth {
         estimated_bandwidth_bps,
         frames_dropped: 0,
         state: LinkState::Live,
+    }
+}
+
+#[cfg(test)]
+mod loss_window_tests {
+    use super::{windowed_loss, LossSample};
+
+    fn s(sent: u64, lost: u64) -> LossSample {
+        LossSample { sent, lost }
+    }
+
+    #[test]
+    fn first_sample_uses_lifetime_ratio() {
+        assert_eq!(windowed_loss(None, s(0, 0)), 0.0); // nothing sent yet
+        assert!((windowed_loss(None, s(100, 10)) - 0.10).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reports_loss_over_the_interval_not_the_lifetime() {
+        // 5% loss confined to this interval (50 of 1000 new datagrams), despite a clean history.
+        let prev = s(9_000, 0);
+        let cur = s(10_000, 50);
+        assert!((windowed_loss(Some(prev), cur) - 0.05).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recovers_after_a_burst_passes() {
+        // History carries a big cumulative loss (100/1000 = 10% lifetime), but the latest interval
+        // is clean — the windowed estimate must read ~0 so the ABR can raise the bitrate again.
+        let prev = s(1_000, 100);
+        let cur = s(2_000, 100); // 1000 new datagrams, 0 new losses
+        assert_eq!(windowed_loss(Some(prev), cur), 0.0);
+    }
+
+    #[test]
+    fn idle_interval_reports_no_loss() {
+        // No datagrams sent since the last read → no traffic, no observed loss (avoid divide-by-zero
+        // and avoid carrying a stale rate forward).
+        let prev = s(5_000, 50);
+        assert_eq!(windowed_loss(Some(prev), s(5_000, 50)), 0.0);
+    }
+
+    #[test]
+    fn saturates_into_zero_one() {
+        // Defensive: counters are monotonic, but never emit a nonsensical fraction.
+        assert_eq!(windowed_loss(Some(s(100, 100)), s(50, 40)), 0.0); // sent went backwards → 0
+        assert_eq!(windowed_loss(Some(s(0, 0)), s(10, 10)), 1.0); // total loss this interval
     }
 }
 
