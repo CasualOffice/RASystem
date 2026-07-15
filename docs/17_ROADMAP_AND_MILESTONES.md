@@ -287,7 +287,15 @@ sequence (bottom-up: policy → identity → wire → bootstrap → grant → co
   (ADR-040). `LocalHostGrantIssuer` behind the `SessionGrantIssuer` seam; grant caps =
   `recognize(requested) ∩ policy ∩ consented`. PASETO envelope hand-written over dalek (**ADR-066**)
   and verified byte-exact against the official v4 vectors (4-S-1/2/3). 27 tests (incl. property/fuzz).
-  **Pending:** wiring into `ras-core` + the app (next).
+- ◐ `CORE` `ras-core` auth seam filled (design §4): `SessionAuthContext` extended (host id + now,
+  additive), `GrantDecision::Authorized(CapabilitySet)` (per-message scope for Phase 3), and the real
+  `GrantSessionValidator` calling `ras_grant::validate_grant` against the transport-authenticated
+  endpoint (sender-constraint enforced at the moment identity is proven). The controller presents its
+  grant in `ControlMsg::AuthEnvelope`; the host reads it before authorizing. Loopback e2e tests moved
+  to concurrent `join!` (the host now needs the controller mid-handshake, as over real iroh). Direct
+  validator test proves valid→Authorized, wrong-endpoint→IdentityMismatch, tampered→GrantInvalid; full
+  ras-core suite (32 incl. real-iroh e2e) green. **Pending:** the app's two-phase bootstrap wiring +
+  M3 security-test matrix (next).
 - ◐ `SEC` Replay defense: **nonce cache** (bounded, TTL-swept, fail-closed) shared by request
   validation; **ticket generation + consumed set** (in `ras-bootstrap`). Session-generation field is
   carried on the grant; the lease/generation *runtime* is Phase 3.

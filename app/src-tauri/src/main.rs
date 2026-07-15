@@ -228,8 +228,10 @@ impl ras_core::GrantValidator for LocalConsent {
             .emit("consent-request", short_id(&ctx.peer_identity.0));
 
         // Wait for the click; a 90 s silence denies (fail-closed) so a session can't hang forever.
+        // On Allow the local user consents to the Phase-2 view-only capability set (screen view +
+        // visual pointer + annotation); the session carries it for the per-message checks (Inv 15).
         let decision = match tokio::time::timeout(std::time::Duration::from_secs(90), rx).await {
-            Ok(Ok(true)) => GrantDecision::Authorized,
+            Ok(Ok(true)) => GrantDecision::Authorized(ras_core::policy::phase2_default_policy()),
             _ => GrantDecision::Denied(ErrorCode::ConsentDenied),
         };
         *lock(&self.pending) = None;

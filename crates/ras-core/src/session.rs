@@ -67,6 +67,16 @@ fn transport_err(context: &'static str) -> CoreError {
     CoreError::fatal(ErrorCode::TransportError, context)
 }
 
+/// Wall-clock time in ms since the Unix epoch, for the authorization gate (`not_before`/`expires_at`).
+/// The single point where ambient time enters the orchestrator; a pre-epoch clock saturates to 0
+/// (fail-closed: everything looks "not yet valid" rather than silently valid).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 /// Apply an event to the shared state, returning the new state on a valid transition.
 fn apply(state: &Mutex<SessionState>, event: SessionEvent) -> Option<SessionState> {
     let mut guard = state
@@ -138,6 +148,10 @@ pub struct HostSessionConfig {
     /// window id, so they never re-enter the shared feed (privacy + no capture-feedback loop). The
     /// UI supplies these; empty means capture the whole display.
     pub excluded_window_ids: Vec<WindowId>,
+    /// This host's own identity (Ed25519 public key). Handed to the [`GrantValidator`] so it can check
+    /// the presented grant's `host_id`/`issuer` match. `[0u8; 32]` for the `insecure-no-auth` path
+    /// (the no-op validator ignores it).
+    pub host_id: [u8; 32],
 }
 
 impl HostSessionConfig {
@@ -149,6 +163,7 @@ impl HostSessionConfig {
             max_bitrate_bps: 8_000_000,
             reconnect_window: Duration::from_secs(10),
             excluded_window_ids: Vec::new(),
+            host_id: [0u8; 32],
         }
     }
 
@@ -156,6 +171,13 @@ impl HostSessionConfig {
     #[must_use]
     pub fn with_excluded_windows(mut self, ids: Vec<WindowId>) -> Self {
         self.excluded_window_ids = ids;
+        self
+    }
+
+    /// Set this host's identity (the grant validator checks it against the presented grant).
+    #[must_use]
+    pub fn with_host_id(mut self, host_id: [u8; 32]) -> Self {
+        self.host_id = host_id;
         self
     }
 }
@@ -279,18 +301,35 @@ where
             session_id: inner.session_id,
         });
 
-        // Handshake + Phase-1 no-op authorization.
+        // Handshake: host speaks first (ADR-059), then reads the controller's AuthEnvelope (the
+        // session grant) as the first control message before authorizing. `Bye` here is a clean
+        // controller-side abort; anything else (or empty) leaves `access_request` empty and the real
+        // validator will deny — the no-op validator ignores it.
         control
             .send(ControlMsg::Hello {
                 protocol_version: 1,
             })
             .await?;
+        let access_request = match control.recv().await? {
+            ControlMsg::AuthEnvelope { payload } => payload,
+            ControlMsg::Bye { code } => {
+                apply(&inner.state, SessionEvent::Reject { code });
+                return Err(CoreError::fatal(
+                    code,
+                    "controller aborted before authorization",
+                ));
+            }
+            _ => bytes::Bytes::new(),
+        };
         let ctx = SessionAuthContext {
             peer_identity,
-            access_request: bytes::Bytes::new(),
+            access_request,
+            host_id: inner.config.host_id,
+            now: now_ms(),
         };
         match inner.validator.authorize(&ctx).await? {
-            GrantDecision::Authorized => {
+            GrantDecision::Authorized(_caps) => {
+                // _caps drives the per-message capability checks in Phase 3 (view-only today).
                 apply(&inner.state, SessionEvent::Authorized);
             }
             GrantDecision::Denied(code) => {
@@ -744,6 +783,10 @@ pub struct ControllerSessionConfig {
     /// How long to stay `Suspended` after a transport loss before giving up (→ `Terminated`). While
     /// suspended the controller freezes/blanks video but keeps its cursor + controls live.
     pub reconnect_window: Duration,
+    /// The PASETO session grant (obtained out-of-band in the bootstrap phase) to present to the host
+    /// in `ControlMsg::AuthEnvelope`. Empty on the `insecure-no-auth` path (the host's no-op validator
+    /// ignores it); a real host denies an empty/invalid grant.
+    pub grant: bytes::Bytes,
 }
 
 impl ControllerSessionConfig {
@@ -754,7 +797,15 @@ impl ControllerSessionConfig {
             target,
             target_buffer: Duration::from_millis(30),
             reconnect_window: Duration::from_secs(10),
+            grant: bytes::Bytes::new(),
         }
+    }
+
+    /// Attach the session grant to present to the host on the session ALPN.
+    #[must_use]
+    pub fn with_grant(mut self, grant: bytes::Bytes) -> Self {
+        self.grant = grant;
+        self
     }
 }
 
@@ -844,6 +895,14 @@ impl ControllerSession {
         sink.emit(LifecycleEvent::SessionReady {
             session_id: inner.session_id,
         });
+
+        // Present the session grant first (the host reads it as its first control message and gates
+        // authorization on it). Empty on the insecure path; the host's no-op validator ignores it.
+        control
+            .send(ControlMsg::AuthEnvelope {
+                payload: inner.config.grant.clone(),
+            })
+            .await?;
 
         // Handshake: read control until the host announces the stream config.
         let config = loop {

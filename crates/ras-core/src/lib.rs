@@ -39,8 +39,8 @@ pub use abr::LatencyFirstAbr;
 #[cfg(feature = "insecure-no-auth")]
 pub use deps::AllowAllValidator;
 pub use deps::{
-    ControlChannelDyn, FrameSink, GrantDecision, GrantValidator, PushResult, SessionAuthContext,
-    SessionTransport, VideoSinkDyn, VideoSourceDyn,
+    ControlChannelDyn, FrameSink, GrantDecision, GrantSessionValidator, GrantValidator, PushResult,
+    SessionAuthContext, SessionTransport, VideoSinkDyn, VideoSourceDyn,
 };
 pub use event::{
     LifecycleEvent, LifecycleStream, QualitySample, SessionId, StopReason, StreamDescriptor,
@@ -492,8 +492,12 @@ mod e2e {
         let controller = ControllerSession::new(ControllerSessionConfig::new(target), ctrl_tp);
 
         // Host accepts and starts pushing; controller dials and negotiates the stream.
-        let mut host_events = host.start().await.unwrap();
-        let _ctrl_events = controller.connect().await.unwrap();
+        // Phase 2: the host now reads the controller's AuthEnvelope mid-handshake, so both sides must
+        // make progress together (as over real iroh) — the pre-wired loopback no longer lets one run
+        // to completion first.
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let mut host_events = host_r.unwrap();
+        let _ctrl_events = ctrl_r.unwrap();
 
         // Both reach Active purely via the state machine (Authorized gate included).
         assert_eq!(host.state(), SessionState::Active);
@@ -572,8 +576,12 @@ mod e2e {
             ctrl_tp,
         );
 
-        let mut host_events = host.start().await.unwrap();
-        let _ctrl_events = controller.connect().await.unwrap();
+        // Phase 2: the host now reads the controller's AuthEnvelope mid-handshake, so both sides must
+        // make progress together (as over real iroh) — the pre-wired loopback no longer lets one run
+        // to completion first.
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let mut host_events = host_r.unwrap();
+        let _ctrl_events = ctrl_r.unwrap();
         assert_eq!(host.state(), SessionState::Active);
 
         // The controller points at ~3/4 across, 1/4 down — a "look here" gesture. Best-effort send.
@@ -617,8 +625,9 @@ mod e2e {
         cfg.reconnect_window = Duration::from_millis(120); // short so the test is fast
         let controller = ControllerSession::new(cfg, ctrl_tp);
 
-        let _host_events = host.start().await.unwrap();
-        let mut ctrl_events = controller.connect().await.unwrap();
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let _host_events = host_r.unwrap();
+        let mut ctrl_events = ctrl_r.unwrap();
         assert!(
             wait_until(|| controller.state() == SessionState::Active, 300).await,
             "controller should reach Active, got {:?}",
@@ -682,8 +691,9 @@ mod e2e {
         cfg.reconnect_window = Duration::from_secs(30);
         let controller = ControllerSession::new(cfg, ctrl_tp);
 
-        let _host_events = host.start().await.unwrap();
-        let mut ctrl_events = controller.connect().await.unwrap();
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let _host_events = host_r.unwrap();
+        let mut ctrl_events = ctrl_r.unwrap();
         assert!(wait_until(|| controller.state() == SessionState::Active, 300).await);
 
         host.stop(StopReason::UserRequested).await;
@@ -734,8 +744,9 @@ mod e2e {
             ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
             ctrl_tp,
         );
-        let _host_events = host.start().await.unwrap();
-        let _ctrl_events = controller.connect().await.unwrap();
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let _host_events = host_r.unwrap();
+        let _ctrl_events = ctrl_r.unwrap();
         let sink = CountingFrameSink::new();
         controller
             .attach_renderer(Arc::new(sink.clone()))
@@ -782,8 +793,9 @@ mod e2e {
             ctrl_tp,
         );
 
-        let _host_events = host.start().await.unwrap();
-        let _ctrl_events = controller.connect().await.unwrap();
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let _host_events = host_r.unwrap();
+        let _ctrl_events = ctrl_r.unwrap();
         let sink = CountingFrameSink::new();
         controller
             .attach_renderer(Arc::new(sink.clone()))
@@ -838,8 +850,9 @@ mod e2e {
             ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
             ctrl_tp,
         );
-        let _h = host.start().await.unwrap();
-        let _c = controller.connect().await.unwrap();
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let _h = host_r.unwrap();
+        let _c = ctrl_r.unwrap();
         assert!(wait_until(|| host.state() == SessionState::Active, 300).await);
 
         host.emergency_stop(ras_protocol::ErrorCode::SessionRevoked)
@@ -873,8 +886,9 @@ mod e2e {
             ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
             ctrl_tp,
         );
-        let _host_events = host.start().await.unwrap();
-        let mut ctrl_events = controller.connect().await.unwrap();
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let _host_events = host_r.unwrap();
+        let mut ctrl_events = ctrl_r.unwrap();
         assert!(wait_until(|| controller.state() == SessionState::Active, 300).await);
 
         host.emergency_stop(ras_protocol::ErrorCode::SessionRevoked)
@@ -921,7 +935,7 @@ mod e2e {
             }
         }
 
-        let (host_tp, _ctrl_tp) = loopback_pair();
+        let (host_tp, ctrl_tp) = loopback_pair();
         let host = HostSession::new(
             HostSessionConfig::new(MonitorId(0)),
             host_tp,
@@ -929,6 +943,13 @@ mod e2e {
             SyntheticEncoder::new(),
             Arc::new(DenyValidator),
         );
+        // A controller must present its AuthEnvelope for the host to reach the authorize gate; it
+        // connects concurrently and is torn down when the host denies.
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let ctrl = tokio::spawn(async move { controller.connect().await });
 
         let err = host.start().await.unwrap_err();
         assert_eq!(err.code, ras_protocol::ErrorCode::ConsentDenied);
@@ -937,6 +958,7 @@ mod e2e {
             SessionState::Rejected,
             "a denied session must land on the Rejected terminal, never Active"
         );
+        let _ = ctrl.await;
     }
 
     /// Fail-closed for a decision Phase 1 can't service: an interactive `NeedConsent` must be treated
@@ -957,7 +979,7 @@ mod e2e {
             }
         }
 
-        let (host_tp, _ctrl_tp) = loopback_pair();
+        let (host_tp, ctrl_tp) = loopback_pair();
         let host = HostSession::new(
             HostSessionConfig::new(MonitorId(0)),
             host_tp,
@@ -965,6 +987,11 @@ mod e2e {
             SyntheticEncoder::new(),
             Arc::new(NeedsConsentValidator),
         );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let ctrl = tokio::spawn(async move { controller.connect().await });
 
         let err = host.start().await.unwrap_err();
         assert_eq!(err.code, ras_protocol::ErrorCode::ConsentDenied);
@@ -972,6 +999,104 @@ mod e2e {
             host.state(),
             SessionState::Active,
             "an unserviceable consent decision must never reach Active"
+        );
+        let _ = ctrl.await;
+    }
+
+    /// The real session-phase gate (`GrantSessionValidator`) authorizes a valid PASETO grant and
+    /// **fails closed** on the two attacks the sender-constraint defends against: a grant replayed
+    /// from a different endpoint, and a tampered token. Exercises the `ras-grant` ↔ `ras-core` seam
+    /// directly (no transport) so the authorization logic is verified independent of the orchestrator.
+    #[tokio::test]
+    async fn grant_session_validator_authorizes_valid_grant_and_denies_forgeries() {
+        use crate::deps::{
+            GrantDecision, GrantSessionValidator, GrantValidator, SessionAuthContext,
+        };
+        use ras_grant::{AccessRequest, LocalHostGrantIssuer, SessionGrantIssuer, SessionParams};
+        use ras_identity::{KeyStore, SoftwareKeyStore};
+
+        let host = SoftwareKeyStore::from_seed([1u8; 32]);
+        let host_id = host.public_key();
+        let controller = SoftwareKeyStore::generate().unwrap();
+        let ctrl_ep = [2u8; 32];
+        let now = 1_000_000u64;
+
+        // Controller signs a request bound to this host + its endpoint, then the host issues a grant.
+        let req = AccessRequest::signed(
+            &controller,
+            [1u8; 16],
+            ras_protocol::PROTOCOL_VERSION,
+            host_id,
+            "Tech".to_string(),
+            ctrl_ep,
+            ["screen.view".to_string()].into_iter().collect(),
+            "help".to_string(),
+            now,
+            now + 60_000,
+            [9u8; 16],
+        )
+        .unwrap();
+        let issuer = LocalHostGrantIssuer::new(
+            SoftwareKeyStore::from_seed([1u8; 32]),
+            ras_policy::phase2_default_policy(),
+            1,
+        );
+        let session = SessionParams {
+            session_id: [5u8; 16],
+            host_endpoint_id: [3u8; 32],
+            session_generation: 1,
+            session_nonce: [6u8; 16],
+            issued_at: now,
+            not_before: now,
+            expires_at: now + 60_000,
+        };
+        let token = issuer
+            .issue(
+                &req,
+                &["screen.view".to_string()].into_iter().collect(),
+                &session,
+            )
+            .await
+            .unwrap();
+
+        let validator = GrantSessionValidator;
+        let ctx = |ep: [u8; 32], grant: bytes::Bytes| SessionAuthContext {
+            peer_identity: EndpointId(ep),
+            access_request: grant,
+            host_id,
+            now: now + 1_000,
+        };
+
+        // Valid grant from the bound endpoint → Authorized with exactly the granted caps.
+        match validator
+            .authorize(&ctx(ctrl_ep, token.clone()))
+            .await
+            .unwrap()
+        {
+            GrantDecision::Authorized(caps) => {
+                assert_eq!(caps, ["screen.view".to_string()].into_iter().collect());
+            }
+            other => panic!("expected Authorized, got {other:?}"),
+        }
+
+        // Same grant presented from a different endpoint → sender-constraint fails closed.
+        assert_eq!(
+            validator
+                .authorize(&ctx([0xEE; 32], token.clone()))
+                .await
+                .unwrap(),
+            GrantDecision::Denied(ras_protocol::ErrorCode::IdentityMismatch)
+        );
+
+        // Tampered token → GrantInvalid.
+        let mut bad = token.to_vec();
+        bad[14] ^= 0x01;
+        assert_eq!(
+            validator
+                .authorize(&ctx(ctrl_ep, bytes::Bytes::from(bad)))
+                .await
+                .unwrap(),
+            GrantDecision::Denied(ras_protocol::ErrorCode::GrantInvalid)
         );
     }
 }

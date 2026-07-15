@@ -15,6 +15,7 @@ use async_trait::async_trait;
 
 use crate::CoreError;
 use ras_media::{EncodedFrame, StreamConfig};
+use ras_policy::CapabilitySet;
 use ras_protocol::{ControlMsg, ErrorCode};
 use ras_transport_iroh::{ConnHealth, SendOutcome, VideoEvent};
 
@@ -95,24 +96,33 @@ pub trait GrantValidator: Send + Sync {
     async fn authorize(&self, ctx: &SessionAuthContext) -> Result<GrantDecision, CoreError>;
 }
 
-/// Content-free context handed to the validator. Phase 1 carries the transport-authenticated
-/// identity plus the (empty in Phase 1) opaque access-request bytes. `#[non_exhaustive]` — Phase 2
-/// adds capabilities/nonce additively.
+/// Content-free context handed to the validator. Carries the transport-authenticated identity, the
+/// opaque access-request/grant bytes from `ControlMsg::AuthEnvelope`, and (Phase 2, additive) the
+/// host's own identity + the current time so a real validator can enforce the endpoint/host bindings
+/// and expiry. `#[non_exhaustive]` so later fields stay additive.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SessionAuthContext {
-    /// The identity the transport authenticated. **Not** authorization.
+    /// The identity the transport authenticated (the peer's iroh `EndpointId`). **Not** authorization
+    /// — the grant's `controller_endpoint_id` must equal this (sender-constraint, Inv 3/9/ADR-040).
     pub peer_identity: PeerIdentity,
-    /// Opaque access-request payload from `ControlMsg::AuthEnvelope`. Empty in Phase 1.
+    /// Opaque payload from `ControlMsg::AuthEnvelope` — the PASETO session grant on the session ALPN.
+    /// Empty in an `insecure-no-auth` build (the no-op validator ignores it).
     pub access_request: bytes::Bytes,
+    /// This host's own identity (Ed25519 public key). The grant's `host_id`/`issuer` must match.
+    pub host_id: [u8; 32],
+    /// Current time (ms since epoch) at the authorize gate — for `not_before`/`expires_at`.
+    pub now: u64,
 }
 
 /// The validator's verdict.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum GrantDecision {
-    /// Proceed → orchestrator emits `SessionEvent::Authorized`.
-    Authorized,
+    /// Proceed → orchestrator emits `SessionEvent::Authorized`. Carries the **granted capability set**
+    /// (Phase 2) so the session starts knowing its scope for the per-message checks (Inv 15 / ADR-041);
+    /// the MVP grants only view-only caps, but the enforcement path exists for Phase-3 input.
+    Authorized(CapabilitySet),
     /// Interactive consent pending (Phase 2): hold in `ControlEstablished` until re-driven.
     NeedConsent,
     /// Multi-step challenge/response (Phase 2 replay/nonce).
@@ -121,8 +131,34 @@ pub enum GrantDecision {
     Denied(ErrorCode),
 }
 
-/// PHASE-1 ONLY. Returns `Authorized` unconditionally. Gated behind `insecure-no-auth` so it can
-/// never link into an auth build.
+/// The **real** session-phase authorization gate (Phase 2). Parses `access_request` as the PASETO
+/// v4.public session grant and calls [`ras_grant::validate_grant`] against the endpoint the transport
+/// just authenticated — enforcing the sender-constraint (ADR-040) at the exact moment the endpoint is
+/// proven. Stateless: every input comes from the [`SessionAuthContext`], so a future control-plane
+/// validator (different verifying key) is a sibling impl, not a change here.
+///
+/// This is the local-host validator (issuer == host), so the grant's issuer key == `ctx.host_id`.
+pub struct GrantSessionValidator;
+
+#[async_trait]
+impl GrantValidator for GrantSessionValidator {
+    async fn authorize(&self, ctx: &SessionAuthContext) -> Result<GrantDecision, CoreError> {
+        match ras_grant::validate_grant(
+            &ctx.access_request,
+            &ctx.host_id,
+            &ctx.host_id, // MVP: issuer == host, so the verifying key is the host id
+            &ctx.peer_identity.0,
+            ctx.now,
+        ) {
+            Ok(grant) => Ok(GrantDecision::Authorized(grant.granted_capabilities)),
+            // No oracle beyond the stable code; the session lands on `Rejected`.
+            Err(code) => Ok(GrantDecision::Denied(code)),
+        }
+    }
+}
+
+/// PHASE-1 ONLY. Returns `Authorized` (with an empty capability set) unconditionally. Gated behind
+/// `insecure-no-auth` so it can never link into an auth build.
 #[cfg(feature = "insecure-no-auth")]
 pub struct AllowAllValidator;
 
@@ -130,6 +166,6 @@ pub struct AllowAllValidator;
 #[async_trait]
 impl GrantValidator for AllowAllValidator {
     async fn authorize(&self, _ctx: &SessionAuthContext) -> Result<GrantDecision, CoreError> {
-        Ok(GrantDecision::Authorized)
+        Ok(GrantDecision::Authorized(CapabilitySet::new()))
     }
 }
