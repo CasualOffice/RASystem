@@ -150,6 +150,20 @@ pub enum LifecycleEvent {
         /// Whether the pointer is on-screen (`false` → hide the overlay cursor).
         visible: bool,
     },
+    /// Host-side: the shared display's global bounds (logical units), emitted once the capture
+    /// starts, so the app can place its pointer overlay over exactly the display being shared —
+    /// correct on a secondary monitor, not just the primary. Not emitted if the backend can't report
+    /// bounds (the app then keeps its default whole-primary overlay).
+    CaptureGeometry {
+        /// Global x of the display's top-left, logical units.
+        x: i32,
+        /// Global y of the display's top-left, logical units.
+        y: i32,
+        /// Display width, logical units.
+        width: u32,
+        /// Display height, logical units.
+        height: u32,
+    },
 }
 
 /// The lifecycle event stream handed to the embedding app. A bounded receiver: latest-wins-ish, so

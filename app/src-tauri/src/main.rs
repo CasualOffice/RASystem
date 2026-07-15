@@ -461,6 +461,17 @@ async fn serve_one(
                         let _ = ov.emit("pointer", PointerPayload { x, y, visible });
                     }
                 }
+                Some(LifecycleEvent::CaptureGeometry { x, y, width, height }) => {
+                    // Place the pointer overlay over exactly the shared display (logical/point
+                    // coordinates, which macOS global space and Tauri's Logical* share), so the
+                    // normalized remote pointer lands on the right pixels — including on a secondary
+                    // monitor. Best-effort: positioning failures leave the default overlay.
+                    if let Some(ov) = app.get_webview_window("overlay") {
+                        use tauri::{LogicalPosition, LogicalSize};
+                        let _ = ov.set_position(LogicalPosition::new(x, y));
+                        let _ = ov.set_size(LogicalSize::new(width, height));
+                    }
+                }
                 Some(LifecycleEvent::SessionEnded { .. })
                 | Some(LifecycleEvent::Revoked { .. })
                 | Some(LifecycleEvent::Disconnected { .. })

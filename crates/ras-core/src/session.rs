@@ -326,6 +326,9 @@ where
         let config = capture
             .start(&opts)
             .map_err(|_| transport_err("capture start failed"))?;
+        // Read the shared display's bounds while we still hold `capture` (it moves into the media
+        // thread below), so the app can place its pointer overlay over exactly this display.
+        let bounds = capture.captured_bounds();
         encoder
             .configure(&config)
             .map_err(|_| transport_err("encoder configure failed"))?;
@@ -338,6 +341,14 @@ where
         sink.emit(LifecycleEvent::StreamConfigured {
             descriptor: StreamDescriptor::from_config(&config),
         });
+        if let Some(b) = bounds {
+            sink.emit(LifecycleEvent::CaptureGeometry {
+                x: b.x,
+                y: b.y,
+                width: b.width,
+                height: b.height,
+            });
+        }
 
         // Seed the ABR target with the negotiated bitrate before the media thread starts.
         inner

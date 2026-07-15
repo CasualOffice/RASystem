@@ -185,12 +185,19 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     permanently depresses the bitrate — the ABR raises it again once the link recovers. The adapter
     holds one persistent `HealthObserver` so the window survives across the 500 ms ticks. Pure math
     unit-tested (recovery-after-burst, idle-interval, clamping).
+  - **Multi-monitor remote-pointer overlay wired.** The macOS capture backend reports the shared
+    display's global bounds (`SCDisplay.frame`, logical points) via the new
+    `ScreenCaptureBackend::captured_bounds`; `HostSession` emits them as `LifecycleEvent::CaptureGeometry`;
+    the app positions + sizes the pointer overlay to cover exactly that display (macOS points map 1:1
+    to Tauri `Logical*`, and the pointer is normalized, so it lands right even on a secondary monitor,
+    not just the primary — replacing the old `maximized`-on-primary overlay). Fail-safe: no bounds →
+    default overlay. Compiles clean; the multi-monitor behavior is an on-device verification step.
   - Still stubbed / deferred (`todo!()` or additive): iroh **reset-on-stale + FEC** and the
     `DatagramFec` video alternative (behind `StreamConfig::video_transport`),
     **hardware encoders + Wayland DMA-buf zero-copy** (Linux/Windows use the
     software OpenH264 path), the **Phase-2 grant/lease/capability
     model** (consent is now real local Allow/Deny, but authorization is still coarse — no signed
-    grants/leases, no capability scoping, no TPM tiers), multi-monitor pointer mapping, and EV
+    grants/leases, no capability scoping, no TPM tiers), and EV
     code-signing/notarization of the release bundles. **(Excluding the host's own overlay/indicator
     windows from macOS capture is now done — `CaptureOptions::excluded_window_ids` → `SCWindow` via
     CGWindowID; the app supplies the ids from each Tauri window's `NSWindow.windowNumber`.)**

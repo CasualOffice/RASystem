@@ -28,7 +28,7 @@ use objc2_screen_capture_kit::{
 };
 use ras_media::{
     CaptureOptions, CaptureTimestampUs, CapturedFrame, MediaError, PlatformSurface,
-    ScreenCaptureBackend, StreamConfig, SurfaceKind,
+    RemoteDisplayBounds, ScreenCaptureBackend, StreamConfig, SurfaceKind,
 };
 use ras_protocol::{ErrorCode, RasError};
 
@@ -166,6 +166,8 @@ pub struct MacScreenCapture {
     slot: Arc<Slot>,
     config: Option<StreamConfig>,
     target_fps: u32,
+    /// Captured display's global bounds (logical/points), read from `SCDisplay.frame` at `start`.
+    bounds: Option<RemoteDisplayBounds>,
 }
 
 impl MacScreenCapture {
@@ -179,6 +181,7 @@ impl MacScreenCapture {
             slot: Arc::new(Slot::default()),
             config: None,
             target_fps: 60,
+            bounds: None,
         }
     }
 }
@@ -211,6 +214,17 @@ impl ScreenCaptureBackend for MacScreenCapture {
                 .ok_or_else(|| RasError::fatal(ErrorCode::CaptureFailed, "no display available"))?
         };
         let (dw, dh) = unsafe { (display.width() as u32, display.height() as u32) };
+
+        // The display's global bounds (points, top-left origin) so the host UI can place its pointer
+        // overlay over exactly this display — correct on a secondary monitor, not just the primary.
+        // SAFETY: `display` is a live SCDisplay; `frame` reads its CoreGraphics rect.
+        let frame = unsafe { display.frame() };
+        self.bounds = Some(RemoteDisplayBounds {
+            x: frame.origin.x as i32,
+            y: frame.origin.y as i32,
+            width: frame.size.width.max(0.0) as u32,
+            height: frame.size.height.max(0.0) as u32,
+        });
 
         // Exclude our own overlay / consent / indicator windows from capture, matched by CGWindowID.
         // Without this the always-on-top overlay we draw the viewer's remote pointer on would be
@@ -326,6 +340,10 @@ impl ScreenCaptureBackend for MacScreenCapture {
             .unwrap_or_else(|| default_stream_config(0, 0, self.target_fps))
     }
 
+    fn captured_bounds(&self) -> Option<RemoteDisplayBounds> {
+        self.bounds
+    }
+
     fn stop(&mut self) {
         if let Some(s) = self.stream.as_ref() {
             stop_capture_blocking(s);
@@ -333,6 +351,7 @@ impl ScreenCaptureBackend for MacScreenCapture {
         self.stream = None;
         self.output = None;
         self.queue = None;
+        self.bounds = None;
         *lock(&self.slot.frame) = None;
     }
 }

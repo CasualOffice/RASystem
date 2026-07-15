@@ -254,6 +254,24 @@ pub struct CaptureOptions {
     pub excluded_window_ids: Vec<WindowId>,
 }
 
+/// The captured display's bounds in the desktop's global coordinate space, **logical units**
+/// (points, top-left origin, y-down) — the space macOS global coordinates and Tauri
+/// `LogicalPosition`/`LogicalSize` share, so the host UI can size its pointer overlay to cover
+/// exactly the display being shared (correct on a secondary monitor, not just the primary). The
+/// remote-pointer position is normalized over the frame, so these bounds only need to place + size
+/// the overlay, not match pixel resolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RemoteDisplayBounds {
+    /// Global x of the display's top-left, logical units.
+    pub x: i32,
+    /// Global y of the display's top-left, logical units.
+    pub y: i32,
+    /// Display width, logical units.
+    pub width: u32,
+    /// Display height, logical units.
+    pub height: u32,
+}
+
 /// Zero-copy handle to one captured frame, still GPU-resident. Consumed by value by the paired
 /// encoder within one call so the capture pool slot is recycled promptly.
 pub trait CapturedFrame {
@@ -288,6 +306,14 @@ pub trait ScreenCaptureBackend: Send {
 
     /// The currently negotiated config.
     fn config(&self) -> StreamConfig;
+
+    /// The captured display's global bounds (logical units), if the backend can report them, so the
+    /// host UI can place its pointer overlay over exactly the shared display. `None` (the default)
+    /// means "unknown" — the caller falls back to the primary/whole screen. Valid only while a
+    /// capture is active.
+    fn captured_bounds(&self) -> Option<RemoteDisplayBounds> {
+        None
+    }
 
     /// Stop capture and release resources.
     fn stop(&mut self);
