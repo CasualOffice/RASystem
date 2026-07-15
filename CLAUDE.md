@@ -47,8 +47,10 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
 ## 3. Current status
 
 - **Phase 0 complete — Milestone M0 reached.** The design doc set is done and the Cargo workspace
-  skeleton builds clean. **Phase 1 is in progress:** the design gate (`docs/design/phase-1-design.md`)
-  is written and the **spike-independent orchestration spine is implemented and green.**
+  skeleton builds clean. **Phases 1 and 2 are implemented and green (M1 media/transport landed, M3
+  authorization reached);** the design gates (`docs/design/phase-1-design.md`, `phase-2-design.md`)
+  are written and their spines built. **Phase 3 (M4) is at the design gate** (drafted, awaiting
+  sign-off — see below).
 - **Live progress tracker:** `docs/17_ROADMAP_AND_MILESTONES.md` (per-phase ☐/◐/☑ checkboxes) is the
   single source of truth for what's done; spike measurements are recorded in
   `docs/design/phase-S-design.md §4.1`. Keep both current as work lands.
@@ -64,14 +66,32 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   Mac↔Linux two-machine run) and the minor rVFC compositor-penalty delta. The media go/no-go is
   independently cleared, so the **real macOS media backend has landed** (`ras-media-macos`, see below);
   only the concrete **iroh transport** stays stubbed behind its trait until the network go/no-go.
-- **Phase 2 (identity/pairing/authorization → M3) — design gate drafted, awaiting sign-off.**
-  `docs/design/phase-2-design.md` is written: the bootstrap→session authorization flow, the
-  ticket/AccessRequest/SessionGrant contracts (per `docs/04`), how the Phase-1 §5.5 `GrantValidator`
-  seam is filled *additively* (no renamed states, `Active` still reachable only via `Authorized`),
-  the ordered validation checks + replay-state schema, the consent-UI contract, and the M3
-  security-test matrix. The one open format choice is closed in **ADR-064 (Proposed)** — MVP
-  `SessionGrant` = **PASETO v4.public**, sender-constrained to the iroh `EndpointId` (Biscuit reserved
-  for the later offline-attenuating control-plane issuer). **No Phase-2 code lands until sign-off.**
+- **Phase 2 (identity/pairing/authorization → M3) — IMPLEMENTED, M3 reached.** "No frames without
+  authorization" is live: persistent Ed25519 identities (`ras-identity`, `KeyStore` seam, Tier 0
+  `SoftwareKeyStore`), rotating single-use connection tickets + a bounded TTL-swept nonce cache
+  (`ras-bootstrap`), signed `AccessRequest`s and sender-constrained **PASETO v4.public** `SessionGrant`s
+  with an ordered validation matrix (`ras-grant`, hand-rolled PASETO envelope over `ed25519-dalek`,
+  byte-verified against the official v4 vectors — ADR-064/065/066, all **Accepted**), the real
+  `GrantSessionValidator` filling the Phase-1 §5.5 auth seam (`ras-core`, sender-constraint enforced at
+  the moment iroh proves the peer endpoint), a separate **bootstrap ALPN** (`casual-ras/bootstrap/1`)
+  in `ras-transport-iroh`, and the **unified app's two-phase Connect** (bootstrap → signed
+  `AccessRequest` → grant → session ALPN with `.with_grant`) + real host-side local Allow/Deny consent
+  (Invariant 1). The M3 security-test matrix is green (`docs/design/phase-2-design.md §9.1`): ticket
+  replay/expiry/stale-generation, request/grant signature+endpoint+host+expiry+nonce, unknown-capability
+  drop + reduced-never-expands property, plus never-panic decoder fuzz — every crate suite passing.
+  **Pending:** on-device GUI runtime verification of the two-phase flow (Tauri/WebView + Screen-Recording
+  TCC — developer step).
+- **Phase 3 (remote control & collaboration → M4) — design gate drafted, awaiting sign-off.**
+  `docs/design/phase-3-design.md` is written: the OS-input wire (`ControlMsg::Input(InputEnvelope)`,
+  distinct from ADR-061's visual `Pointer`); the control-lease + generation state machine with ordered
+  issue/transfer checks; the **O(1) per-message host-side capability + lease + generation + seq gate**
+  (`LeaseManager::authorize_input` — Inv 15 / ADR-041, the RustDesk-CVE fix, off the video hot path);
+  the pure `OsInputSink` trait (`ras-control`) + unprivileged macOS **CGEvent** backend
+  (`ras-input-macos`, PostEvent-TCC-gated, Secure-Input-respecting); the emergency-stop / transfer /
+  disconnect **key-state cleanup** (`ReleaseAllKeys`, Inv 4); and the virtual multi-cursor relay
+  (Inv 5). Three open choices closed in **ADR-067/068/069 (Proposed)**. macOS is the lead input
+  platform (ADR-054/055); Windows/Linux backends are the parallel port. **No Phase-3 code lands until
+  sign-off.**
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

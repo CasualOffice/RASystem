@@ -342,9 +342,16 @@ ticket rejected · host & controller validate each other · every path has the s
 **Goal:** safe input. Control leases, per-message capability enforcement, virtual cursors, emergency
 stop.
 
-**① Design gate (`docs/design/phase-3-design.md`):** input message schema + normalized-coord model
-(`docs/04 §12`, `docs/11 §3`); lease/generation state machine; per-message capability-check point;
-emergency-stop path (SAS-bound); virtual-cursor relay.
+**① Design gate (`docs/design/phase-3-design.md`) — ◐ drafted, awaiting sign-off.** Written: the
+input message schema + normalized fixed-point coord model (`docs/04 §12`, `docs/11 §3`); the
+lease/generation state machine + ordered issue/transfer checks; the **O(1) per-message host-side
+capability + lease + generation + seq gate** (`LeaseManager::authorize_input`, Inv 15 / ADR-041); the
+`OsInputSink` trait (`ras-control`, pure) + `ras-input-macos` CGEvent backend; the emergency-stop /
+transfer / disconnect key-state-cleanup path; and the virtual multi-cursor relay. Three open choices
+closed in **ADR-067** (input wire, distinct from ADR-061's visual `Pointer`), **ADR-068**
+(unprivileged macOS CGEvent backend, PostEvent-TCC-gated), **ADR-069** (host-authoritative lease, not
+a bearer token) — all **Proposed**. macOS is the lead input platform (ADR-054/055); the `WIN` tasks
+below are the parallel port. **No Phase-3 code lands until sign-off.**
 
 **② Build — tasks**
 - ☐ `WIN` Input injection: `SendInput` ABSOLUTE|VIRTUALDESK, PMv2 manifest, normalized 0..1→pixel

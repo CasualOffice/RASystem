@@ -362,6 +362,68 @@
     (Security 1 > Latency 2 > UX 3): an internal grant-token format is not user-facing, so UX is
     unaffected; the single-impl, zero-new-dep security posture wins.*
 
+## Phase 3 — remote control & collaboration (`docs/design/phase-3-design.md`)
+
+- **ADR-067 · Phase-3 OS-input wire = a dedicated `ControlMsg::Input(InputEnvelope)`, distinct from
+  the visual `Pointer` · Proposed** (refines docs/04 §12/§13; sibling of ADR-061). OS input rides a
+  new `ControlMsg::Input` carrying `{lease_id, generation, seq, action}`, where `action` is a nested
+  oneof (`PointerMove`/`PointerButton`/`PointerWheel`/`KeyEvent`/`TextInput`/`ReleaseAllKeys`).
+  - **Distinct from `Pointer` (ADR-061).** The visual `Pointer` has *no* lease, is never injected, and
+    sits deliberately **outside** Invariants 6/14. Folding OS input into it would blur that boundary.
+    Two variants → the host routes `Pointer` to the overlay and `Input` to the enforcement gate with
+    zero ambiguity about which path enforces per-message capability (Inv 15).
+  - **Coordinates = normalized fixed-point `0..=65535` (== 0.0..=1.0)** of a named `display_id`, plus
+    a `layout_version`, **not** the raw float docs/04 §12 sketched. This reuses ADR-061's encoding
+    (one coordinate model across visual + OS-input pointers), is wire-compact, and — critically — the
+    controller **never sends pixels** (Inv 6); the host maps normalized→pixels *after* authorization
+    using its own `CaptureGeometry`. A `layout_version` mismatch after a monitor change drops the
+    event (`StaleLayout`).
+  - **Keyboard = physical USB-HID usage + explicit modifier bitset**, never a keysym string; Unicode
+    `TextInput` is a separate, separately-capped path (`keyboard.text`) for layout-independent entry,
+    never for shortcuts. Input payloads (typed text/key values) are redacted in all logs (Inv 8).
+  - **Reversibility:** additive oneof fields (8–11) on the existing `ControlMsg`; the hand-rolled enum
+    stays the public API. No change to any Phase-1/2 contract.
+
+- **ADR-068 · macOS OS-input backend is a new unprivileged `ras-input-macos` crate over CGEvent; the
+  `OsInputSink` trait lives in `unsafe`-free `ras-control` · Proposed** (implements ADR-055; mirrors
+  ADR-058's `ras-media`/`ras-media-macos` split). The narrow input surface (`OsInputSink`: normalized
+  coords + the closed action set only — Inv 6) is a **pure trait in `ras-control`**; the OS backend is
+  a **new FFI crate** where all `unsafe` is confined (CONTRIBUTING §5), empty on non-macOS so Linux CI
+  stays green.
+  - **CGEvent, not Accessibility-gated.** Injection uses `CGEventCreateMouseEvent`/
+    `CGEventCreateKeyboardEvent` + `CGEventPost(kCGHIDEventTap, …)` and `CGEventKeyboardSetUnicodeString`
+    for text. The permission is the **PostEvent** TCC bucket (`CGPreflightPostEventAccess` /
+    `CGRequestPostEventAccess`), *not* Accessibility (docs/18 §0); `CGEventPost` fails **silently**
+    when ungranted, so `input_permitted()` preflights and the host **refuses the lease** rather than
+    no-op-injecting.
+  - **Deliberately unprivileged** (ADR-055): a per-user LaunchAgent, never root. Consequence: it
+    **cannot** inject into a Secure-Input (password/login) field — a *feature* (the fraud-model
+    boundary), surfaced honestly, never bypassed. Root could defeat Secure Input; we refuse that power
+    (Inv 14).
+  - **Tracked key/button state** in the backend makes `release_all` exact (key-state cleanup on
+    transfer/disconnect/stop). Bindings are pure-Rust `objc2` + `core-graphics` (permissive); `enigo`
+    (MIT) is an acceptable fallback but raw CGEvent is preferred for `release_all` precision. Any new
+    dep must clear `cargo-deny` (Inv 18). Linux (`uinput`/libei) + Windows (`SendInput`) backends are
+    deferred, additive behind the trait.
+
+- **ADR-069 · The control lease is host-authoritative live state, not a trusted bearer token ·
+  Proposed** (operationalizes Inv 5/15, ADR-041). `ControlGranted` is **host-signed** on the wire for
+  the *future* process split (S4: a separate privileged input helper will need to verify it), but MVP
+  per-message enforcement (`LeaseManager::authorize_input`) checks the **host's own** generation
+  counter, active-lease id, monotonic `seq`, and clamped capability set — the controller's
+  `generation`/`lease_id` in each `Input` are *claims that must match*, never authority.
+  - **Why.** In the collapsed MVP process (S4) issuer = validator = one host process; a signed bearer
+    token would buy nothing while adding a verify on the input hot path. Host-authoritative state makes
+    the RustDesk CVE-2026-57850 class (client-asserted scope) **structurally impossible**: there is no
+    field a controller can set to widen its own scope. Transfer/stop **bump the generation**, so every
+    in-flight event of the prior generation is instantly stale — the M4 "old-lease input rejected"
+    exit criterion falls out of the generation compare, not out of token expiry.
+  - **The gate is O(1)** (integer compares + one `BTreeSet` lookup), on the control task, off the
+    per-frame video path (ADR-060) — the latency invariant (priority 2) is untouched.
+  - **Reversibility:** when S4's process split lands, the input helper verifies the existing
+    `ControlGranted` signature; the wire and the `LeaseManager` logic are unchanged — only *where* the
+    check runs moves.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
