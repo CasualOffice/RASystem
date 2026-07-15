@@ -11,7 +11,9 @@
 //! is confined to the borrowed-surface dereference and the single-thread `Send` shim.
 
 use bytes::Bytes;
-use openh264::encoder::{Encoder, EncoderConfig, FrameType, UsageType};
+use openh264::encoder::{
+    BitRate, Encoder, EncoderConfig, FrameRate, FrameType, RateControlMode, UsageType,
+};
 use openh264::formats::{BgraSliceU8, YUVBuffer};
 use openh264::OpenH264API;
 use ras_media::{
@@ -20,8 +22,8 @@ use ras_media::{
 };
 use ras_protocol::{ErrorCode, KeyframeReason, RasError};
 
-/// Default target bitrate advertised in [`StreamConfig`]; the software encoder currently runs at
-/// OpenH264's default rate control (runtime ABR retarget is not wired in the 0.6 safe API — noted).
+/// Default target bitrate advertised in [`StreamConfig`]. The encoder is built in bitrate rate-control
+/// mode at this value and retargeted at runtime by the ABR via [`OpenH264Encoder::set_bitrate`].
 const DEFAULT_BITRATE_BPS: u32 = 8_000_000;
 
 /// The single-monitor [`StreamConfig`] these software backends negotiate: H.264 Annex-B,
@@ -84,7 +86,14 @@ impl OpenH264Encoder {
     }
 
     fn build_encoder(&self) -> Result<Encoder, MediaError> {
-        let config = EncoderConfig::new().usage_type(UsageType::ScreenContentRealTime);
+        // Bitrate rate-control mode so the encoder actually tracks `target_bitrate_bps` (its default
+        // is quality mode at ~120 kbps, which ignores our target). Declaring the frame rate lets the
+        // controller pace bits/sec correctly. ABR then retargets the live encoder via `set_bitrate`.
+        let config = EncoderConfig::new()
+            .usage_type(UsageType::ScreenContentRealTime)
+            .rate_control_mode(RateControlMode::Bitrate)
+            .bitrate(BitRate::from_bps(self.config.target_bitrate_bps.max(1)))
+            .max_frame_rate(FrameRate::from_hz(self.config.fps.max(1) as f32));
         Encoder::with_api_config(OpenH264API::from_source(), config)
             .map_err(|_| enc_fatal("openh264 encoder init failed"))
     }
@@ -195,9 +204,29 @@ impl ras_media::VideoEncoderBackend for OpenH264Encoder {
     }
 
     fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), MediaError> {
-        // Advisory in the OpenH264 0.6 safe API (no runtime SetOption exposed). We record it on the
-        // StreamConfig so the value rides the wire; runtime ABR for the software path is a follow-up.
         self.config.target_bitrate_bps = bitrate_bps;
+        // Retarget the live encoder's rate controller without forcing a keyframe — the latency-first
+        // ABR ticks frequently and an IDR per change would spike latency (design §3.6). If the encoder
+        // hasn't been built yet, the new target is picked up at build time via `build_encoder`.
+        if let Some(enc) = self.enc.as_mut() {
+            let mut info = openh264_sys2::TagBitrateInfo {
+                iLayer: openh264_sys2::SPATIAL_LAYER_ALL,
+                iBitrate: bitrate_bps.min(i32::MAX as u32) as i32,
+            };
+            // SAFETY: `enc` is an initialized OpenH264 encoder used single-threaded here; SetOption
+            // with ENCODER_OPTION_BITRATE reads the `TagBitrateInfo` we own for the duration of the
+            // call and copies it. `raw_api` is the sanctioned escape hatch for options the safe
+            // wrapper doesn't expose.
+            let rc = unsafe {
+                enc.raw_api().set_option(
+                    openh264_sys2::ENCODER_OPTION_BITRATE,
+                    core::ptr::addr_of_mut!(info).cast(),
+                )
+            };
+            if rc != 0 {
+                return Err(enc_fatal("openh264 SetOption(BITRATE) failed"));
+            }
+        }
         Ok(())
     }
 
@@ -362,5 +391,85 @@ mod tests {
         let f2 = enc.encode(mk()).unwrap().unwrap();
         assert!(f2.is_keyframe, "forced keyframe after request");
         assert!(nal_present(&f2.data, 7), "SPS repeated on the forced IDR");
+    }
+
+    /// Frame-varying pseudo-random content (deterministic LCG): hard to compress and different every
+    /// frame, so P-frames carry real residual and the bitrate cap actually binds.
+    fn noisy(w: u32, h: u32, stride: usize, seed: u32) -> Vec<u8> {
+        let mut buf = vec![0u8; stride * h as usize];
+        let mut s = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let n = (s >> 24) as u8;
+                let i = y * stride + x * 4;
+                buf[i] = n;
+                buf[i + 1] = n.wrapping_add((x as u8).wrapping_add(seed as u8));
+                buf[i + 2] = n.wrapping_add(y as u8);
+                buf[i + 3] = 255;
+            }
+        }
+        buf
+    }
+
+    /// Runtime ABR: after `set_bitrate` lowers the target, the live encoder must produce
+    /// substantially smaller access units for the same class of content — no reconfigure, no
+    /// keyframe. This exercises the `SetOption(BITRATE)` path end-to-end.
+    #[test]
+    fn runtime_set_bitrate_shrinks_output() {
+        let (w, h) = (320u32, 240u32);
+        let stride = (w * 4) as usize;
+        let mut enc = OpenH264Encoder::new();
+        enc.configure(&default_stream_config(w, h, 30)).unwrap();
+
+        // Encode one noisy frame; return the produced byte length (0 if the encoder skipped it).
+        fn push(enc: &mut OpenH264Encoder, w: u32, h: u32, stride: usize, seed: u32) -> usize {
+            let buf = noisy(w, h, stride, seed);
+            let frame = Frame {
+                desc: CpuBgraFrame {
+                    data: buf.as_ptr(),
+                    len: buf.len(),
+                    stride,
+                    width: w,
+                    height: h,
+                },
+                w,
+                h,
+            };
+            let n = enc
+                .encode(frame)
+                .expect("encode ok")
+                .map_or(0, |f| f.data.len());
+            drop(buf); // keep the borrowed buffer alive across the encode call
+            n
+        }
+
+        // Warm up at the default 8 Mbps so the rate controller converges, then measure P-frame bytes.
+        for seed in 0..12 {
+            push(&mut enc, w, h, stride, seed);
+        }
+        let high: usize = (100..140)
+            .map(|seed| push(&mut enc, w, h, stride, seed))
+            .sum();
+
+        // Drop to 2 Mbps at runtime (no reconfigure / keyframe), let it converge, then measure. This
+        // is low enough to clearly bind but high enough that the controller quantizes rather than
+        // skipping frames outright, so we still get non-empty access units to compare.
+        enc.set_bitrate(2_000_000).expect("set_bitrate ok");
+        for seed in 200..230 {
+            push(&mut enc, w, h, stride, seed);
+        }
+        let low: usize = (300..340)
+            .map(|seed| push(&mut enc, w, h, stride, seed))
+            .sum();
+
+        assert!(
+            high > 0 && low > 0,
+            "both phases must produce frames (high={high}, low={low})"
+        );
+        assert!(
+            low * 2 < high,
+            "lowering the bitrate must shrink output (high={high} bytes, low={low} bytes)"
+        );
     }
 }

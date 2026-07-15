@@ -172,10 +172,17 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     Windows needed a transitive pin: `scap 0.0.8` calls `windows-capture`'s 5-arg `Settings::new`, but
     `windows-capture 1.5.0` grew it to 8 args in a *minor* release, so `ras-media-scap` pins
     `windows-capture = "=1.4.4"` (Windows-only, not used directly) to keep scap compiling.
+  - **Runtime ABR is wired on the software (OpenH264) path too.** `ras-media-openh264` now builds the
+    encoder in bitrate rate-control mode at the negotiated `target_bitrate_bps` (it previously ran at
+    OpenH264's ~120 kbps quality-mode default, ignoring the target) and `set_bitrate` retargets the
+    **live** encoder keyframe-free via `SetOption(ENCODER_OPTION_BITRATE)` through `openh264-sys2`
+    (BSD-2) — the safe wrapper exposes no bitrate setter. So the `LatencyFirstAbr` in `ras-core` now
+    actually adapts both backends. Unit-verified: after a runtime `set_bitrate` drop the encoder emits
+    substantially smaller access units for the same content (no reconfigure, no IDR).
   - Still stubbed / deferred (`todo!()` or additive): iroh **reset-on-stale + FEC** and the
     `DatagramFec` video alternative (behind `StreamConfig::video_transport`), windowed (vs cumulative)
     loss for the ABR estimate, **hardware encoders + Wayland DMA-buf zero-copy** (Linux/Windows use the
-    software OpenH264 path; runtime ABR for it isn't wired), the **Phase-2 grant/lease/capability
+    software OpenH264 path), the **Phase-2 grant/lease/capability
     model** (consent is now real local Allow/Deny, but authorization is still coarse — no signed
     grants/leases, no capability scoping, no TPM tiers), excluding the host overlay from capture +
     multi-monitor pointer mapping, and EV code-signing/notarization of the release bundles.

@@ -3482,6 +3482,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "openh264",
+ "openh264-sys2",
  "ras-media",
  "ras-protocol",
 ]

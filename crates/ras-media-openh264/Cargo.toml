@@ -16,6 +16,10 @@ ras-media = { path = "../ras-media" }
 ras-protocol = { path = "../ras-protocol" }
 bytes = "1"
 openh264 = "0.8"
+# Low-level bindings (same version openh264 resolves) for the runtime SetOption(BITRATE) call that
+# keyframe-freely retargets the live encoder — the `openh264` safe API exposes no bitrate setter.
+# BSD-2-Clause (permissive; passes cargo-deny).
+openh264-sys2 = "0.8"
 
 [lints.clippy]
 unwrap_used = "warn"
