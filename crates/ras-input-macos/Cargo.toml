@@ -1,0 +1,34 @@
+[package]
+name = "ras-input-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# macOS-lead OS-input backend (ADR-068, implements ADR-055). Implements the `ras-control::OsInputSink`
+# trait over CGEvent (CGEventCreateMouseEvent/KeyboardEvent + CGEventPost). FFI-bearing platform crate
+# — `unsafe` is re-enabled here only (CONTRIBUTING §5) and confined behind the safe trait surface.
+# Deliberately UNPRIVILEGED: gated on PostEvent TCC (CGPreflightPostEventAccess), never Accessibility,
+# so it cannot bypass Secure Input (a fraud-model feature, not a bug — docs/18 §0).
+
+[dependencies]
+ras-control = { path = "../ras-control" }
+ras-protocol = { path = "../ras-protocol" }
+
+# CGEvent bindings are macOS-only: on other targets this crate compiles to an empty lib so
+# `cargo build --workspace` stays green on Linux CI.
+[target.'cfg(target_os = "macos")'.dependencies]
+# `highsierra` enables CGEventCreateScrollWheelEvent2 (the scroll constructor).
+core-graphics = { version = "0.23", features = ["highsierra"] }
+
+# FFI backend crate: unsafe confined here, wrapped in the safe `OsInputSink` surface (CONTRIBUTING §5).
+# Re-declares the workspace lint set with `unsafe_code` relaxed.
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
