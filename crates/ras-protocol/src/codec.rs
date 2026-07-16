@@ -23,8 +23,8 @@ use prost::Message;
 use crate::{
     AccessOutcome, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode, InputAction,
     InputEnvelope, KeyframeReason, KeyframeRequest, PointerButton, PointerUpdate, RasError,
-    StreamConfigWire, MAX_CAPABILITIES, MAX_CAPABILITY_LEN, MAX_CONTROL_FRAME, MAX_DISPLAY_NAME,
-    MAX_TEXT_INPUT,
+    StreamConfigWire, MAX_CAPABILITIES, MAX_CAPABILITY_LEN, MAX_CONTROL_FRAME, MAX_CURSOR_DIM,
+    MAX_DISPLAY_NAME, MAX_TEXT_INPUT,
 };
 
 /// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
@@ -255,8 +255,59 @@ fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
             code: i32::from(errorcode_to_pb(code)),
         }),
         ControlMsg::Input(env) => Kind::Input(input_envelope_to_pb(env)),
+        ControlMsg::CursorShape {
+            id,
+            hotspot_x,
+            hotspot_y,
+            width,
+            height,
+            rgba,
+        } => Kind::CursorShape(pb::CursorShape {
+            id,
+            hotspot_x: u32::from(hotspot_x),
+            hotspot_y: u32::from(hotspot_y),
+            width: u32::from(width),
+            height: u32::from(height),
+            rgba,
+        }),
+        ControlMsg::CursorCached { id } => Kind::CursorCached(pb::CursorCached { id }),
+        ControlMsg::CursorHidden => Kind::CursorHidden(pb::CursorHidden {}),
     };
     pb::ControlMsg { kind: Some(kind) }
+}
+
+/// Wire → Rust cursor shape, fully validated (Inv: fail-closed). Dimensions are bounded to
+/// [`MAX_CURSOR_DIM`], the RGBA length must be **exactly** `width * height * 4` (never truncated or
+/// over-read), and the hot-spot must lie inside the image.
+fn cursor_shape_from_pb(c: pb::CursorShape) -> Result<ControlMsg, RasError> {
+    let bad = |m: &'static str| RasError::fatal(ErrorCode::InvalidMessage, m);
+    if c.width == 0 || c.width > MAX_CURSOR_DIM {
+        return Err(bad("cursor width out of range"));
+    }
+    if c.height == 0 || c.height > MAX_CURSOR_DIM {
+        return Err(bad("cursor height out of range"));
+    }
+    // width,height ∈ 1..=256 ⇒ these `expect`-free conversions cannot fail.
+    let width = c.width as u16;
+    let height = c.height as u16;
+    let hotspot_x = u16::try_from(c.hotspot_x).map_err(|_| bad("cursor hotspot_x out of range"))?;
+    let hotspot_y = u16::try_from(c.hotspot_y).map_err(|_| bad("cursor hotspot_y out of range"))?;
+    if hotspot_x >= width || hotspot_y >= height {
+        return Err(bad("cursor hotspot outside image"));
+    }
+    // Exact-length check: guards decode and every downstream renderer against a size/stride mismatch.
+    let expected = c.width as usize * c.height as usize * 4;
+    if c.rgba.len() != expected {
+        return Err(bad("cursor rgba length mismatch"));
+    }
+    Ok(ControlMsg::CursorShape {
+        id: c.id,
+        hotspot_x,
+        hotspot_y,
+        width,
+        height,
+        rgba: c.rgba,
+    })
 }
 
 /// Wire → Rust [`ControlMsg`]. Partial: an unset oneof or any invalid enum/range is a typed
@@ -298,6 +349,9 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
             code: errorcode_from_pb(r.code)?,
         }),
         Some(Kind::Input(env)) => Ok(ControlMsg::Input(input_envelope_from_pb(env)?)),
+        Some(Kind::CursorShape(c)) => cursor_shape_from_pb(c),
+        Some(Kind::CursorCached(c)) => Ok(ControlMsg::CursorCached { id: c.id }),
+        Some(Kind::CursorHidden(_)) => Ok(ControlMsg::CursorHidden),
         // No valid empty control message: unset oneof (empty bytes, or a future variant an old
         // build doesn't recognize) is rejected, never silently defaulted.
         None => Err(RasError::fatal(
@@ -976,6 +1030,72 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_cursor_messages() {
+        // A 2×2 RGBA cursor (16 bytes), hotspot at the top-left.
+        let shape = ControlMsg::CursorShape {
+            id: 7,
+            hotspot_x: 0,
+            hotspot_y: 1,
+            width: 2,
+            height: 2,
+            rgba: Bytes::from(vec![0xAB; 2 * 2 * 4]),
+        };
+        assert_roundtrip(&shape);
+        assert_roundtrip(&ControlMsg::CursorCached { id: 42 });
+        assert_roundtrip(&ControlMsg::CursorHidden);
+    }
+
+    #[test]
+    fn cursor_shape_fail_closed_on_bad_geometry() {
+        // A raw wire cursor is rejected by `control_from_pb` (we can't build an invalid Rust variant).
+        let reject = |c: pb::CursorShape| {
+            let m = pb::ControlMsg {
+                kind: Some(pb::control_msg::Kind::CursorShape(c)),
+            };
+            assert_eq!(
+                control_from_pb(m).unwrap_err().code,
+                ErrorCode::InvalidMessage
+            );
+        };
+        // rgba length ≠ width*height*4 → rejected (no truncation / over-read).
+        reject(pb::CursorShape {
+            id: 1,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 2,
+            height: 2,
+            rgba: Bytes::from(vec![0u8; 8]), // should be 16
+        });
+        // Oversized dimension → rejected.
+        reject(pb::CursorShape {
+            id: 1,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: MAX_CURSOR_DIM + 1,
+            height: 1,
+            rgba: Bytes::new(),
+        });
+        // Zero dimension → rejected.
+        reject(pb::CursorShape {
+            id: 1,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 0,
+            height: 2,
+            rgba: Bytes::new(),
+        });
+        // Hot-spot outside the image → rejected.
+        reject(pb::CursorShape {
+            id: 1,
+            hotspot_x: 2,
+            hotspot_y: 0,
+            width: 2,
+            height: 2,
+            rgba: Bytes::from(vec![0u8; 16]),
+        });
+    }
+
+    #[test]
     fn roundtrip_all_input_actions() {
         use crate::InputEnvelope;
         let actions = [
@@ -1635,6 +1755,24 @@ mod proptests {
                         action,
                     }
                 )),
+            // Cursor shape: dims bounded 1..=8 (small rgba), hotspot forced inside, rgba forced to the
+            // exact width*height*4 length so the round-trip decodes (mismatched lengths are covered by
+            // the by-example negative tests).
+            (any::<u32>(), 1u16..=8, 1u16..=8, any::<u8>()).prop_map(
+                |(id, width, height, seed)| {
+                    let len = usize::from(width) * usize::from(height) * 4;
+                    ControlMsg::CursorShape {
+                        id,
+                        hotspot_x: width - 1,
+                        hotspot_y: height - 1,
+                        width,
+                        height,
+                        rgba: Bytes::from(vec![seed; len]),
+                    }
+                }
+            ),
+            any::<u32>().prop_map(|id| ControlMsg::CursorCached { id }),
+            Just(ControlMsg::CursorHidden),
         ]
     }
 

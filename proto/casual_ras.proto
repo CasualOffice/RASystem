@@ -210,6 +210,27 @@ message ControlRevoked {
   ErrorCodeProto code = 1;
 }
 
+// Host -> controller: the host's OS cursor SHAPE, sent out-of-band so the controller
+// composites it client-side at zero latency (never baked into the laggy video —
+// Priority 2). Cached by `id`; RGBA is top-down, width*height*4 bytes (ADR-073).
+// This is display data, not input — outside Invariant 6.
+message CursorShape {
+  uint32 id        = 1; // shape cache key
+  uint32 hotspot_x = 2; // < width
+  uint32 hotspot_y = 3; // < height
+  uint32 width     = 4; // 1..=256 pixels
+  uint32 height    = 5; // 1..=256 pixels
+  bytes  rgba      = 6; // exactly width*height*4 bytes
+}
+
+// Host -> controller: reuse a previously-sent CursorShape by id (no RGBA resend).
+message CursorCached {
+  uint32 id = 1;
+}
+
+// Host -> controller: the OS cursor is currently hidden (no shape to draw).
+message CursorHidden {}
+
 // ---------------------------------------------------------------------------
 // Top-level control-channel message
 // ---------------------------------------------------------------------------
@@ -230,6 +251,9 @@ message ControlMsg {
     ControlGranted  control_granted  = 9;
     ControlRevoked  control_revoked  = 10;
     InputEnvelope   input            = 11;
+    CursorShape     cursor_shape     = 12;
+    CursorCached    cursor_cached    = 13;
+    CursorHidden    cursor_hidden    = 14;
   }
 }
 

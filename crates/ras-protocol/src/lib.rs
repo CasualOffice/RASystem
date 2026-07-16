@@ -222,7 +222,38 @@ pub enum ControlMsg {
     /// Controller → host: one OS-input event, bound to the lease that authorizes it (Phase 3). Every
     /// field is re-checked host-side, per message, before anything reaches the OS input sink (Inv 15).
     Input(InputEnvelope),
+    /// Host → controller: the host's OS cursor **shape**, sent out-of-band so the controller draws it
+    /// client-side at zero latency instead of relying on the (laggy) video (Priority 2, ADR-073).
+    /// Cached by `id`. `rgba` is top-down, exactly `width * height * 4` bytes. Display data, not input
+    /// (outside Inv 6).
+    CursorShape {
+        /// Shape cache key — the controller keeps recently-seen shapes by id.
+        id: u32,
+        /// Hot-spot x within the image (`< width`).
+        hotspot_x: u16,
+        /// Hot-spot y within the image (`< height`).
+        hotspot_y: u16,
+        /// Image width in pixels (`1..=`[`MAX_CURSOR_DIM`]).
+        width: u16,
+        /// Image height in pixels (`1..=`[`MAX_CURSOR_DIM`]).
+        height: u16,
+        /// Top-down RGBA pixels, exactly `width * height * 4` bytes.
+        rgba: Bytes,
+    },
+    /// Host → controller: reuse an already-sent [`ControlMsg::CursorShape`] by `id` (no RGBA resend).
+    CursorCached {
+        /// The cache key of a previously-transmitted shape.
+        id: u32,
+    },
+    /// Host → controller: the OS cursor is currently hidden — draw nothing.
+    CursorHidden,
 }
+
+/// Maximum cursor image dimension (pixels) on either axis — a DoS guard. Real cursors are ≤ 32×32,
+/// up to ~128 on HiDPI; 256 is generous headroom. A larger dimension is a malformed message.
+pub const MAX_CURSOR_DIM: u32 = 256;
+/// Maximum cursor RGBA payload (bytes) = `MAX_CURSOR_DIM² × 4`. A longer payload is malformed.
+pub const MAX_CURSOR_BYTES: usize = (MAX_CURSOR_DIM as usize) * (MAX_CURSOR_DIM as usize) * 4;
 
 /// Upper bound on the number of capability identifiers in a [`ControlMsg::ControlRequest`] /
 /// [`ControlMsg::ControlGranted`] list — a DoS guard; the catalogue is far smaller than this.

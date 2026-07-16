@@ -511,6 +511,32 @@
     afford now. Revisit and flip to signed + notarized the moment funding lands — a config/CI change,
     no code impact.
 
+- **ADR-073 · Host cursor SHAPE rides an out-of-band `ControlMsg::CursorShape`, rendered client-side;
+  never baked into the video · Accepted** (`docs/20 §2.5`; grounded in the cross-device display
+  research). The host's OS cursor was only visible *inside* the encoded video, so under any stall/
+  compression it lagged and blurred — a **Priority-2 (latency)** regression. Every desktop-grade tool
+  (RFB `-239`, SPICE cursor channel, RDP `TS_CACHEDPOINTERATTRIBUTE`, CRD `CursorShapeInfo`, RustDesk
+  `CursorData`) sends cursor **shape** out-of-band and composites it client-side at zero latency; only
+  game-streamers bake it in (and consequently can't show shape changes).
+  - **Wire:** three new `ControlMsg` variants (proto oneof 12–14, append-only): `CursorShape{ id,
+    hotspot_x, hotspot_y, width, height, rgba }` (full shape, **cached by `id`**), `CursorCached{ id }`
+    (reuse a prior shape without resending RGBA), `CursorHidden` (draw nothing). RGBA is top-down,
+    exactly `width * height * 4` bytes.
+  - **This is display data, not input — outside Invariant 6.** It flows host→controller only; it never
+    reaches the input gate, carries no capability, and cannot inject anything. (Sibling of ADR-061's
+    visual `Pointer`, opposite direction.)
+  - **Fail-closed decode (the security-relevant part):** the codec bounds dimensions to
+    `MAX_CURSOR_DIM = 256` (real cursors are ≤ 32², ≤ 128² on HiDPI), **rejects any RGBA whose length ≠
+    `width*height*4`** (no truncation/over-read into a renderer), rejects zero dimensions, and rejects
+    a hot-spot outside the image. Covered by by-example negatives + the `decode_never_panics` fuzz +
+    the `roundtrip_is_identity` property generator.
+  - **Scope:** this ADR lands the **wire + fail-closed codec only** (verifiable off-device). Cursor
+    *position* is deliberately **not** in this message — in control mode the controller composites at
+    its own pointer; a position-sync message is a later addition for the view-only case. Host cursor
+    **capture** (per-OS: `NSCursor`/`CGImage`, `XFixesGetCursorImage`, `GetCursorInfo`+`DrawIconEx`)
+    and controller **render** (draw the cached RGBA on the WebCodecs canvas) are the on-device/GUI
+    follow-up, plus a `cursor_embedded` fallback for backends that can't exclude the HW cursor.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
