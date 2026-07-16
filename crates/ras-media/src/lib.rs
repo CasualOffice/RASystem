@@ -280,6 +280,45 @@ pub struct RemoteDisplayBounds {
     pub height: u32,
 }
 
+/// A display in the host's virtual-desktop layout (ADR-081, multi-monitor). Carries **both** the
+/// logical layout geometry (for the picker + the normalized coordinate model) **and** the HiDPI
+/// metadata (backing pixel resolution + scale) the controller needs to render crisply. Origins may be
+/// **negative** — a display left of / above the primary — the universal virtual-desktop convention
+/// (RDP `TS_MONITOR_DEF`, RustDesk `DisplayInfo`, Sunshine `offset_x/y`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorDef {
+    /// Stable identifier for local selection (Inv 1 — the host owner picks what to share).
+    pub id: MonitorId,
+    /// Global x of the top-left in the virtual desktop, **logical units** (points; may be negative).
+    pub left: i32,
+    /// Global y of the top-left, logical units (may be negative).
+    pub top: i32,
+    /// Width in logical units (points).
+    pub logical_width: u32,
+    /// Height in logical units.
+    pub logical_height: u32,
+    /// Backing width in physical pixels (`logical_width × scale`).
+    pub pixel_width: u32,
+    /// Backing height in physical pixels.
+    pub pixel_height: u32,
+    /// HiDPI scale as an integer **percent** — 100 = 1.0, 150 = 1.5, 200 = 2.0 (Retina). Integer on
+    /// purpose: the model carries **no float to drift**. The host still resolves normalized→pixels
+    /// against its *own live* geometry (so a click lands regardless of DPI); the controller uses this
+    /// only to size + sharpen its render and to fold its own `devicePixelRatio` when normalizing input.
+    pub scale_percent: u16,
+    /// Whether this is the primary display.
+    pub primary: bool,
+}
+
+impl MonitorDef {
+    /// The scale as a float multiplier (`scale_percent / 100`). Convenience for a renderer; the stored
+    /// form stays the exact integer percent.
+    #[must_use]
+    pub fn scale_factor(self) -> f64 {
+        f64::from(self.scale_percent) / 100.0
+    }
+}
+
 /// Zero-copy handle to one captured frame, still GPU-resident. Consumed by value by the paired
 /// encoder within one call so the capture pool slot is recycled promptly.
 pub trait CapturedFrame {
@@ -320,6 +359,23 @@ pub trait ScreenCaptureBackend: Send {
     /// means "unknown" — the caller falls back to the primary/whole screen. Valid only while a
     /// capture is active.
     fn captured_bounds(&self) -> Option<RemoteDisplayBounds> {
+        None
+    }
+
+    /// Enumerate the host's displays for a **local** picker (ADR-081). This is a host-local query the
+    /// app makes *before* a session to let the owner choose what to share (Inv 1) — it is **not**
+    /// session or wire state, and it does not select anything (selection is the `CaptureOptions.monitor`
+    /// the app then passes to [`Self::start`]). Default: empty ("unknown" — the app offers no picker and
+    /// shares the default display). Primary-first by convention.
+    fn enumerate_displays(&self) -> Vec<MonitorDef> {
+        Vec::new()
+    }
+
+    /// The full descriptor of the display currently being captured, if known — carries the HiDPI
+    /// metadata (pixel resolution + scale) the controller needs to render crisply, which
+    /// [`Self::captured_bounds`] (logical-only, for the host overlay) does not. Default `None`. Valid
+    /// only while a capture is active.
+    fn captured_display(&self) -> Option<MonitorDef> {
         None
     }
 

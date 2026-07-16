@@ -1160,6 +1160,63 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
+    /// The host emits the HiDPI display descriptor (ADR-081) at capture start, carrying the shared
+    /// display's logical + pixel dimensions and scale — what the controller needs to render crisply.
+    #[tokio::test]
+    async fn host_emits_capture_display_hidpi_metadata() {
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(1280, 720),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(&["screen.view"]))),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let mut host_events = host_r.unwrap();
+        ctrl_r.unwrap();
+
+        // Drain host lifecycle events for the HiDPI descriptor (emitted once at capture start).
+        let mut found = None;
+        for _ in 0..50 {
+            match tokio::time::timeout(Duration::from_millis(50), host_events.recv()).await {
+                Ok(Some(LifecycleEvent::CaptureDisplay {
+                    logical_width,
+                    logical_height,
+                    pixel_width,
+                    pixel_height,
+                    scale_percent,
+                    primary,
+                    ..
+                })) => {
+                    found = Some((
+                        logical_width,
+                        logical_height,
+                        pixel_width,
+                        pixel_height,
+                        scale_percent,
+                        primary,
+                    ));
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        assert_eq!(
+            found,
+            Some((1280, 720, 1280, 720, 100, true)),
+            "host should emit CaptureDisplay HiDPI metadata for the shared display"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     #[tokio::test]
     async fn controller_suspends_then_terminates_when_transport_drops() {
         let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();

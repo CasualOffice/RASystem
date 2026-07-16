@@ -164,6 +164,28 @@ pub enum LifecycleEvent {
         /// Display height, logical units.
         height: u32,
     },
+    /// Host-side: HiDPI metadata for the display being captured (ADR-081, multi-monitor). Emitted once
+    /// at capture start when the backend can report it (alongside [`Self::CaptureGeometry`], which
+    /// *places* the host overlay). The normalized coordinate model makes a click **land** regardless of
+    /// DPI, but the controller cannot render **crisp, correctly-sized** output or fold its own
+    /// `devicePixelRatio` without the host's pixel resolution + scale — this carries them. Metadata only
+    /// (dimensions / scale), never pixels (Inv 8 untouched).
+    CaptureDisplay {
+        /// The captured display's id.
+        id: u32,
+        /// Logical width (points).
+        logical_width: u32,
+        /// Logical height (points).
+        logical_height: u32,
+        /// Backing width in physical pixels.
+        pixel_width: u32,
+        /// Backing height in physical pixels.
+        pixel_height: u32,
+        /// HiDPI scale as an integer percent (100 = 1.0, 200 = 2.0).
+        scale_percent: u16,
+        /// Whether this is the primary display.
+        primary: bool,
+    },
     /// Host-side (Phase 3): the OS-input control lease was granted to the connected controller, at the
     /// given generation. Content-free (no holder identity, no capability values) — audit-ready.
     ControlLeaseGranted {

@@ -782,6 +782,42 @@
     full workspace gate); Linux/Windows are the CI-native build gate (a C library can't be cross-built
     from macOS — same honesty as openh264). Real capture→encode→network→decode→play is the on-device row.
 
+- **ADR-081 · Multi-monitor: a signed virtual-desktop `MonitorDef` model + HiDPI descriptor, enumerated
+  host-locally and selected by the host owner (not the controller) · Accepted** (`docs/20 §2.2`; display
+  cross-device research). The coordinate spine already supports multi-display (normalized-per-display,
+  `layout_version`, `CaptureGeometry`); this lands the **enumeration + HiDPI metadata** the research
+  ranked as the two missing pieces, off-device.
+  - **`MonitorDef` (ras-media)** describes one display in the host's **virtual desktop**: `id`, a
+    logical-unit rect with **possibly-negative** `left/top` (a display left of / above the primary — the
+    universal convention: RDP `TS_MONITOR_DEF`, RustDesk `DisplayInfo`, Sunshine `offset_x/y`),
+    `logical_width/height`, backing `pixel_width/height`, `scale_percent`, and `primary`. Scale is an
+    **integer percent** (100/150/200), never a float — the model carries **no float to drift** (the
+    research's warning; RustDesk's absolute-host-pixel + float-scale model is its #1 DPI-misalignment
+    bug class). The host still resolves normalized→pixels against its *own live* geometry, so a click
+    **lands** regardless of DPI; the controller uses the scale only to render **crisply** and to fold
+    its own `devicePixelRatio` when normalizing input.
+  - **Enumeration is a host-local query, not wire state (Inv 1).** `ScreenCaptureBackend::enumerate_displays()`
+    lets the app build a picker so the **host owner** chooses what to share — the controller does **not**
+    select or switch displays in this slice (a controller-initiated switch would be a later
+    control-message + host-consent addition). Selection is simply the `CaptureOptions.monitor` the app
+    passes to `start`. Default empty ("unknown" → share the default display).
+  - **HiDPI to the controller** via `captured_display() -> Option<MonitorDef>` → a new additive
+    `LifecycleEvent::CaptureDisplay` (logical + pixel dims + scale + primary), emitted at capture start
+    **alongside** `CaptureGeometry` (which *places* the host overlay). Metadata only — dimensions/scale,
+    never pixels (Inv 8 untouched). A new lifecycle **variant** (the enum is `#[non_exhaustive]`), so it
+    is additive — existing consumers are unaffected.
+  - **Explicitly NOT doing** host-resolution matching / virtual displays (mutates the owner's display
+    config — conflicts with Inv 1; permissive building blocks are uneven per the research). Normalize
+    against live geometry instead.
+  - **Deferred (on-device):** the real backends' `enumerate_displays`/`captured_display` (macOS
+    `SCShareableContent` + `NSScreen.backingScaleFactor`; scap/Windows/Linux equivalents) behind the new
+    default methods, the app's display **picker** UI, controller-side crisp-render use of the scale, and
+    letterbox-subtraction + mid-session switching (`layout_version` bump).
+  - **Verify:** the `MonitorDef` model + `scale_factor` helper, the synthetic backend's two-display
+    virtual desktop (primary-first, negative-origin HiDPI secondary, 2× pixel/logical) + active-display
+    descriptor, and a `ras-core` loopback test asserting the host emits `CaptureDisplay` with the shared
+    display's dims — all green in the full gate. Real per-OS enumeration is the on-device row.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

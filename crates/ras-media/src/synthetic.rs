@@ -15,8 +15,8 @@ use crate::audio::{
 };
 use crate::{
     CaptureOptions, CaptureTimestampUs, CapturedFrame, ColorSpace, EncodedFrame, FrameId,
-    MediaError, PlatformSurface, ScreenCaptureBackend, StreamConfig, VideoCodec,
-    VideoEncoderBackend, VideoTransportKind,
+    MediaError, MonitorDef, MonitorId, PlatformSurface, ScreenCaptureBackend, StreamConfig,
+    VideoCodec, VideoEncoderBackend, VideoTransportKind,
 };
 
 /// Annex-B start code prefixed before every NAL unit.
@@ -110,6 +110,50 @@ impl ScreenCaptureBackend for SyntheticCaptureBackend {
 
     fn config(&self) -> StreamConfig {
         self.stream_config()
+    }
+
+    /// A fixed two-display virtual desktop for exercising the picker + coordinate model (ADR-081): a
+    /// primary at the origin (100% scale) and a HiDPI secondary to its **left** (negative origin, 200%).
+    fn enumerate_displays(&self) -> Vec<MonitorDef> {
+        vec![
+            MonitorDef {
+                id: MonitorId(0),
+                left: 0,
+                top: 0,
+                logical_width: 1920,
+                logical_height: 1080,
+                pixel_width: 1920,
+                pixel_height: 1080,
+                scale_percent: 100,
+                primary: true,
+            },
+            MonitorDef {
+                id: MonitorId(1),
+                left: -1280, // logical units: sits to the left of the primary
+                top: 0,
+                logical_width: 1280,
+                logical_height: 720,
+                pixel_width: 2560, // 2× backing → 200% scale
+                pixel_height: 1440,
+                scale_percent: 200,
+                primary: false,
+            },
+        ]
+    }
+
+    /// The active display reflects the backend's own frame size at 100% scale (id 0, primary).
+    fn captured_display(&self) -> Option<MonitorDef> {
+        Some(MonitorDef {
+            id: MonitorId(0),
+            left: 0,
+            top: 0,
+            logical_width: self.width,
+            logical_height: self.height,
+            pixel_width: self.width,
+            pixel_height: self.height,
+            scale_percent: 100,
+            primary: true,
+        })
     }
 
     fn stop(&mut self) {
@@ -388,6 +432,38 @@ mod tests {
             out.push(enc.encode(f).unwrap().unwrap());
         }
         (cap, enc, out)
+    }
+
+    #[test]
+    fn enumerate_displays_reports_a_virtual_desktop_with_hidpi_and_negative_origin() {
+        let cap = SyntheticCaptureBackend::new(1280, 720);
+        let displays = cap.enumerate_displays();
+        assert_eq!(displays.len(), 2);
+        // Primary first, at the origin, 100% scale.
+        assert!(displays[0].primary);
+        assert_eq!(displays[0].id, MonitorId(0));
+        assert_eq!((displays[0].left, displays[0].top), (0, 0));
+        assert_eq!(displays[0].scale_percent, 100);
+        assert!((displays[0].scale_factor() - 1.0).abs() < f64::EPSILON);
+        // Secondary is HiDPI (200%) and sits to the LEFT (negative origin) — the virtual-desktop
+        // convention; its pixel resolution is 2× its logical size.
+        assert!(!displays[1].primary);
+        assert!(displays[1].left < 0);
+        assert_eq!(displays[1].scale_percent, 200);
+        assert_eq!(displays[1].pixel_width, displays[1].logical_width * 2);
+        assert_eq!(displays[1].pixel_height, displays[1].logical_height * 2);
+    }
+
+    #[test]
+    fn captured_display_reflects_the_active_backend_size() {
+        let cap = SyntheticCaptureBackend::new(1280, 720);
+        let d = cap
+            .captured_display()
+            .expect("synthetic reports its display");
+        assert_eq!((d.logical_width, d.logical_height), (1280, 720));
+        assert_eq!((d.pixel_width, d.pixel_height), (1280, 720));
+        assert_eq!(d.scale_percent, 100);
+        assert!(d.primary);
     }
 
     #[test]

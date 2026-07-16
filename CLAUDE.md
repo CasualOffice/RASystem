@@ -308,6 +308,15 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     to Tauri `Logical*`, and the pointer is normalized, so it lands right even on a secondary monitor,
     not just the primary — replacing the old `maximized`-on-primary overlay). Fail-safe: no bounds →
     default overlay. Compiles clean; the multi-monitor behavior is an on-device verification step.
+    **Multi-monitor enumeration + HiDPI model landed (ADR-081):** `ras_media::MonitorDef` is the signed
+    virtual-desktop display descriptor (logical rect with **negative-capable** `left/top`, backing
+    `pixel_width/height`, `scale_percent` as an **integer** — no float to drift), plus two default
+    `ScreenCaptureBackend` seams: `enumerate_displays()` (a **host-local** picker query — the owner picks
+    what to share, Inv 1; the controller doesn't select/switch in this slice) and `captured_display()` →
+    a new additive `LifecycleEvent::CaptureDisplay` carrying the active display's logical+pixel+scale so
+    the controller renders crisply (the Rank-2 HiDPI gap; metadata only, never pixels). Synthetic backend
+    models a two-display desktop; loopback-tested. Per-OS enumeration + the app picker UI + controller
+    crisp-render use stay the on-device follow-up.
   - **Audio pipeline — capability + media seam landed (ADR-077), host→controller output audio.** A
     new `audio.listen` capability (**recognized-but-withheld → default OFF**); `ras-media::audio` defines
     the pipeline as traits + canonical types (`AudioConfig`, `CapturedAudio` interleaved-i16 PCM,

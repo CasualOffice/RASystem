@@ -515,9 +515,11 @@ where
         let config = capture
             .start(&opts)
             .map_err(|_| transport_err("capture start failed"))?;
-        // Read the shared display's bounds while we still hold `capture` (it moves into the media
-        // thread below), so the app can place its pointer overlay over exactly this display.
+        // Read the shared display's bounds + HiDPI descriptor while we still hold `capture` (it moves
+        // into the media thread below), so the app can place its pointer overlay over exactly this
+        // display and render at the right size/scale.
         let bounds = capture.captured_bounds();
+        let display = capture.captured_display();
         encoder
             .configure(&config)
             .map_err(|_| transport_err("encoder configure failed"))?;
@@ -536,6 +538,17 @@ where
                 y: b.y,
                 width: b.width,
                 height: b.height,
+            });
+        }
+        if let Some(d) = display {
+            sink.emit(LifecycleEvent::CaptureDisplay {
+                id: d.id.0,
+                logical_width: d.logical_width,
+                logical_height: d.logical_height,
+                pixel_width: d.pixel_width,
+                pixel_height: d.pixel_height,
+                scale_percent: d.scale_percent,
+                primary: d.primary,
             });
         }
 
