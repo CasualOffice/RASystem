@@ -247,7 +247,45 @@ pub enum ControlMsg {
     },
     /// Host → controller: the OS cursor is currently hidden — draw nothing.
     CursorHidden,
+    /// Push clipboard **text** to the peer (ADR-076). An **explicit** user action — never auto-synced
+    /// and (the load-bearing rule) never auto-**pasted**: the receiver only populates the OS clipboard,
+    /// it does not inject a paste keystroke, which severs the clipboard-hijack→RCE chain (Reverse-RDP /
+    /// RustDesk CVE class). Direction is implicit in the role: controller→host requires the
+    /// host-enforced `clipboard.write` capability, host→controller the `clipboard.read` capability
+    /// ([`crate::codec`] never decides authority — see `ras_policy::clipboard_push_allowed`, Inv 15).
+    /// Content-bearing — the payload is a secret (passwords get copied); [`Redacted`] keeps it out of
+    /// every `Debug`/log (Inv 8). Bounded by [`MAX_CLIPBOARD_BYTES`].
+    ClipboardText {
+        /// The UTF-8 clipboard text. Redacted in `Debug`; bounded by [`MAX_CLIPBOARD_BYTES`].
+        text: Redacted,
+    },
 }
+
+/// A UTF-8 secret whose `Debug` prints only its byte length, never its content — so it physically
+/// cannot leak through a `#[derive(Debug)]` log line, `tracing` field, or crash dump (Invariant 8).
+/// Used for clipboard text today; `InputAction::TextInput` should adopt it too (follow-up).
+#[derive(Clone, PartialEq, Eq)]
+pub struct Redacted(pub String);
+
+impl core::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "<redacted {} bytes>", self.0.len())
+    }
+}
+
+impl Redacted {
+    /// The wrapped secret. Only call at the point the content is genuinely needed (setting the OS
+    /// clipboard) — never to log or format it.
+    #[must_use]
+    pub fn reveal(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Maximum clipboard-text payload (bytes). Sits comfortably under [`MAX_CONTROL_FRAME`] so a
+/// maximal clipboard still fits one framed control message with protobuf headroom. Oversized
+/// clipboards are **refused**, never truncated (truncation would silently corrupt the paste).
+pub const MAX_CLIPBOARD_BYTES: usize = 768 * 1024;
 
 /// Maximum cursor image dimension (pixels) on either axis — a DoS guard. Real cursors are ≤ 32×32,
 /// up to ~128 on HiDPI; 256 is generous headroom. A larger dimension is a malformed message.

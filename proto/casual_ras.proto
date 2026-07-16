@@ -240,6 +240,15 @@ message CursorCached {
 // Host -> controller: the OS cursor is currently hidden (no shape to draw).
 message CursorHidden {}
 
+// Clipboard-text push (ADR-076). Explicit, never auto-synced, and the receiver NEVER auto-pastes —
+// it only populates the OS clipboard. Direction is implicit in the role: controller->host requires
+// the host-enforced `clipboard.write` capability, host->controller `clipboard.read` (Inv 15). The
+// payload is a secret; it is length-capped (ras_protocol::MAX_CLIPBOARD_BYTES) and never logged
+// (Inv 8). ras_protocol::ControlMsg::ClipboardText.
+message ClipboardText {
+  string text = 1; // UTF-8; bounded by MAX_CLIPBOARD_BYTES
+}
+
 // ---------------------------------------------------------------------------
 // Top-level control-channel message
 // ---------------------------------------------------------------------------
@@ -263,6 +272,7 @@ message ControlMsg {
     CursorShape     cursor_shape     = 12;
     CursorCached    cursor_cached    = 13;
     CursorHidden    cursor_hidden    = 14;
+    ClipboardText   clipboard_text   = 15;
   }
 }
 

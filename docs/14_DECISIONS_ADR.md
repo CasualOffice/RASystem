@@ -587,6 +587,39 @@
     the end-to-end behavior (⌘C → Ctrl+C on a real Windows/Linux host; Caps stays in sync) is the
     on-device/GUI row.
 
+- **ADR-076 · Clipboard text sync is an explicit, capability-gated push with a hard no-auto-paste rule
+  · Accepted** (`docs/20 §2.3`; clipboard cross-device research). Every incumbent syncs the clipboard,
+  and the CVE record is damning: Check Point's Reverse-RDP showed a malicious *host* silently reading
+  the controller's clipboard **and pushing content the user never copied**, chained with path traversal
+  to RCE; RustDesk leaked pre-connection and cross-session clipboards. We adopt clipboard **text** sync
+  only under rules that sever those chains, and land the **security spine** (wire + policy gate +
+  fail-closed codec) now; the OS backend + app wiring are the follow-up.
+  - **The one load-bearing rule: no auto-paste, ever.** Sync is an **explicit push** — the receiver
+    only **populates the OS clipboard**; it **never injects a paste keystroke**. Auto-paste + input
+    injection *is* the hijack-to-RCE chain, so keeping paste a manual local act severs it. This rule is
+    a receiver-side invariant enforced where the clipboard is set (the OS backend), documented on the
+    wire type, and called out as separate from authorization.
+  - **Direction is a capability, enforced host-side per message (Inv 15).** Reusing the existing
+    catalogue caps: controller→host push requires **`clipboard.write`**, host→controller requires
+    **`clipboard.read`** — `ras_policy::clipboard_push_allowed(direction, granted)`, a pure gate that
+    never trusts the peer's claim. Both are **recognized but withheld** (absent from every `*_GRANTABLE`
+    set) → **default OFF** (tested). No `clipboard.files` — that is file transfer (§3.3), not smuggled
+    through the clipboard.
+  - **Content is a secret (Inv 8).** `ControlMsg::ClipboardText` carries the text in a `Redacted`
+    newtype whose `Debug` prints only a byte count, so the payload **cannot** leak through a derived
+    `Debug`/`tracing` field/crash dump — a compile-time-ish guarantee stronger than `TextInput`'s
+    by-discipline note (which should adopt `Redacted` too, follow-up). Bounded by `MAX_CLIPBOARD_BYTES`
+    (768 KiB, under `MAX_CONTROL_FRAME`); oversize is **refused, never truncated** (truncation silently
+    corrupts). Bytes pass through as-is — no CRLF/LF normalization (it would corrupt non-plain text).
+  - **Deferred to follow-up (GUI/on-device):** the per-OS `ClipboardBackend` (NSPasteboard / X11
+    selections + `wl-clipboard` / Win32), the `ras-core` host-loop wiring (receive → `clipboard_push_
+    allowed` → set clipboard **without** paste), the app "Send clipboard" button + a "clipboard shared"
+    indicator (Inv 7), echo-suppression ownership tag, and the rule that a **pre-connection** clipboard
+    is never auto-synced.
+  - **Verify:** wire round-trip + oversize-refusal + `Debug`-redaction tests (ras-protocol), the
+    per-direction/default-denied gate + recognized-but-withheld tests (ras-policy), decoder fuzz — all
+    green. End-to-end paste behavior is the on-device row.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

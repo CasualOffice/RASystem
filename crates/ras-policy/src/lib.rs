@@ -176,6 +176,33 @@ pub fn grantable(
     intersect(&intersect(&recognized, policy), consented)
 }
 
+/// The direction a clipboard-text push travels, for host-side capability enforcement (ADR-076).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardDirection {
+    /// Controller → host: the controller sets the **host's** OS clipboard. The dangerous direction —
+    /// the Reverse-RDP / RustDesk clipboard-injection class — gated on [`CLIPBOARD_WRITE`].
+    ControllerToHost,
+    /// Host → controller: the host shares its **own** clipboard to the controller — gated on
+    /// [`CLIPBOARD_READ`].
+    HostToController,
+}
+
+/// Host-side, per-message clipboard authorization (Inv 15): may a clipboard-text push in this
+/// `direction` proceed, given the session's already-`granted` capabilities? The peer's claim is
+/// never trusted — only the host's granted set decides.
+///
+/// This is **authorization only**. The load-bearing *no-auto-paste* rule — the receiver populates the
+/// OS clipboard but never injects a paste keystroke — is a receiver-side invariant enforced where the
+/// clipboard is actually set (the OS clipboard backend), not here (ADR-076).
+#[must_use]
+pub fn clipboard_push_allowed(direction: ClipboardDirection, granted: &CapabilitySet) -> bool {
+    let cap = match direction {
+        ClipboardDirection::ControllerToHost => CLIPBOARD_WRITE,
+        ClipboardDirection::HostToController => CLIPBOARD_READ,
+    };
+    granted.contains(cap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +341,53 @@ mod tests {
         assert_eq!(granted, set(&["keyboard.key", "screen.view"]));
         assert!(granted.is_subset(&recognize(&requested)));
         assert!(granted.is_subset(&phase3_default_policy()));
+    }
+
+    #[test]
+    fn clipboard_push_gated_per_direction_and_default_denied() {
+        // No clipboard caps granted → both directions refused (default OFF).
+        let none = set(&["screen.view", "keyboard.key"]);
+        assert!(!clipboard_push_allowed(
+            ClipboardDirection::ControllerToHost,
+            &none
+        ));
+        assert!(!clipboard_push_allowed(
+            ClipboardDirection::HostToController,
+            &none
+        ));
+
+        // write authorizes only controller→host; read only host→controller — never crosswired.
+        let write = set(&[CLIPBOARD_WRITE]);
+        assert!(clipboard_push_allowed(
+            ClipboardDirection::ControllerToHost,
+            &write
+        ));
+        assert!(!clipboard_push_allowed(
+            ClipboardDirection::HostToController,
+            &write
+        ));
+
+        let read = set(&[CLIPBOARD_READ]);
+        assert!(clipboard_push_allowed(
+            ClipboardDirection::HostToController,
+            &read
+        ));
+        assert!(!clipboard_push_allowed(
+            ClipboardDirection::ControllerToHost,
+            &read
+        ));
+    }
+
+    #[test]
+    fn clipboard_caps_are_recognized_but_withheld_by_default_policy() {
+        // Both clipboard caps are in the catalogue …
+        assert!(is_recognized(CLIPBOARD_READ) && is_recognized(CLIPBOARD_WRITE));
+        // … but neither is grantable under the Phase-3 default policy (default OFF, docs/20 §2.3).
+        let p3 = phase3_default_policy();
+        assert!(!p3.contains(CLIPBOARD_READ) && !p3.contains(CLIPBOARD_WRITE));
+        // So even a controller that requests + consents to them gets nothing.
+        let requested = set(&[CLIPBOARD_READ, CLIPBOARD_WRITE, "screen.view"]);
+        let granted = grantable(&requested, &p3, &requested);
+        assert!(!granted.contains(CLIPBOARD_READ) && !granted.contains(CLIPBOARD_WRITE));
     }
 }

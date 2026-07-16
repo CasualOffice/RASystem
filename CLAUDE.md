@@ -131,7 +131,14 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   best-effort). `OsInputSink::set_lock_state` has a default no-op (non-breaking); wire+gate+dispatch+all
   three overrides are cross-compile-checked green. The **cursor-shape channel** wire also landed
   (ADR-073: `CursorShape`/`CursorCached`/`CursorHidden` `ControlMsg` variants, fail-closed codec bounded
-  at `MAX_CURSOR_DIM=256` + exact `w*h*4` RGBA + hot-spot-inside). **Still pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
+  at `MAX_CURSOR_DIM=256` + exact `w*h*4` RGBA + hot-spot-inside). The **clipboard-text security spine**
+  landed too (ADR-076): `ControlMsg::ClipboardText` with the payload in a `Redacted` newtype (Inv 8 —
+  `Debug` prints only a byte count, so a copied password can't leak to a log), bounded by
+  `MAX_CLIPBOARD_BYTES=768 KiB` (refused, never truncated), + the pure host-side per-direction gate
+  `ras_policy::clipboard_push_allowed` (controller→host = `clipboard.write`, host→controller =
+  `clipboard.read`, both recognized-but-withheld → **default OFF**), with the **no-auto-paste** rule
+  (receiver only sets the OS clipboard, never injects a paste) documented on the wire type; the per-OS
+  `ClipboardBackend` + host-loop wiring + app "Send clipboard"/indicator are the follow-up. **Still pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
   Secure-Input drop (macOS); the analogous **Linux on-device** XTEST run (a real X11/Xwayland session);
   the **Windows on-device** `SendInput` run (**needs Windows hardware the team lacks** — stays
   CI-compile-gated on `windows-latest`); a macOS **global-hotkey** emergency stop (baseline stop is the

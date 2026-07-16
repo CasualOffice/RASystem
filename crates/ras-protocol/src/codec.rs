@@ -23,8 +23,8 @@ use prost::Message;
 use crate::{
     AccessOutcome, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode, InputAction,
     InputEnvelope, KeyframeReason, KeyframeRequest, PointerButton, PointerUpdate, RasError,
-    StreamConfigWire, MAX_CAPABILITIES, MAX_CAPABILITY_LEN, MAX_CONTROL_FRAME, MAX_CURSOR_DIM,
-    MAX_DISPLAY_NAME, MAX_TEXT_INPUT,
+    Redacted, StreamConfigWire, MAX_CAPABILITIES, MAX_CAPABILITY_LEN, MAX_CLIPBOARD_BYTES,
+    MAX_CONTROL_FRAME, MAX_CURSOR_DIM, MAX_DISPLAY_NAME, MAX_TEXT_INPUT,
 };
 
 /// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
@@ -272,6 +272,10 @@ fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
         }),
         ControlMsg::CursorCached { id } => Kind::CursorCached(pb::CursorCached { id }),
         ControlMsg::CursorHidden => Kind::CursorHidden(pb::CursorHidden {}),
+        // `reveal()` at the wire boundary is the one sanctioned use — encoding, not logging.
+        ControlMsg::ClipboardText { text } => {
+            Kind::ClipboardText(pb::ClipboardText { text: text.0 })
+        }
     };
     pb::ControlMsg { kind: Some(kind) }
 }
@@ -307,6 +311,21 @@ fn cursor_shape_from_pb(c: pb::CursorShape) -> Result<ControlMsg, RasError> {
         width,
         height,
         rgba: c.rgba,
+    })
+}
+
+/// Wire → Rust clipboard text, fail-closed. The byte length is bounded by [`MAX_CLIPBOARD_BYTES`]
+/// (prost already guarantees the field is valid UTF-8); an oversized payload is **refused**, never
+/// truncated. Authorization is decided elsewhere (`ras_policy::clipboard_push_allowed`), never here.
+fn clipboard_text_from_pb(c: pb::ClipboardText) -> Result<ControlMsg, RasError> {
+    if c.text.len() > MAX_CLIPBOARD_BYTES {
+        return Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "clipboard text too large",
+        ));
+    }
+    Ok(ControlMsg::ClipboardText {
+        text: Redacted(c.text),
     })
 }
 
@@ -352,6 +371,7 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
         Some(Kind::CursorShape(c)) => cursor_shape_from_pb(c),
         Some(Kind::CursorCached(c)) => Ok(ControlMsg::CursorCached { id: c.id }),
         Some(Kind::CursorHidden(_)) => Ok(ControlMsg::CursorHidden),
+        Some(Kind::ClipboardText(c)) => clipboard_text_from_pb(c),
         // No valid empty control message: unset oneof (empty bytes, or a future variant an old
         // build doesn't recognize) is rejected, never silently defaulted.
         None => Err(RasError::fatal(
@@ -1107,6 +1127,48 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_clipboard_text() {
+        assert_roundtrip(&ControlMsg::ClipboardText {
+            text: Redacted("hello — clipboard 📋".to_string()),
+        });
+        // Empty clipboard is a legal push (the user cleared it).
+        assert_roundtrip(&ControlMsg::ClipboardText {
+            text: Redacted(String::new()),
+        });
+    }
+
+    #[test]
+    fn clipboard_text_refused_when_oversized() {
+        // Exactly at the cap decodes; one byte over is refused (never truncated).
+        let ok = pb::ClipboardText {
+            text: "a".repeat(MAX_CLIPBOARD_BYTES),
+        };
+        assert!(clipboard_text_from_pb(ok).is_ok());
+        let too_big = pb::ClipboardText {
+            text: "a".repeat(MAX_CLIPBOARD_BYTES + 1),
+        };
+        assert_eq!(
+            clipboard_text_from_pb(too_big).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+    }
+
+    #[test]
+    fn clipboard_text_is_redacted_in_debug() {
+        // Inv 8: the secret must never appear in a Debug/log rendering.
+        let secret = "hunter2-super-secret-password";
+        let msg = ControlMsg::ClipboardText {
+            text: Redacted(secret.to_string()),
+        };
+        let rendered = format!("{msg:?}");
+        assert!(
+            !rendered.contains(secret),
+            "clipboard secret leaked into Debug"
+        );
+        assert!(rendered.contains("redacted"));
+    }
+
+    #[test]
     fn roundtrip_all_input_actions() {
         use crate::InputEnvelope;
         let actions = [
@@ -1794,6 +1856,9 @@ mod proptests {
             ),
             any::<u32>().prop_map(|id| ControlMsg::CursorCached { id }),
             Just(ControlMsg::CursorHidden),
+            // Clipboard text: arbitrary UTF-8, default proptest sizing (far below MAX_CLIPBOARD_BYTES),
+            // so every generated value round-trips. Oversize refusal is covered by a by-example test.
+            any::<String>().prop_map(|s| ControlMsg::ClipboardText { text: Redacted(s) }),
         ]
     }
 
