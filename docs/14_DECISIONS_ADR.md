@@ -487,6 +487,30 @@
     **CI-compile-gated** (`windows-latest`) until a device/runner exists (`docs/19 §4`). The `uinput`/
     libei Linux follow-ups and a Windows Session-0 service/agent split (S4) remain separate, additive.
 
+- **ADR-072 · Release builds ship UNSIGNED (no OS code-signing / notarization) until a GitHub sponsor
+  funds the certificates; update *integrity* signing (free) is still adopted when auto-update lands ·
+  Accepted.** Distinguishes two independent signing layers that are often conflated:
+  - **OS code-signing / notarization — DEFERRED until funded.** Apple Developer Program ($99/yr) +
+    notarization (macOS Gatekeeper) and Windows Authenticode, ideally an **EV cert on an HSM**
+    (hundreds/yr) are what stop Gatekeeper/SmartScreen from warning. These cost recurring money the
+    project does not have pre-revenue, so **alpha/beta artifacts are shipped unsigned** — users see a
+    Gatekeeper/SmartScreen warning and must explicitly allow the app. This is an honest, disclosed
+    alpha posture, **gated on obtaining a GitHub Sponsors (or equivalent) funding source**; it is a
+    *hardening-phase* step, not an architectural one, and nothing in the code depends on it.
+  - **Update-integrity signing — free, adopted from day one of auto-update.** Tauri v2's updater signs
+    release artifacts with a **self-generated Ed25519/minisign keypair** (no certificate authority, no
+    cost); the app embeds the **pinned public key** and verifies every update before applying. This is
+    what actually prevents a malicious-update supply-chain attack (the AnyDesk-2024 / fake-`rustdesk`
+    class) — and it is **independent of OS code-signing**. So "unsigned build" means *the OS doesn't
+    vouch for the installer*, **not** *updates are unverified*: when auto-update ships (`docs/20 §2.4`,
+    Wave 1) it MUST carry Ed25519 update-signing with the private key **off build machines** (in the
+    CI secret store now, an HSM once funded).
+  - **Consequence & honesty (Inv 17):** the download page / README must state builds are unsigned and
+    show the expected fingerprint so users can verify out-of-band; do not imply OS-level trust we don't
+    have. `cargo-deny` (Inv 18) + a CycloneDX SBOM per release are the supply-chain hygiene we *can*
+    afford now. Revisit and flip to signed + notarized the moment funding lands — a config/CI change,
+    no code impact.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

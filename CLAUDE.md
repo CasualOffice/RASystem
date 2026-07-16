@@ -219,8 +219,11 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     dispatch → draft) `tauri-action` bundles the **controller** on macOS/Linux/Windows (dmg / AppImage
     + deb / NSIS — it is decode-only so it ships everywhere today) and the **host** on macOS (dmg).
     Both apps now carry a real bundle config (branded 1024px icon set, `bundle.active`, category);
-    builds are unsigned in the alpha (Gatekeeper/SmartScreen warn — EV signing is a hardening-phase
-    step). The controller `.app`/`.dmg` bundle was built and verified locally on macOS.
+    **builds ship UNSIGNED (no OS code-signing / notarization) — Gatekeeper/SmartScreen warn — and
+    stay that way *until a GitHub sponsor (or equivalent) funds the certificates* (ADR-072).** This is
+    only the *OS-vouches-for-the-installer* layer; the **free** Tauri Ed25519 **update-integrity**
+    signing is still adopted when auto-update lands (`docs/20 §2.4`), so unsigned ≠ unverified updates.
+    The controller `.app`/`.dmg` bundle was built and verified locally on macOS.
   - **Cross-platform sharing implemented (ADR-063) — Share now targets macOS + Linux + Windows.** A
     shared **software encoder `ras-media-openh264`** (`VideoEncoderBackend`): CPU BGRA → I420 →
     Annex-B with in-band SPS/PPS on every IDR, forced-IDR-on-demand; permissive Cisco **BSD-2**
