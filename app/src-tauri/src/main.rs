@@ -840,6 +840,13 @@ async fn serve_one(
     // backend ⇒ control requests are refused fail-closed).
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let host = host.with_input_sink(input_sink.clone());
+    // Feed the OS-clipboard write backend (ADR-079) so a `clipboard.write`-granted push can set the
+    // host clipboard (never pastes — ADR-076). It stays inert while clipboard.write is withheld
+    // (default OFF); a clipboard the platform can't open just leaves the host refusing pushes.
+    let host = match ras_clipboard::ArboardClipboardSink::new() {
+        Ok(sink) => host.with_clipboard_sink(Arc::new(sink)),
+        Err(_) => host,
+    };
 
     // `start()` runs the handshake, then blocks in the consent gate until Allow/Deny. Deny → Err.
     let mut events = match host.start().await {

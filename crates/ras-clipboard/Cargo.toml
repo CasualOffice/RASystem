@@ -1,0 +1,22 @@
+[package]
+name = "ras-clipboard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Cross-platform host clipboard backend (ADR-079). Implements `ras-control::ClipboardSink` — the
+# OS-clipboard **write** seam — over the permissive `arboard` crate (NSPasteboard on macOS, the Win32
+# clipboard on Windows, X11 selections on Linux). It only ever **sets** the clipboard; it never pastes
+# (the no-auto-paste rule from ADR-076 holds at the mechanism, not just by policy).
+
+[dependencies]
+ras-control = { path = "../ras-control" }
+ras-protocol = { path = "../ras-protocol" }
+
+# `default-features = false` drops arboard's `image-data` (we sync text only) and `wayland-data-control`
+# (Linux stays X11/Xwayland-only via pure-Rust x11rb — the same posture as `ras-input-linux`, so no
+# libwayland/system deps enter the tree). arboard is MIT/Apache-2.0 (Inv 18).
+arboard = { version = "3", default-features = false }

@@ -687,6 +687,33 @@
     commands compile); the signature-verified download + install + relaunch is the on-device row (needs
     a provisioned key + a published `latest.json`).
 
+- **ADR-079 · The concrete host clipboard backend is `arboard`, wired but default-inert · Accepted**
+  (implements ADR-076's deferred backend). The clipboard **write** seam (`ras_control::ClipboardSink`)
+  gets a real cross-platform implementation so a `clipboard.write`-granted push can actually reach the
+  OS clipboard.
+  - **`arboard`** (`ras-clipboard::ArboardClipboardSink`): NSPasteboard (macOS), Win32 clipboard
+    (Windows), X11 selections (Linux). It **only sets** the clipboard — the no-auto-paste rule (ADR-076)
+    now holds at the *mechanism*, not just policy. The text is passed straight to the OS, **never
+    logged** (Inv 8); errors carry only static messages. `Clipboard::new()` **fails closed** (no display
+    ⇒ no sink ⇒ host refuses pushes). The handle lives for the process (Linux/X11 must keep serving the
+    selection).
+  - **Lean, permissive deps.** `default-features = false` drops arboard's `image-data` (text-only) and
+    `wayland-data-control` — Linux stays **X11/Xwayland-only** via pure-Rust `x11rb`, matching
+    `ras-input-linux` (no libwayland/system deps). License: arboard is MIT/Apache; its **Windows-only**
+    `clipboard-win` + `error-code` are **BSL-1.0** (Boost — mainstream permissive, non-copyleft, GPL-
+    compatible; Inv 18 holds), added as **scoped `cargo-deny` exceptions** (never linked off Windows) so
+    the global allow-list still matches Inv 18's enumeration.
+  - **Wired but default-inert (correct posture).** The app's Share role calls `with_clipboard_sink`, but
+    `clipboard.write` stays **withheld by default** (ADR-076), so the sink is never reached until a
+    deployment explicitly grants it. Enabling clipboard end-to-end — offering `clipboard.write` in
+    policy + a consent, the controller-side "Send clipboard" (reads *its* OS clipboard), a "clipboard
+    shared" indicator (Inv 7), and the host→controller `clipboard.read` direction — is the remaining
+    app/GUI step.
+  - **Verify:** crate builds + `clippy` clean on host **and** cross-compile-checked for
+    `x86_64-unknown-linux-gnu` + `x86_64-pc-windows-msvc`; `cargo-deny` clean; a fail-closed
+    construction test (Ok with a clipboard, typed Err headless — never panics, never calls `set_text`
+    to avoid clobbering CI). App `check`/`clippy` clean. Real OS set + no-paste is the on-device row.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

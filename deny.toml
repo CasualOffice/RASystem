@@ -26,6 +26,12 @@ exceptions = [
   # no copyleft); used by iroh-relay for relay TLS.
   { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
   { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+  # BSL-1.0 = Boost Software License 1.0: a mainstream permissive, **non-copyleft** license (more
+  # liberal than MIT — no binary-attribution requirement), OSI + FSF approved and GPL-compatible, so
+  # Invariant 18 (deny only GPL/LGPL/AGPL/SSPL) holds. These two crates are the **Windows-only**
+  # clipboard backend pulled by `arboard` (ADR-079); never linked on macOS/Linux.
+  { crate = "clipboard-win", allow = ["BSL-1.0"] },
+  { crate = "error-code", allow = ["BSL-1.0"] },
 ]
 confidence-threshold = 0.9
 

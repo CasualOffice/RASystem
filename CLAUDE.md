@@ -141,8 +141,11 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   loop now enforces it end-to-end**: a `ras_control::ClipboardSink` DI seam + `with_clipboard_sink`, the
   loop captures granted caps at auth → gates → (if allowed + backend wired) `set_text` without paste,
   emitting content-free `ClipboardApplied{len}`/`ClipboardRejected{code}`; `send_clipboard_text` is the
-  controller push API; two loopback tests (granted reaches sink, withheld refused). The per-OS
-  `ClipboardSink` impl + app "Send clipboard"/indicator are the follow-up. **Still pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
+  controller push API; two loopback tests (granted reaches sink, withheld refused). The **OS backend
+  landed too (ADR-079)**: `ras-clipboard::ArboardClipboardSink` over `arboard` (NSPasteboard/Win32/X11),
+  sets-never-pastes, fail-closed, `default-features=false` (text-only, X11-only Linux), BSL-1.0 scoped
+  in cargo-deny; wired into Share via `with_clipboard_sink` but **inert until `clipboard.write` is
+  granted** (default OFF). Enabling the grant + app "Send clipboard"/indicator is the follow-up. **Still pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
   Secure-Input drop (macOS); the analogous **Linux on-device** XTEST run (a real X11/Xwayland session);
   the **Windows on-device** `SendInput` run (**needs Windows hardware the team lacks** — stays
   CI-compile-gated on `windows-latest`); a macOS **global-hotkey** emergency stop (baseline stop is the
@@ -448,8 +451,9 @@ casual-ras/
     ras-identity/         # Ed25519 identities, key storage
     ras-grant/            # access requests, session grants, issuer trait
     ras-policy/           # capability intersection, local policy
-    ras-control/          # control leases, generations, input routing
-    ras-media/            # capture/encode/decode traits + pipeline
+    ras-control/          # control leases, generations, input routing + OsInputSink/ClipboardSink seams
+    ras-clipboard/        # cross-platform clipboard write backend (arboard; set-never-paste, ADR-079)
+    ras-media/            # capture/encode/decode traits + pipeline (video + audio, ADR-077)
     ras-media-macos/      # macOS backend: ScreenCaptureKit + VideoToolbox (FFI; unsafe confined here)
     ras-audit/            # hash-chained signed audit journal
     ras-transport-iroh/   # Iroh endpoint, ALPN routing, relay

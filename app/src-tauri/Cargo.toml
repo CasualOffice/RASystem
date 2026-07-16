@@ -38,6 +38,9 @@ ras-core = { path = "../../crates/ras-core", default-features = false }
 ras-media = { path = "../../crates/ras-media" }
 ras-protocol = { path = "../../crates/ras-protocol" }
 ras-transport-iroh = { path = "../../crates/ras-transport-iroh" }
+# Cross-platform OS-clipboard write backend for the Share role (ADR-079). Sets the host clipboard on a
+# capability-gated push; never pastes (ADR-076). Inert until clipboard.write is granted (default OFF).
+ras-clipboard = { path = "../../crates/ras-clipboard" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 # Per-platform sharing backends (ADR-063). macOS uses the zero-copy hardware path
