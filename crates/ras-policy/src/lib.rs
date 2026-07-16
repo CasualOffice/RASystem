@@ -58,6 +58,9 @@ pub const SESSION_INVITE: &str = "session.invite";
 pub const RECORDING_START: &str = "recording.start";
 /// Stop session recording.
 pub const RECORDING_STOP: &str = "recording.stop";
+/// Receive the host's output (system) audio, host→controller (ADR-077). Live-only, never recorded
+/// (Inv 12); default OFF and always disclosed by an Inv-7 indicator when active.
+pub const AUDIO_LISTEN: &str = "audio.listen";
 
 /// The full set of **recognized** capability identifiers (catalogue version 1). Anything not here is
 /// unknown and denied. Versioned: a new identifier means a new catalogue version, never a silent add.
@@ -81,6 +84,7 @@ pub const CATALOGUE_V1: &[&str] = &[
     SESSION_INVITE,
     RECORDING_START,
     RECORDING_STOP,
+    AUDIO_LISTEN,
 ];
 
 /// The capabilities the **MVP host** will actually grant (Phase 2 = view-only + visual pointer +
@@ -376,6 +380,19 @@ mod tests {
             ClipboardDirection::ControllerToHost,
             &read
         ));
+    }
+
+    #[test]
+    fn audio_listen_is_recognized_but_withheld_by_default() {
+        // Recognized (in the catalogue) …
+        assert!(is_recognized(AUDIO_LISTEN));
+        // … but not grantable under any default policy (default OFF, ADR-077).
+        assert!(!phase2_default_policy().contains(AUDIO_LISTEN));
+        assert!(!phase3_default_policy().contains(AUDIO_LISTEN));
+        // Even a request + consent for it grants nothing.
+        let requested = set(&[AUDIO_LISTEN, "screen.view"]);
+        let granted = grantable(&requested, &phase3_default_policy(), &requested);
+        assert!(!granted.contains(AUDIO_LISTEN));
     }
 
     #[test]

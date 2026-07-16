@@ -17,6 +17,14 @@ pub type MediaError = ras_protocol::RasError;
 // here so downstream code can say `ras_media::FrameId`.
 pub use ras_protocol::{CaptureTimestampUs, FrameId};
 
+/// Audio pipeline (host → controller output audio, ADR-077). Traits + canonical types mirroring the
+/// video pipeline; concrete Opus/OS backends are a follow-up.
+pub mod audio;
+pub use audio::{
+    AudioCaptureBackend, AudioCodec, AudioConfig, AudioDecoderBackend, AudioEncoderBackend,
+    CapturedAudio, DecodedAudio, EncodedAudio,
+};
+
 /// The one encoded access unit. Defined once here; transport and controller import it.
 ///
 /// `data` is a complete Annex-B access unit (start-code `0x000001` delimited NALs). Keyframes

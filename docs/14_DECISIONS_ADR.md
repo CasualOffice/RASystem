@@ -629,6 +629,38 @@
     per-direction/default-denied gate + recognized-but-withheld (ras-policy), the two host-loop loopback
     tests (ras-core), decoder fuzz — all green. Real OS clipboard set + no-paste is the on-device row.
 
+- **ADR-077 · Audio is host→controller output-audio only, Opus, gated + disclosed; seam-first · Accepted**
+  (`docs/20 §2.1`; audio cross-device research). Every incumbent streams the remote machine's sound;
+  we add it under the same discipline as screen view and land the **capability + media seam** now,
+  deferring the concrete Opus codec + OS capture (exactly how the video traits preceded their backends).
+  - **Scope — deliberately narrow.** MVP direction is **host output (system) audio → controller** only:
+    **no microphone, no two-way voice, no recording.** Audio is **live-only, never retained at rest**
+    (Inv 12 — the fraud subsystem holds zero content; a stream is not a recording). Mic/2-way voice is a
+    separate future capability, not a default-on expansion of this one.
+  - **Gated + disclosed.** A new `audio.listen` capability — **recognized but withheld → default OFF**
+    (in no `*_GRANTABLE` set; a deployment must explicitly widen policy). When active it always shows an
+    Inv-7 "AUDIO SHARED" indicator (host/app-enforced), the audio analogue of the always-visible
+    viewing/control indicators — white-labeling may not hide it.
+  - **Codec = Opus** (royalty-free, Inv 18; low-latency; WebCodecs-native — decodes with an
+    `AudioDecoder` configured `"opus"`, mirroring the video WebCodecs path). Defaults 48 kHz / stereo /
+    20 ms frames.
+  - **Seam, this ADR.** `ras-media::audio` defines the pipeline as traits + canonical types —
+    `AudioConfig`, `CapturedAudio` (interleaved i16 PCM), `EncodedAudio` (one Opus packet, monotonic
+    `seq`, **no keyframes** — each packet is independently decodable), and `AudioCaptureBackend` /
+    `AudioEncoderBackend` / `AudioDecoderBackend`, structurally parallel to the video traits. A
+    dependency-free `SyntheticAudioCapture` (tone source) + `SyntheticAudioEncoder` (PCM→bytes
+    passthrough) exercise the seam in CI. **No new C dependency** yet (libopus lands with the real
+    backend, behind its own license note).
+  - **Deferred (follow-up):** the real Opus encoder/decoder (`opus`/libopus, BSD-3 — Inv 18 OK; add via
+    an ADR when it lands), OS output-audio capture (macOS ScreenCaptureKit audio / CoreAudio tap,
+    Windows WASAPI loopback, Linux PipeWire), the audio transport plane (its own QUIC stream or
+    datagrams, A/V-sync'd by `captured_at_us`), `AudioConfig` wire negotiation, `ras-core` pump +
+    `audio.listen` gate + the "AUDIO SHARED" indicator, and the JS `AudioDecoder`→`AudioContext`
+    playback.
+  - **Verify:** the audio types + `frame_samples` math and the synthetic capture→encode round-trip
+    (monotonic `seq`, gap-free, correct sample counts, stop-yields-none) are green; the `audio.listen`
+    recognized-but-withheld/default-OFF test is green. Real capture/encode/playback is the on-device row.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

@@ -10,6 +10,9 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 
+use crate::audio::{
+    AudioCaptureBackend, AudioCodec, AudioConfig, AudioEncoderBackend, CapturedAudio, EncodedAudio,
+};
 use crate::{
     CaptureOptions, CaptureTimestampUs, CapturedFrame, ColorSpace, EncodedFrame, FrameId,
     MediaError, PlatformSurface, ScreenCaptureBackend, StreamConfig, VideoCodec,
@@ -211,6 +214,154 @@ impl VideoEncoderBackend for SyntheticEncoder {
     }
 }
 
+/// Deterministic tone source (ADR-077): emits one full frame of a 440 Hz sine per `next_chunk`, with
+/// no audio device and no wall-clock. Exercises the [`AudioCaptureBackend`] seam in CI.
+pub struct SyntheticAudioCapture {
+    config: AudioConfig,
+    phase: f32,
+    clock_us: CaptureTimestampUs,
+    started: bool,
+}
+
+impl SyntheticAudioCapture {
+    /// New source at the Opus defaults (48 kHz stereo, 20 ms). `start` must be called before pulling.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: AudioConfig {
+                codec: AudioCodec::Opus,
+                sample_rate_hz: 48_000,
+                channels: 2,
+                frame_duration_us: 20_000,
+                target_bitrate_bps: 96_000,
+            },
+            phase: 0.0,
+            clock_us: 0,
+            started: false,
+        }
+    }
+}
+
+impl Default for SyntheticAudioCapture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioCaptureBackend for SyntheticAudioCapture {
+    fn start(&mut self, requested: &AudioConfig) -> Result<AudioConfig, MediaError> {
+        self.config = *requested;
+        self.phase = 0.0;
+        self.clock_us = 0;
+        self.started = true;
+        Ok(self.config)
+    }
+
+    fn next_chunk(
+        &mut self,
+        _timeout: core::time::Duration,
+    ) -> Result<Option<CapturedAudio>, MediaError> {
+        if !self.started {
+            return Ok(None);
+        }
+        let per_channel = self.config.frame_samples() as usize;
+        let channels = self.config.channels as usize;
+        let two_pi = 2.0 * core::f32::consts::PI;
+        let step = two_pi * 440.0 / self.config.sample_rate_hz as f32;
+        let mut samples = Vec::with_capacity(per_channel * channels);
+        for _ in 0..per_channel {
+            let v = (self.phase.sin() * f32::from(i16::MAX)) as i16;
+            self.phase += step;
+            if self.phase > two_pi {
+                self.phase -= two_pi;
+            }
+            // Same sample on every channel (a mono tone spread across the interleaved frame).
+            for _ in 0..channels {
+                samples.push(v);
+            }
+        }
+        let captured_at_us = self.clock_us;
+        self.clock_us = self
+            .clock_us
+            .saturating_add(u64::from(self.config.frame_duration_us));
+        Ok(Some(CapturedAudio {
+            captured_at_us,
+            samples,
+        }))
+    }
+
+    fn config(&self) -> AudioConfig {
+        self.config
+    }
+
+    fn stop(&mut self) {
+        self.started = false;
+    }
+}
+
+/// Passthrough audio "encoder" (ADR-077): serializes the interleaved PCM to little-endian bytes and
+/// stamps a monotonic `seq`. Not Opus — exactly enough to exercise transport framing, loss-by-`seq`,
+/// and the [`AudioEncoderBackend`] seam without libopus, mirroring [`SyntheticEncoder`] for video.
+pub struct SyntheticAudioEncoder {
+    config: AudioConfig,
+    next_seq: u64,
+}
+
+impl SyntheticAudioEncoder {
+    /// New encoder. `configure` must be called before `encode`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: AudioConfig {
+                codec: AudioCodec::Opus,
+                sample_rate_hz: 0,
+                channels: 0,
+                frame_duration_us: 0,
+                target_bitrate_bps: 0,
+            },
+            next_seq: 0,
+        }
+    }
+}
+
+impl Default for SyntheticAudioEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioEncoderBackend for SyntheticAudioEncoder {
+    fn configure(&mut self, config: &AudioConfig) -> Result<(), MediaError> {
+        self.config = *config;
+        self.next_seq = 0;
+        Ok(())
+    }
+
+    fn encode(&mut self, chunk: CapturedAudio) -> Result<Option<EncodedAudio>, MediaError> {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let mut buf = BytesMut::with_capacity(chunk.samples.len() * 2);
+        for s in &chunk.samples {
+            buf.put_i16_le(*s);
+        }
+        Ok(Some(EncodedAudio {
+            seq,
+            captured_at_us: chunk.captured_at_us,
+            data: Bytes::from(buf),
+            config: self.config,
+        }))
+    }
+
+    fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), MediaError> {
+        self.config.target_bitrate_bps = bitrate_bps;
+        Ok(())
+    }
+
+    fn config(&self) -> AudioConfig {
+        self.config
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -314,5 +465,47 @@ mod tests {
         .unwrap();
         enc.set_bitrate(2_500_000).unwrap();
         assert_eq!(enc.config().target_bitrate_bps, 2_500_000);
+    }
+
+    #[test]
+    fn synthetic_audio_capture_encode_roundtrip() {
+        let mut cap = SyntheticAudioCapture::new();
+        let cfg = cap.start(&cap.config()).unwrap();
+        let mut enc = SyntheticAudioEncoder::new();
+        enc.configure(&cfg).unwrap();
+
+        let per_channel = cfg.frame_samples() as usize;
+        let expected_samples = per_channel * cfg.channels as usize;
+        let dur = core::time::Duration::from_millis(1);
+
+        let mut prev_seq = None;
+        for _ in 0..5 {
+            let chunk = cap.next_chunk(dur).unwrap().unwrap();
+            assert_eq!(
+                chunk.samples.len(),
+                expected_samples,
+                "a full frame is frame_samples × channels"
+            );
+            let pkt = enc.encode(chunk).unwrap().unwrap();
+            // seq is monotonic starting at 0; each i16 sample became 2 LE bytes.
+            if let Some(p) = prev_seq {
+                assert_eq!(pkt.seq, p + 1, "packet seq is gap-free monotonic");
+            } else {
+                assert_eq!(pkt.seq, 0);
+            }
+            prev_seq = Some(pkt.seq);
+            assert_eq!(pkt.data.len(), expected_samples * 2);
+            assert_eq!(pkt.config.codec, AudioCodec::Opus);
+        }
+
+        // ABR retargets the live encoder without a reconfigure.
+        enc.set_bitrate(64_000).unwrap();
+        assert_eq!(enc.config().target_bitrate_bps, 64_000);
+
+        cap.stop();
+        assert!(
+            cap.next_chunk(dur).unwrap().is_none(),
+            "a stopped source yields no chunks"
+        );
     }
 }

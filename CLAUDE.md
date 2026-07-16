@@ -287,6 +287,17 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     to Tauri `Logical*`, and the pointer is normalized, so it lands right even on a secondary monitor,
     not just the primary — replacing the old `maximized`-on-primary overlay). Fail-safe: no bounds →
     default overlay. Compiles clean; the multi-monitor behavior is an on-device verification step.
+  - **Audio pipeline — capability + media seam landed (ADR-077), host→controller output audio.** A
+    new `audio.listen` capability (**recognized-but-withheld → default OFF**); `ras-media::audio` defines
+    the pipeline as traits + canonical types (`AudioConfig`, `CapturedAudio` interleaved-i16 PCM,
+    `EncodedAudio` = one Opus packet + monotonic `seq`, **no keyframes**;
+    `AudioCaptureBackend`/`AudioEncoderBackend`/`AudioDecoderBackend`), parallel to the video traits,
+    with dependency-free `SyntheticAudioCapture`+`SyntheticAudioEncoder` doubles + a capture→encode
+    roundtrip test. Opus is the codec (royalty-free, WebCodecs-native). MVP is **output audio only** —
+    no mic, no two-way, **live-only never recorded** (Inv 12); always disclosed by an Inv-7 "AUDIO
+    SHARED" indicator when active. Deferred (OS/on-device): real Opus (`opus`/libopus BSD-3), OS capture
+    (SCK-audio / WASAPI-loopback / PipeWire), the audio QUIC sub-stream + `AudioConfig` negotiation,
+    `ras-core` pump + gate + indicator, JS `AudioDecoder`→`AudioContext` playback.
   - Still stubbed / deferred (`todo!()` or additive): iroh **reset-on-stale + FEC** and the
     `DatagramFec` video alternative (behind `StreamConfig::video_transport`),
     **hardware encoders + Wayland DMA-buf zero-copy** (Linux/Windows use the
