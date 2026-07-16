@@ -63,6 +63,17 @@ grant→lease model (viewing ≠ controlling).
 
 ## 3. Pointer & keyboard injection (Inv 6 — narrow surface)
 
+> **Automated pre-check (no human eye):** run
+> `cargo run -p ras-input-macos --example pointer_roundtrip` from a Terminal in your login session.
+> It injects a move to the main display's centre through the real `CgEventSink` and reads the cursor
+> back, asserting it landed within 2 px. Exit `0` = injection verified; `2` = PostEvent access not
+> granted (grant it and re-run); `1` = a real bug (cursor didn't land). This closes the pointer-mapping
+> row mechanically; the button/keyboard/scroll steps below still want a human to confirm target focus.
+>
+> *(Already run headless on the dev Mac: it exits `2` — `CGPreflightPostEventAccess` is `false` for an
+> ungranted CLI process, so the sink refuses to inject rather than silently no-op'ing. That confirms
+> the fail-closed preflight branch on real hardware; the `0` PASS path needs the grant.)*
+
 With a live control lease and PostEvent granted:
 
 - [ ] Move the viewer's pointer over the shared video → the **host** cursor tracks it. Sanity-check
