@@ -1776,11 +1776,34 @@ mod iroh_session_tests {
         assert_eq!(AudioPacketHeader::decode(&bad), None);
     }
 
+    /// Resend `pkt` until the source yields a datagram with a matching `seq`, tolerating **datagram
+    /// loss** — the whole point of the unreliable audio plane. Bounded so a genuinely dead path fails
+    /// fast (never an unbounded `await` that would hang a CI job), with a per-attempt timeout and
+    /// stragglers/duplicates from earlier packets skipped.
+    async fn send_until_received(
+        sink: &AudioSink,
+        source: &mut AudioSource,
+        pkt: &EncodedAudio,
+    ) -> EncodedAudio {
+        for _ in 0..50 {
+            let _ = sink.send_audio(pkt.clone()); // drop-on-full is fine; we retry
+            match tokio::time::timeout(core::time::Duration::from_millis(200), source.recv()).await
+            {
+                Ok(Ok(got)) if got.seq == pkt.seq => return got,
+                Ok(Ok(_)) => {} // a duplicate/straggler of another packet — keep looking
+                Ok(Err(e)) => panic!("audio source errored: {e:?}"),
+                Err(_) => {} // timed out — datagram lost, resend
+            }
+        }
+        panic!("audio packet seq {} never delivered", pkt.seq)
+    }
+
     /// End-to-end audio over **real QUIC datagrams** on loopback (ADR-077): the host emits one datagram
     /// per Opus packet, the controller reconstructs each `EncodedAudio` faithfully (bytes, seq, config).
     /// Also asserts the role split (only the host has an audio sink; only the controller a source) and
     /// that a `seq` gap simply surfaces as the next packet — audio has no keyframe/recovery concept.
-    #[tokio::test]
+    /// Loss-tolerant + bounded (datagrams are unreliable; a lost one must never hang the test).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn audio_streams_packet_by_packet_over_iroh_datagrams() {
         let host = Endpoint::bind().await.unwrap();
         let controller = Endpoint::bind().await.unwrap();
@@ -1810,23 +1833,19 @@ mod iroh_session_tests {
             .expect("the controller has an audio source");
         let (host_ep, sink) = host_task.await.unwrap();
 
-        // Three in-order packets round-trip, bytes/seq/config intact. Datagrams are unreliable, so send
-        // one and receive one in lockstep (on a quiet loopback path delivery is effectively certain).
+        // Three in-order packets round-trip, bytes/seq/config intact.
         for seq in 0..3u64 {
-            let sent = sink.send_audio(test_audio(seq, b"opus-packet")).unwrap();
-            assert_eq!(sent, SendOutcome::Sent);
-            let got = source.recv().await.unwrap();
-            assert_eq!(got.seq, seq);
+            let pkt = test_audio(seq, b"opus-packet");
+            let got = send_until_received(&sink, &mut source, &pkt).await;
             assert_eq!(&got.data[..], b"opus-packet");
             assert_eq!(got.config.sample_rate_hz, 48_000);
             assert_eq!(got.config.channels, 2);
             assert_eq!(got.config.codec, AudioCodec::Opus);
         }
 
-        // A seq gap (packet 3,4 "lost") is not special: the next delivered packet is just seq 5. Opus
+        // A seq gap (packets 3,4 "lost") is not special: the next delivered packet is just seq 5. Opus
         // PLC handles the gap; the transport neither recovers nor synthesizes a loss event.
-        sink.send_audio(test_audio(5, b"after-gap")).unwrap();
-        let got = source.recv().await.unwrap();
+        let got = send_until_received(&sink, &mut source, &test_audio(5, b"after-gap")).await;
         assert_eq!(got.seq, 5);
         assert_eq!(&got.data[..], b"after-gap");
 
