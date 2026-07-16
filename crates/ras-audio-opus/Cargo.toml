@@ -1,0 +1,22 @@
+[package]
+name = "ras-audio-opus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Opus audio encoder/decoder backend (ADR-080). Implements `ras-media`'s AudioEncoderBackend +
+# AudioDecoderBackend over `audiopus` — a safe wrapper around libopus, which `audiopus_sys` builds from
+# vendored BSD-3 source via cmake (no system libopus needed). Opus is royalty-free (Inv 18). This is
+# NOT the RustDesk `magnum-opus` fork. `unsafe` stays confined to the external `audiopus`/`audiopus_sys`
+# FFI crates; this crate is `unsafe`-free.
+
+[dependencies]
+ras-media = { path = "../ras-media" }
+ras-protocol = { path = "../ras-protocol" }
+bytes = "1"
+
+# Pinned exact: 0.3.0-rc.0 is the current published wrapper; the Opus C library it vendors is stable.
+audiopus = "=0.3.0-rc.0"

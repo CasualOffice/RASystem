@@ -307,9 +307,13 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     with dependency-free `SyntheticAudioCapture`+`SyntheticAudioEncoder` doubles + a capture→encode
     roundtrip test. Opus is the codec (royalty-free, WebCodecs-native). MVP is **output audio only** —
     no mic, no two-way, **live-only never recorded** (Inv 12); always disclosed by an Inv-7 "AUDIO
-    SHARED" indicator when active. Deferred (OS/on-device): real Opus (`opus`/libopus BSD-3), OS capture
-    (SCK-audio / WASAPI-loopback / PipeWire), the audio QUIC sub-stream + `AudioConfig` negotiation,
-    `ras-core` pump + gate + indicator, JS `AudioDecoder`→`AudioContext` playback.
+    SHARED" indicator when active. The **real Opus codec landed too (ADR-080)**: `ras-audio-opus`
+    (`OpusEncoder`/`OpusDecoder` over `audiopus`/vendored-libopus BSD-3, ISC wrapper; sub-frame
+    buffering + live `set_bitrate`), verified by a real **encode→decode roundtrip** (a tone survives) —
+    not the RustDesk `magnum-opus` fork; `.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5`
+    (the cmake-4 fix for the vendored libopus build). Deferred (OS/on-device): OS capture (SCK-audio /
+    WASAPI-loopback / PipeWire), the audio QUIC sub-stream + `AudioConfig` negotiation, `ras-core` pump +
+    gate + indicator, JS `AudioDecoder`→`AudioContext` playback.
   - Still stubbed / deferred (`todo!()` or additive): iroh **reset-on-stale + FEC** and the
     `DatagramFec` video alternative (behind `StreamConfig::video_transport`),
     **hardware encoders + Wayland DMA-buf zero-copy** (Linux/Windows use the
@@ -454,6 +458,7 @@ casual-ras/
     ras-control/          # control leases, generations, input routing + OsInputSink/ClipboardSink seams
     ras-clipboard/        # cross-platform clipboard write backend (arboard; set-never-paste, ADR-079)
     ras-media/            # capture/encode/decode traits + pipeline (video + audio, ADR-077)
+    ras-audio-opus/       # Opus audio encoder/decoder (audiopus/vendored libopus, ADR-080)
     ras-media-macos/      # macOS backend: ScreenCaptureKit + VideoToolbox (FFI; unsafe confined here)
     ras-audit/            # hash-chained signed audit journal
     ras-transport-iroh/   # Iroh endpoint, ALPN routing, relay

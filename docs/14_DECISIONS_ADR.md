@@ -714,6 +714,31 @@
     construction test (Ok with a clipboard, typed Err headless — never panics, never calls `set_text`
     to avoid clobbering CI). App `check`/`clippy` clean. Real OS set + no-paste is the on-device row.
 
+- **ADR-080 · The concrete Opus audio codec is `audiopus` (vendored libopus), unit-tested by
+  encode→decode roundtrip · Accepted** (implements ADR-077's deferred codec). The audio seam gets a
+  real encoder/decoder so the pipeline can produce/consume Opus.
+  - **`ras-audio-opus`**: `OpusEncoder`/`OpusDecoder` implement `ras_media::AudioEncoderBackend` /
+    `AudioDecoderBackend` over **`audiopus`** (a safe wrapper; `audiopus_sys` builds **libopus from
+    vendored BSD-3 source via cmake** — no system libopus needed). Opus is royalty-free (Inv 18). The
+    encoder **buffers sub-frame input** and emits one packet per whole Opus frame (honoring the
+    `Ok(None)`-until-ready contract); `set_bitrate` retargets live. **Not** the RustDesk `magnum-opus`
+    fork. `unsafe` stays in the external FFI crates — this crate is `unsafe`-free.
+  - **Genuinely unit-tested headless** (unlike the clipboard/OS backends): a real **encode→decode
+    roundtrip** proves the DSP — a 440 Hz tone survives the codec (decoded frame size matches, peak
+    amplitude preserved), plus gap-free `seq`, sub-frame buffering, and unconfigured-errors tests.
+  - **cmake-4 fix, workspace-wide.** CMake 4.0 (2025) dropped the pre-3.5 policy that the vendored
+    libopus still declares; `.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` (the standard
+    fix), inherited by dev + CI automatically. Only affects cmake build scripts (just `audiopus_sys`).
+    cmake is preinstalled on all CI runners; libopus builds per-OS natively there, the same model as the
+    C-based `ras-media-openh264` (nasm) already in the workspace.
+  - **License:** `audiopus`/`audiopus_sys` are **ISC** (already allowed); vendored libopus is **BSD-3**
+    (Xiph) — no new `cargo-deny` allowance needed.
+  - **Not yet wired.** Like the audio seam itself, this codec is unconnected until the audio pump lands
+    (transport sub-stream + OS capture + `ras-core` pump + `audio.listen` gate + JS playback, ADR-077).
+  - **Verify:** builds + roundtrip/bitrate/buffering/error tests green **natively on macOS** (and in the
+    full workspace gate); Linux/Windows are the CI-native build gate (a C library can't be cross-built
+    from macOS — same honesty as openh264). Real capture→encode→network→decode→play is the on-device row.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

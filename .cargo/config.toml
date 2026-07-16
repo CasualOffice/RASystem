@@ -1,0 +1,9 @@
+# Workspace cargo configuration.
+#
+# CMAKE_POLICY_VERSION_MINIMUM: CMake 4.0 (2025) removed compatibility with the pre-3.5 policy that
+# the vendored libopus source (built by `audiopus_sys`, the Opus backend `ras-audio-opus`, ADR-080)
+# still declares. This tells CMake to configure it under the 3.5 policy baseline — the standard,
+# documented fix for the cmake-4 breakage. Only affects CMake-driven build scripts (in our tree, just
+# audiopus_sys); harmless elsewhere. cargo reads this file automatically, so dev + CI both inherit it.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
