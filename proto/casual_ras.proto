@@ -168,6 +168,14 @@ message TextInput {
 
 message ReleaseAllKeys {}
 
+// Authoritative lock-key STATE (not an edge): the host slaves its CapsLock/NumLock to these so case
+// and keypad output match the controller (edge-forwarding a lock key desyncs — every VNC/RDP/Sunshine
+// tracker proves it). ras_protocol::InputAction::SetLockState.
+message SetLockState {
+  bool caps_lock = 1;
+  bool num_lock  = 2;
+}
+
 // One OS-input action. Exactly one variant is set; an unset oneof decodes to InvalidMessage.
 message InputAction {
   oneof action {
@@ -177,6 +185,7 @@ message InputAction {
     KeyEvent           key_event        = 4;
     TextInput          text_input       = 5;
     ReleaseAllKeys     release_all_keys = 6;
+    SetLockState       set_lock_state   = 7;
   }
 }
 

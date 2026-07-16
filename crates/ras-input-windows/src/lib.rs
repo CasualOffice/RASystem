@@ -28,11 +28,11 @@ mod win {
     use ras_control::{InputError, OsInputSink};
     use ras_protocol::{ErrorCode, PointerButton, RasError};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
-        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-        MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
-        MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+        GetKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
+        MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+        MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -277,6 +277,27 @@ mod win {
                 }
             }
             st.held_mods = 0;
+            Ok(())
+        }
+
+        fn set_lock_state(&self, caps_lock: bool, num_lock: bool) -> Result<(), InputError> {
+            // Read the live toggle state (low bit of GetKeyState) and tap the lock key only on a
+            // mismatch — idempotent, never blindly toggles. VK_CAPITAL = 0x14, VK_NUMLOCK = 0x90.
+            // SAFETY: GetKeyState is a pure query of one virtual-key.
+            let cur_caps = (unsafe { GetKeyState(0x14) } & 1) != 0;
+            let cur_num = (unsafe { GetKeyState(0x90) } & 1) != 0;
+            if cur_caps != caps_lock {
+                self.send(&[
+                    key_input(0x14, 0, KEYBD_EVENT_FLAGS(0)),
+                    key_input(0x14, 0, KEYEVENTF_KEYUP),
+                ])?;
+            }
+            if cur_num != num_lock {
+                self.send(&[
+                    key_input(0x90, 0, KEYBD_EVENT_FLAGS(0)),
+                    key_input(0x90, 0, KEYEVENTF_KEYUP),
+                ])?;
+            }
             Ok(())
         }
 

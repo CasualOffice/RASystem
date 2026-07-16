@@ -121,14 +121,26 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   this FFI crate; **cross-compile-checked + clippy-clean for `x86_64-pc-windows-msvc` from the macOS dev
   machine**, unit-tested (HID→VK table, abs-axis mapping), `cargo-deny`-clean (windows-rs MIT/Apache).
   **Both** the Linux and Windows sinks are **wired into the app's Share role** (`with_input_sink` +
-  `set_display_bounds` under the matching `cfg`), so all three platforms inject once built. **Still
-  pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
+  `set_display_bounds` under the matching `cfg`), so all three platforms inject once built. **Keyboard
+  correctness — lock-state sync has landed (ADR-074):** a closed `InputAction::SetLockState { caps_lock,
+  num_lock }` carries authoritative lock **state** (not key edges — edge-forwarding guarantees Caps/Num
+  drift); the host **slaves** its OS lock keys to it, gated on `keyboard.key` through the same
+  per-message `authorize_input` (a pointer-only lease can't flip Caps — tested, Inv 15). Each backend
+  reads live OS lock state and taps **only on mismatch** (idempotent): Windows `GetKeyState`+`SendInput`,
+  Linux `QueryPointer` mask + XTEST, macOS `CGEventSourceFlagsState` + CapsLock keycode (no NumLock,
+  best-effort). `OsInputSink::set_lock_state` has a default no-op (non-breaking); wire+gate+dispatch+all
+  three overrides are cross-compile-checked green. The **cursor-shape channel** wire also landed
+  (ADR-073: `CursorShape`/`CursorCached`/`CursorHidden` `ControlMsg` variants, fail-closed codec bounded
+  at `MAX_CURSOR_DIM=256` + exact `w*h*4` RGBA + hot-spot-inside). **Still pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
   Secure-Input drop (macOS); the analogous **Linux on-device** XTEST run (a real X11/Xwayland session);
   the **Windows on-device** `SendInput` run (**needs Windows hardware the team lacks** — stays
   CI-compile-gated on `windows-latest`); a macOS **global-hotkey** emergency stop (baseline stop is the
   always-visible Stop button, which already drives `revoke_all` + `release_all`; no kernel SAS on macOS
   — SAS stays the Windows path); and the Linux **`uinput`/libei** + Windows **Session-0 service/agent
-  split (S4)** follow-ups (docs/19 §3/§4).
+  split (S4)** follow-ups (docs/19 §3/§4). Cross-device follow-ups still open: **live on-device lock
+  reconciliation** + the app forwarding the controller's own `getModifierState` as `SetLockState` on
+  change; host cursor **capture** + controller **render** for the cursor-shape channel; and Cmd↔Ctrl
+  primary-modifier remap (docs/20 §2.6).
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

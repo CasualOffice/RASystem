@@ -120,6 +120,8 @@ pub fn required_cap(action: &InputAction) -> Option<&'static str> {
         InputAction::PointerWheel { .. } => Some(ras_policy::POINTER_SCROLL),
         InputAction::KeyEvent { .. } => Some(ras_policy::KEYBOARD_KEY),
         InputAction::TextInput { .. } => Some(ras_policy::KEYBOARD_TEXT),
+        // Lock-state sync affects what the keyboard produces → gate it on the keyboard capability.
+        InputAction::SetLockState { .. } => Some(ras_policy::KEYBOARD_KEY),
         InputAction::ReleaseAllKeys => None,
         _ => Some(DENY_UNKNOWN_ACTION),
     }
@@ -368,6 +370,16 @@ pub trait OsInputSink: Send + Sync {
     /// # Errors
     /// Backend/OS failure.
     fn release_all(&self) -> Result<(), InputError>;
+    /// Slave the OS CapsLock/NumLock **state** to the controller's (not an edge — see
+    /// [`InputAction::SetLockState`]). Default is a no-op for backends/test doubles that don't sync
+    /// lock state; the real platform backends override it. Idempotent (only toggles on a mismatch).
+    ///
+    /// # Errors
+    /// Backend/OS failure.
+    fn set_lock_state(&self, caps_lock: bool, num_lock: bool) -> Result<(), InputError> {
+        let _ = (caps_lock, num_lock);
+        Ok(())
+    }
     /// Whether OS input is permitted **without** prompting (macOS: `CGPreflightPostEventAccess`).
     /// Fail-closed: a backend that cannot inject returns `false`, and the host refuses the lease.
     fn input_permitted(&self) -> bool;
@@ -402,6 +414,10 @@ pub fn dispatch(sink: &dyn OsInputSink, action: &InputAction) -> Result<(), Inpu
         } => sink.key(*hid_usage, *down, *modifiers),
         InputAction::TextInput { utf8 } => sink.text(utf8),
         InputAction::ReleaseAllKeys => sink.release_all(),
+        InputAction::SetLockState {
+            caps_lock,
+            num_lock,
+        } => sink.set_lock_state(*caps_lock, *num_lock),
         // Fail-closed: an unrecognized future action is never injected (it is also denied at the gate
         // by `required_cap`, so this is belt-and-braces).
         _ => Err(RasError::fatal(
@@ -636,6 +652,33 @@ mod tests {
         );
         // …but a pointer move (granted) is fine.
         assert!(m.authorize_input(&move_env(&lease, g, 2), 1002).is_ok());
+    }
+
+    #[test]
+    fn set_lock_state_is_gated_on_the_keyboard_capability() {
+        // Lock-state sync changes what the keyboard types, so it needs keyboard.key (not free like
+        // ReleaseAllKeys). A pointer-only lease must not be able to flip CapsLock.
+        let action = InputAction::SetLockState {
+            caps_lock: true,
+            num_lock: false,
+        };
+        assert_eq!(required_cap(&action), Some(ras_policy::KEYBOARD_KEY));
+
+        let grant = caps(&[ras_policy::CONTROL_REQUEST, ras_policy::POINTER_MOVE]);
+        let mut m = LeaseManager::new(grant.clone(), 10_000_000, 1);
+        let lease = m
+            .issue([1u8; 32], &grant, &grant, 1000, LEASE_DEFAULT_TTL_MS)
+            .unwrap();
+        let env = InputEnvelope {
+            lease_id: lease.lease_id.0,
+            generation: m.generation(),
+            seq: 1,
+            action,
+        };
+        assert_eq!(
+            m.authorize_input(&env, 1001).unwrap_err(),
+            ControlError::CapabilityDenied
+        );
     }
 
     #[test]

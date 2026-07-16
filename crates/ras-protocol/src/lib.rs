@@ -339,6 +339,15 @@ pub enum InputAction {
     /// Release every key/button the host currently holds down — key-state cleanup on
     /// transfer/disconnect/stop. Always permitted (it only *clears* state).
     ReleaseAllKeys,
+    /// Authoritative CapsLock/NumLock **state** (not an edge): the host slaves its lock keys to these
+    /// so case/keypad output matches the controller. Forwarding a lock-key *edge* between two
+    /// independently-stated machines guarantees drift — this carries the desired state instead.
+    SetLockState {
+        /// Desired CapsLock state (`true` = on).
+        caps_lock: bool,
+        /// Desired NumLock state (`true` = on).
+        num_lock: bool,
+    },
 }
 
 /// The closed set of injectable pointer buttons (Invariant 6).

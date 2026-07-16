@@ -29,6 +29,7 @@ mod linux {
     use ras_control::{InputError, OsInputSink};
     use ras_protocol::{ErrorCode, PointerButton, RasError};
     use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::ConnectionExt as _;
     use x11rb::protocol::xproto::{
         Window, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
         MOTION_NOTIFY_EVENT,
@@ -61,6 +62,13 @@ mod linux {
     const BTN_WHEEL_RIGHT: u8 = 7;
     /// Cap wheel notches per event so a hostile delta can't spin an unbounded click loop.
     const MAX_WHEEL_NOTCHES: i32 = 64;
+
+    // Lock keys, X keycodes (evdev + 8). Caps = KEY_CAPSLOCK(58)+8; Num = KEY_NUMLOCK(69)+8.
+    const CAPS_KC: u8 = 66;
+    const NUM_KC: u8 = 77;
+    // KeyButMask bits in a QueryPointer reply: CapsLock = Lock (0x02), NumLock = Mod2 (0x10).
+    const MASK_CAPS: u16 = 0x02;
+    const MASK_NUM: u16 = 0x10;
 
     /// Display bounds in global root-window pixels, for normalized→pixel mapping.
     #[derive(Debug, Clone, Copy)]
@@ -309,6 +317,35 @@ mod linux {
                 }
             }
             st.held_mods = 0;
+            Ok(())
+        }
+
+        fn set_lock_state(&self, caps_lock: bool, num_lock: bool) -> Result<(), InputError> {
+            let conn = self.conn.as_ref().ok_or_else(|| {
+                RasError::recoverable(ErrorCode::InputFailed, "no X11 connection")
+            })?;
+            // Read the live lock state from the pointer's modifier mask, then tap the lock key only on
+            // a mismatch — idempotent, never blindly toggles.
+            let mask = conn
+                .query_pointer(self.root)
+                .map_err(|_| RasError::recoverable(ErrorCode::InputFailed, "QueryPointer failed"))?
+                .reply()
+                .map_err(|_| RasError::recoverable(ErrorCode::InputFailed, "QueryPointer reply"))?
+                .mask;
+            let m = u16::from(mask);
+            let (cur_caps, cur_num) = (m & MASK_CAPS != 0, m & MASK_NUM != 0);
+            let (x, y) = {
+                let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                st.last_point
+            };
+            if cur_caps != caps_lock {
+                self.fake(KEY_PRESS_EVENT, CAPS_KC, x, y)?;
+                self.fake(KEY_RELEASE_EVENT, CAPS_KC, x, y)?;
+            }
+            if cur_num != num_lock {
+                self.fake(KEY_PRESS_EVENT, NUM_KC, x, y)?;
+                self.fake(KEY_RELEASE_EVENT, NUM_KC, x, y)?;
+            }
             Ok(())
         }
 

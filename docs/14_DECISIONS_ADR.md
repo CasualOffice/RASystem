@@ -537,6 +537,28 @@
     and controller **render** (draw the cached RGBA on the WebCodecs canvas) are the on-device/GUI
     follow-up, plus a `cursor_embedded` fallback for backends that can't exclude the HW cursor.
 
+- **ADR-074 · Lock-key state is synced authoritatively via `InputAction::SetLockState`, not by
+  forwarding lock-key edges · Accepted** (refines ADR-067; `docs/20 §2.6`; keyboard cross-device
+  research). Forwarding a CapsLock/NumLock *keypress* between two machines with independent lock state
+  guarantees drift (every VNC/RDP/Sunshine tracker documents stuck-Shift / inverted-Caps). Instead a
+  new closed `InputAction::SetLockState { caps_lock, num_lock }` carries the **desired state**; the
+  host **slaves** its OS lock keys to it — Chrome Remote Desktop's model.
+  - **Closed action, gated on `keyboard.key`** (Inv 6/15): it changes what the keyboard produces, so
+    `required_cap` returns `keyboard.key` — a pointer-only lease cannot flip CapsLock (tested). Routed
+    through the same per-message `authorize_input` gate as every other action.
+  - **Idempotent, host-authoritative reconciliation:** each backend **reads the live OS lock state**
+    and taps the lock key **only on a mismatch** — never blindly toggles. Windows: `GetKeyState` low
+    bit + `SendInput` VK_CAPITAL/VK_NUMLOCK. Linux/X11: the `QueryPointer` modifier mask (Lock/Mod2) +
+    XTEST CapsLock/NumLock keycodes. macOS: `CGEventSourceFlagsState` AlphaShift + a CapsLock keycode
+    tap (no NumLock concept) — **best-effort**, as reliable programmatic CapsLock may need IOKit
+    (`IOHIDSetModifierLockState`), verified on-device.
+  - **Non-breaking rollout:** the `OsInputSink::set_lock_state` trait method has a **default no-op**, so
+    test doubles and any backend that can't sync are unaffected; the three real backends override it.
+  - **Verify:** wire/codec + gate + dispatch + all three backend overrides are green
+    (cross-compile-checked per target, roundtrip + fuzz + a capability-gating unit test). Live lock
+    reconciliation is the on-device row; the app forwarding the controller's own
+    `getModifierState('CapsLock'/'NumLock')` as `SetLockState` on change is the GUI follow-up.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

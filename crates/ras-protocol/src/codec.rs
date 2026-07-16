@@ -472,6 +472,13 @@ fn input_action_to_pb(a: InputAction) -> pb::InputAction {
         }),
         InputAction::TextInput { utf8 } => Action::TextInput(pb::TextInput { utf8 }),
         InputAction::ReleaseAllKeys => Action::ReleaseAllKeys(pb::ReleaseAllKeys {}),
+        InputAction::SetLockState {
+            caps_lock,
+            num_lock,
+        } => Action::SetLockState(pb::SetLockState {
+            caps_lock,
+            num_lock,
+        }),
     };
     pb::InputAction {
         action: Some(action),
@@ -525,6 +532,10 @@ fn input_action_from_pb(a: pb::InputAction) -> Result<InputAction, RasError> {
             Ok(InputAction::TextInput { utf8: t.utf8 })
         }
         Some(Action::ReleaseAllKeys(_)) => Ok(InputAction::ReleaseAllKeys),
+        Some(Action::SetLockState(s)) => Ok(InputAction::SetLockState {
+            caps_lock: s.caps_lock,
+            num_lock: s.num_lock,
+        }),
         None => Err(RasError::fatal(
             ErrorCode::InvalidMessage,
             "input action unset",
@@ -1123,6 +1134,10 @@ mod tests {
                 utf8: "héllo, 世界".to_string(),
             },
             InputAction::ReleaseAllKeys,
+            InputAction::SetLockState {
+                caps_lock: true,
+                num_lock: false,
+            },
         ];
         for (i, action) in actions.into_iter().enumerate() {
             let m = ControlMsg::Input(InputEnvelope {
@@ -1674,6 +1689,12 @@ mod proptests {
             // ASCII, well within MAX_TEXT_INPUT bytes.
             "[a-zA-Z0-9 ]{0,100}".prop_map(|utf8| InputAction::TextInput { utf8 }),
             Just(InputAction::ReleaseAllKeys),
+            (any::<bool>(), any::<bool>()).prop_map(|(caps_lock, num_lock)| {
+                InputAction::SetLockState {
+                    caps_lock,
+                    num_lock,
+                }
+            }),
         ]
     }
 

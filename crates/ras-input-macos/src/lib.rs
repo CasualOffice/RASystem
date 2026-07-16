@@ -39,6 +39,9 @@ mod macos {
     extern "C" {
         fn CGPreflightPostEventAccess() -> bool;
         fn CGRequestPostEventAccess() -> bool;
+        // Current modifier/lock flags of an event-source state (HIDSystemState = 1). Returns a
+        // CGEventFlags bitset; bit `kCGEventFlagMaskAlphaShift` (0x00010000) is CapsLock.
+        fn CGEventSourceFlagsState(state_id: i32) -> u64;
     }
 
     /// Display bounds in global points, for normalized→pixel mapping.
@@ -280,6 +283,23 @@ mod macos {
                     if let Ok(event) = CGEvent::new_mouse_event(src, event_type, point, cg_button) {
                         event.post(CGEventTapLocation::HID);
                     }
+                }
+            }
+            Ok(())
+        }
+
+        fn set_lock_state(&self, caps_lock: bool, num_lock: bool) -> Result<(), InputError> {
+            let _ = num_lock; // macOS has no NumLock concept.
+                              // SAFETY: a pure query of the HID system's current event flags.
+            let cur_caps = unsafe { CGEventSourceFlagsState(1) } & 0x0001_0000 != 0;
+            if cur_caps != caps_lock {
+                // Toggle CapsLock (virtual keycode 0x39). Best-effort: reliable programmatic CapsLock
+                // on macOS may need IOKit (`IOHIDSetModifierLockState`) — verified on-device.
+                if let Ok(ev) = CGEvent::new_keyboard_event(source()?, 0x39, true) {
+                    ev.post(CGEventTapLocation::HID);
+                }
+                if let Ok(ev) = CGEvent::new_keyboard_event(source()?, 0x39, false) {
+                    ev.post(CGEventTapLocation::HID);
                 }
             }
             Ok(())
