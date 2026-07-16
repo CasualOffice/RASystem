@@ -54,8 +54,13 @@ ras-media-openh264 = { path = "../../crates/ras-media-openh264" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Phase-3 OS-input backend for Linux (ADR-070): XTEST over pure-Rust x11rb. Feeds the viewer's input
-# to the X server on X11/Xwayland sessions. The Windows SendInput backend is still later.
+# to the X server on X11/Xwayland sessions.
 ras-input-linux = { path = "../../crates/ras-input-linux" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Phase-3 OS-input backend for Windows (ADR-071): SendInput over windows-rs. In-session, no UIAccess
+# (Inv 14). CI-compile-gated until Windows hardware/runner is available.
+ras-input-windows = { path = "../../crates/ras-input-windows" }
 
 [lints.clippy]
 unwrap_used = "warn"

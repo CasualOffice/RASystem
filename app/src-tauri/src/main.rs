@@ -798,6 +798,9 @@ async fn serve_one(
     // and is fail-closed when no X server is reachable (`input_permitted()` false ⇒ lease refused).
     #[cfg(target_os = "linux")]
     let input_sink = Arc::new(ras_input_linux::X11InputSink::new());
+    // Windows: SendInput over windows-rs (ADR-071). In-session, no UIAccess (Inv 14).
+    #[cfg(target_os = "windows")]
+    let input_sink = Arc::new(ras_input_windows::SendInputSink::new());
 
     let (capture, encoder) = make_backends();
     let transport = Arc::new(IrohSessionTransport::new(endpoint.clone(), session));
@@ -817,7 +820,7 @@ async fn serve_one(
     .with_control_consent(consent.clone());
     // On macOS/Linux, feed the OS-input backend so a granted lease can actually inject (elsewhere, no
     // backend ⇒ control requests are refused fail-closed).
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let host = host.with_input_sink(input_sink.clone());
 
     // `start()` runs the handshake, then blocks in the consent gate until Allow/Deny. Deny → Err.
@@ -865,7 +868,7 @@ async fn serve_one(
                     }
                     // Feed the same bounds to the input backend so normalized input maps to the right
                     // pixels on the shared display (display id 0 in the single-display MVP).
-                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
                     input_sink.set_display_bounds(
                         0,
                         f64::from(x),

@@ -113,14 +113,22 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   per-event flag), tracked-key best-effort `release_all` (Inv 4), and the same normalized→pixel
   geometry seam. Empty off-Linux; **cross-compile-checked + clippy-clean for `x86_64-unknown-linux-gnu`
   from the macOS dev machine** and unit-tested (HID table, coord clamp, non-finite guard); its x11rb
-  tree passes `cargo-deny` (Inv 18). **Still pending:** the **on-device** GUI run of the real CGEvent
-  injection + PostEvent-TCC prompt + Secure-Input drop (same constraint as every prior macOS backend)
-  and the analogous **Linux on-device** XTEST run (a real X11/Xwayland session); app wiring of the
-  Linux sink into Share's `make_backends`; a macOS **global-hotkey** emergency stop (baseline stop is
-  the always-visible Stop button, which already drives `revoke_all` + `release_all`; no kernel SAS on
-  macOS — SAS stays the Windows path); the Linux **`uinput`/libei** follow-up backends (docs/19 §3);
-  and the **Windows** input backend (parallel port of `ras-input-macos`, `windows-rs SendInput`, no
-  UIAccess — docs/19 §4).
+  tree passes `cargo-deny` (Inv 18). A **Windows input backend has also landed** (`ras-input-windows`,
+  **ADR-071**): a third `OsInputSink` over **`SendInput`** via `windows-rs`, in-session with **no
+  UIAccess** (Inv 14 — cannot drive elevated windows/secure desktop, by design and now OS-enforced by
+  Microsoft's Jan-2026 credential-UI hardening), absolute virtual-desktop coords, held-modifier
+  reconciliation, `KEYEVENTF_UNICODE` text, tracked-key best-effort `release_all`. `unsafe` confined to
+  this FFI crate; **cross-compile-checked + clippy-clean for `x86_64-pc-windows-msvc` from the macOS dev
+  machine**, unit-tested (HID→VK table, abs-axis mapping), `cargo-deny`-clean (windows-rs MIT/Apache).
+  **Both** the Linux and Windows sinks are **wired into the app's Share role** (`with_input_sink` +
+  `set_display_bounds` under the matching `cfg`), so all three platforms inject once built. **Still
+  pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
+  Secure-Input drop (macOS); the analogous **Linux on-device** XTEST run (a real X11/Xwayland session);
+  the **Windows on-device** `SendInput` run (**needs Windows hardware the team lacks** — stays
+  CI-compile-gated on `windows-latest`); a macOS **global-hotkey** emergency stop (baseline stop is the
+  always-visible Stop button, which already drives `revoke_all` + `release_all`; no kernel SAS on macOS
+  — SAS stays the Windows path); and the Linux **`uinput`/libei** + Windows **Session-0 service/agent
+  split (S4)** follow-ups (docs/19 §3/§4).
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

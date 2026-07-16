@@ -1,0 +1,37 @@
+[package]
+name = "ras-input-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Windows OS-input backend (ADR-071, implements ADR-054). Implements the `ras-control::OsInputSink`
+# trait over `SendInput` via the Microsoft `windows` (windows-rs) bindings. Deliberately runs
+# in-session with NO UIAccess: it cannot drive elevated windows or the secure desktop (UAC/lock/login)
+# — by design (Inv 14), also enforced by the OS since the Jan-2026 credential-UI hardening. The
+# Session-0 service / session-agent split (S4) is a later, separate hardening step.
+
+[dependencies]
+ras-control = { path = "../ras-control" }
+ras-protocol = { path = "../ras-protocol" }
+
+# SendInput bindings are Windows-only: on other targets this crate compiles to an empty lib so
+# `cargo build --workspace` stays green on macOS/Linux CI. windows-rs is MIT OR Apache-2.0 (Inv 18).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# FFI backend crate: unsafe confined here, wrapped in the safe `OsInputSink` surface (CONTRIBUTING §5).
+# Re-declares the workspace lint set with `unsafe_code` relaxed (as `ras-input-macos` does).
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

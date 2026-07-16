@@ -455,6 +455,38 @@
     unit-tested; the live XTest injection is an **on-device step on the developer's Linux machine**
     (an X11/Xwayland session), the Linux analogue of the macOS on-device row (`docs/19 §7`).
 
+- **ADR-071 · Windows OS-input backend is a new `ras-input-windows` crate over `SendInput`
+  (`windows-rs`), in-session, no UIAccess · Accepted** (implements ADR-054's Windows-production intent;
+  mirrors ADR-068/070; grounded in `docs/19 §4`). A third backend fills the same
+  `ras-control::OsInputSink` seam behind the host-authoritative gate (ADR-069); empty on non-Windows so
+  macOS/Linux CI stays green.
+  - **`SendInput` via `windows-rs` (MIT OR Apache-2.0).** Injection is `SendInput` with `INPUT`/
+    `MOUSEINPUT`/`KEYBDINPUT`. `windows-rs` is FFI, so — like `ras-input-macos` (and unlike
+    `ras-input-linux`) — this crate **relaxes `unsafe_code` to `allow`** (CONTRIBUTING §5), confined
+    behind the safe `OsInputSink` surface. Pointer moves are **absolute** over the virtual desktop
+    (`MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`, `0..=65535` normalized to the virtual-screen
+    metrics from `GetSystemMetrics`); the host maps normalized→pixels→absolute **after** authorization
+    (Inv 6), reusing the `set_display_bounds` capture-geometry seam.
+  - **In-session, deliberately no UIAccess (Inv 14).** The backend runs in the interactive user session
+    and does **not** carry a `uiAccess="true"` manifest, so it **cannot** drive elevated windows or the
+    secure desktop (UAC/lock/login) — by design, never bypassed. Emergency stop stays the always-visible
+    Stop button (+ kernel SAS, which no user-mode injector can synthesize). This is now also enforced by
+    the platform: Microsoft's **Jan-2026 credential-UI hardening** blocks remote input into
+    credential/secure-desktop surfaces regardless (`docs/19 §1.2/§4`) — the invariant is aligned with
+    the OS direction, and the limit is **documented to users** (`docs/11`).
+  - **No TCC-style preflight.** Windows has no per-app input-permission prompt, so `input_permitted()`
+    returns `true` (session-level injection is available); injection into higher-integrity windows fails
+    silently at the OS (UIPI) and is out of scope. Keyboard = closed USB-HID → Windows virtual-key
+    table (Inv 6, never a keysym) with held-modifier reconciliation (no per-event modifier flag);
+    `TextInput` **is** implementable here via `KEYEVENTF_UNICODE` (UTF-16 units) — cleaner than X11 —
+    but still gated by the `keyboard.text` capability (withheld by `phase3_default_policy`). Tracked
+    keys/buttons/modifiers give an exact best-effort `release_all` (Inv 4).
+  - **Build/verify:** cross-compile-*checks* for `x86_64-pc-windows-msvc` from the macOS dev machine
+    (windows-rs is pure-Rust bindings; `check` needs no MSVC linker); the live `SendInput` run is an
+    **on-device step requiring Windows hardware the team does not yet have** — so Windows stays
+    **CI-compile-gated** (`windows-latest`) until a device/runner exists (`docs/19 §4`). The `uinput`/
+    libei Linux follow-ups and a Windows Session-0 service/agent split (S4) remain separate, additive.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
