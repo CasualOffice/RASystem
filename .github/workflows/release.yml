@@ -6,9 +6,14 @@ name: release
 # draft release you can inspect before publishing.
 #
 # One app, both roles (ADR-062): **Connect** (view another machine) works on every desktop OS today
-# because it is decode-only; **Share** (let someone view this machine) is macOS-only for now, since
-# only the macOS capture backend exists. So the same app ships on macOS (.dmg), Linux (.AppImage +
-# .deb) and Windows (.exe/NSIS) — on Linux/Windows the Share button reports "not available yet".
+# because it is decode-only; **Share** now also works on Linux/Windows via the scap capture backend
+# (ADR-063), not just macOS. The same app ships on macOS (.dmg), Linux (.AppImage + .deb) and
+# Windows (.exe/NSIS).
+#
+# The Linux job pins **ubuntu-22.04**, not `ubuntu-latest`. glibc is backward- but not
+# forward-compatible, so the build base is the compatibility floor: `ubuntu-latest` (24.04, glibc
+# 2.39) produced artifacts that would not start on Ubuntu 22.04 (glibc 2.35). Pin to the oldest
+# distro we support. If this label is changed, update the `Linux system deps` step's `if:` to match.
 #
 # Builds are **unsigned** in the alpha: macOS shows a Gatekeeper warning (right-click → Open), and
 # Windows SmartScreen may warn. EV code-signing with HSM-held keys comes with the release-hardening
@@ -34,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        os: [macos-latest, ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +51,7 @@ jobs:
 
       # WebView + bundling system deps for Tauri v2 on Linux (webkit2gtk 4.1).
       - name: Linux system deps
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -83,10 +88,19 @@ jobs:
             - **Connect** to another machine and view its screen (with a remote pointer to point at
               things). Works on macOS, Linux, and Windows.
             - **Share** this machine's screen — it asks you for Allow/Deny before any pixels leave.
-              macOS-only in this alpha (Linux/Windows sharing is on the way); the Connect side of the
-              same app still works everywhere.
+              Works on macOS, Linux and Windows. Linux/Windows sharing is **experimental**: it is
+              built and compile-checked in CI but has not yet been verified on real hardware.
 
-            View-only (no remote click/keyboard). Peer-to-peer over Iroh/QUIC — no server involved.
+            **Remote control** is available only when the machine being shared is a **macOS** host,
+            and requires a *second*, separate Allow/Deny from that machine's local user before any
+            click or keystroke is injected. Sharing from Linux/Windows is view-only for now — no
+            input backend exists on those platforms yet. While remote control is live, the shared
+            machine shows an always-visible "REMOTE CONTROL ACTIVE" indicator and a Stop button that
+            cuts input immediately.
+
+            Peer-to-peer over Iroh/QUIC — no server involved.
+
+            Linux builds target **Ubuntu 22.04 and newer** (glibc 2.35+).
 
             Builds are **unsigned** — on macOS, right-click → Open to bypass Gatekeeper the first time;
             on Windows, "More info → Run anyway" past SmartScreen.
