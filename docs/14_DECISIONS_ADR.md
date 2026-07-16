@@ -651,15 +651,21 @@
     dependency-free `SyntheticAudioCapture` (tone source) + `SyntheticAudioEncoder` (PCM→bytes
     passthrough) exercise the seam in CI. **No new C dependency** yet (libopus lands with the real
     backend, behind its own license note).
-  - **Deferred (follow-up):** the real Opus encoder/decoder (`opus`/libopus, BSD-3 — Inv 18 OK; add via
-    an ADR when it lands), OS output-audio capture (macOS ScreenCaptureKit audio / CoreAudio tap,
+  - **Host pump + gate — NOW LANDED.** `HostSession::with_audio(capture, encoder, sink)` injects the
+    pipeline behind an `AudioSink` egress seam; after authorization the host starts an audio pump thread
+    (mirroring the video media thread) **iff the grant carries `audio.listen`** — the Inv-15 host-side
+    audio gate. The pump captures→encodes→`send_audio`, re-checks the stop flag between encode and send
+    (Inv 4), and is joined on teardown. Loopback-tested with the synthetic backends: **streams when
+    `audio.listen` is granted; silent when withheld** even with backends wired. The real Opus codec is
+    already available (`ras-audio-opus`, ADR-080).
+  - **Deferred (OS/on-device):** OS output-audio capture (macOS ScreenCaptureKit audio / CoreAudio tap,
     Windows WASAPI loopback, Linux PipeWire), the audio transport plane (its own QUIC stream or
-    datagrams, A/V-sync'd by `captured_at_us`), `AudioConfig` wire negotiation, `ras-core` pump +
-    `audio.listen` gate + the "AUDIO SHARED" indicator, and the JS `AudioDecoder`→`AudioContext`
+    datagrams, A/V-sync'd by `captured_at_us`) + the `AudioSink`/source wiring into `SessionTransport`,
+    `AudioConfig` wire negotiation, the "AUDIO SHARED" indicator, and JS `AudioDecoder`→`AudioContext`
     playback.
-  - **Verify:** the audio types + `frame_samples` math and the synthetic capture→encode round-trip
-    (monotonic `seq`, gap-free, correct sample counts, stop-yields-none) are green; the `audio.listen`
-    recognized-but-withheld/default-OFF test is green. Real capture/encode/playback is the on-device row.
+  - **Verify:** the audio types + `frame_samples` math, the synthetic capture→encode round-trip, the
+    `audio.listen` recognized-but-withheld/default-OFF test, **and the two host-pump loopback tests
+    (granted → streams, withheld → silent)** are green. Real capture→network→play is the on-device row.
 
 - **ADR-078 · Signed auto-update via Tauri's Ed25519 updater — the free integrity layer, distinct from
   paid OS code-signing · Accepted** (complements ADR-072; `docs/20 §2.4`). An unsigned update channel

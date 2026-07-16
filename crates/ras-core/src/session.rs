@@ -32,10 +32,11 @@ use crate::{
 };
 use ras_control::{ClipboardSink, LeaseManager, OsInputSink, LEASE_DEFAULT_TTL_MS};
 use ras_media::{
-    CaptureOptions, ColorSpace, MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec,
-    VideoEncoderBackend, VideoTransportKind, WindowId,
+    AudioCaptureBackend, AudioCodec, AudioConfig, AudioEncoderBackend, CaptureOptions, ColorSpace,
+    MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec, VideoEncoderBackend,
+    VideoTransportKind, WindowId,
 };
-use ras_policy::{clipboard_push_allowed, CapabilitySet, ClipboardDirection};
+use ras_policy::{clipboard_push_allowed, CapabilitySet, ClipboardDirection, AUDIO_LISTEN};
 use ras_protocol::{
     ControlMsg, DecoderFeedback, ErrorCode, InputEnvelope, KeyframeReason, StreamConfigWire,
 };
@@ -237,6 +238,19 @@ struct HostInner<C, E> {
     /// Phase-3 OS-clipboard write seam (ADR-076). `None` ⇒ this host cannot set its clipboard, so an
     /// inbound clipboard push is refused fail-closed. Injected via [`HostSession::with_clipboard_sink`].
     clipboard_sink: Mutex<Option<Arc<dyn ClipboardSink>>>,
+    /// Audio pipeline (ADR-077): output-audio capture + encoder + egress sink. `None` ⇒ no audio.
+    /// The pump only starts if this is wired **and** the grant carries `audio.listen` (Inv 15).
+    /// Injected via [`HostSession::with_audio`].
+    audio: Mutex<Option<AudioBackends>>,
+    /// The audio pump thread handle (mirrors `media`); joined on teardown.
+    audio_task: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+/// The host's audio capture + encoder + egress sink, moved into the audio pump thread when it starts.
+struct AudioBackends {
+    capture: Box<dyn AudioCaptureBackend>,
+    encoder: Box<dyn AudioEncoderBackend>,
+    sink: Arc<dyn crate::deps::AudioSink>,
 }
 
 /// Host-side view-only session. Owns capture+encode+transmit on their own thread.
@@ -284,6 +298,8 @@ where
                 peer_endpoint: Mutex::new([0u8; 32]),
                 granted_caps: Mutex::new(CapabilitySet::new()),
                 clipboard_sink: Mutex::new(None),
+                audio: Mutex::new(None),
+                audio_task: Mutex::new(None),
             }),
         }
     }
@@ -310,6 +326,28 @@ where
             .clipboard_sink
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+        self
+    }
+
+    /// Inject the audio pipeline (ADR-077): output-audio `capture` + `encoder` + egress `sink`. The
+    /// pump only runs if the session grant carries `audio.listen` (Inv 15) — otherwise no audio is
+    /// captured or sent. Additive; call before [`Self::start`].
+    #[must_use]
+    pub fn with_audio(
+        self,
+        capture: Box<dyn AudioCaptureBackend>,
+        encoder: Box<dyn AudioEncoderBackend>,
+        sink: Arc<dyn crate::deps::AudioSink>,
+    ) -> Self {
+        *self
+            .inner
+            .audio
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(AudioBackends {
+            capture,
+            encoder,
+            sink,
+        });
         self
     }
 
@@ -509,6 +547,12 @@ where
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
 
+        // Audio pump (ADR-077): host→controller output audio, gated on `audio.listen` (Inv 15 — the
+        // host streams sound only if the grant permits it). Starts only if audio backends are wired
+        // AND the capability is granted; otherwise the session is silent. Runs on its own thread,
+        // stopped by the shared `stop` flag and joined on teardown.
+        maybe_start_audio(inner);
+
         // Control reader: turns inbound KeyframeRequest into a forced IDR; Bye stops the session.
         // The `bye` channel lets a local teardown (graceful or emergency) flush a final Bye out the
         // control channel this loop owns.
@@ -595,6 +639,7 @@ where
         {
             let _ = h.join();
         }
+        join_audio(inner);
     }
 
     /// Emergency stop / mid-session revoke (Invariant 4). Overrides everything — grant, lease,
@@ -663,6 +708,7 @@ where
         {
             let _ = h.join();
         }
+        join_audio(inner);
     }
 }
 
@@ -727,6 +773,121 @@ fn media_pump<C, E>(
         std::thread::sleep(sig.frame_interval);
     }
     capture.stop();
+}
+
+/// Default requested audio config: Opus, 48 kHz stereo, 20 ms frames (ADR-077). The capture backend
+/// may negotiate its own; the encoder is configured with whatever `start` returns.
+fn default_audio_config() -> AudioConfig {
+    AudioConfig {
+        codec: AudioCodec::Opus,
+        sample_rate_hz: 48_000,
+        channels: 2,
+        frame_duration_us: 20_000,
+        target_bitrate_bps: 96_000,
+    }
+}
+
+/// Start the audio pump iff the grant carries `audio.listen` (Inv 15) and audio backends are wired.
+/// Consumes the injected backends (moves them into the thread). Silent otherwise — no capture, no
+/// stream. The thread stops on the shared `stop` flag and is joined on teardown.
+fn maybe_start_audio<C, E>(inner: &HostInner<C, E>) {
+    let allowed = inner
+        .granted_caps
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(AUDIO_LISTEN);
+    if !allowed {
+        return;
+    }
+    let backends = inner
+        .audio
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let Some(AudioBackends {
+        mut capture,
+        mut encoder,
+        sink,
+    }) = backends
+    else {
+        return;
+    };
+    let stop = inner.stop.clone();
+    let requested = default_audio_config();
+    let handle = std::thread::Builder::new()
+        .name("ras-host-audio".into())
+        .spawn(move || {
+            audio_pump(
+                capture.as_mut(),
+                encoder.as_mut(),
+                sink.as_ref(),
+                &stop,
+                &requested,
+            );
+        });
+    if let Ok(h) = handle {
+        *inner
+            .audio_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(h);
+    }
+}
+
+/// The audio capture→encode→egress loop (mirrors [`media_pump`], simpler: no ABR/keyframes). Starts
+/// capture, configures the encoder to the negotiated config, then pumps until `stop`. Re-checks `stop`
+/// between encode and send so a teardown never lets one last packet escape (Invariant 4, audio path).
+fn audio_pump(
+    capture: &mut dyn AudioCaptureBackend,
+    encoder: &mut dyn AudioEncoderBackend,
+    sink: &dyn crate::deps::AudioSink,
+    stop: &AtomicBool,
+    requested: &AudioConfig,
+) {
+    let config = match capture.start(requested) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if encoder.configure(&config).is_err() {
+        capture.stop();
+        return;
+    }
+    // Poll cadence: long enough to check `stop` regularly, short enough to keep latency low on silence.
+    let timeout = Duration::from_millis(100);
+    while !stop.load(Ordering::Relaxed) {
+        match capture.next_chunk(timeout) {
+            Ok(Some(chunk)) => match encoder.encode(chunk) {
+                Ok(Some(pkt)) => {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    sink.send_audio(pkt);
+                }
+                Ok(None) => {}
+                Err(e) if e.recoverable => {}
+                Err(_) => break,
+            },
+            Ok(None) => {}
+            Err(e) if e.recoverable => {
+                if capture.start(requested).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    capture.stop();
+}
+
+/// Join the audio pump thread if one is running (teardown; mirrors the `media` join). Idempotent.
+fn join_audio<C, E>(inner: &HostInner<C, E>) {
+    if let Some(h) = inner
+        .audio_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        let _ = h.join();
+    }
 }
 
 /// The stats/ABR tick. Runs off the frame path: sample health → ABR → publish bitrate + optional

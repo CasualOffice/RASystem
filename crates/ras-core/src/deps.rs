@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 
 use crate::CoreError;
-use ras_media::{EncodedFrame, StreamConfig};
+use ras_media::{EncodedAudio, EncodedFrame, StreamConfig};
 use ras_policy::CapabilitySet;
 use ras_protocol::{ControlMsg, ErrorCode};
 use ras_transport_iroh::{ConnHealth, SendOutcome, VideoEvent};
@@ -61,6 +61,14 @@ pub trait VideoSinkDyn: Send + Sync {
 pub trait VideoSourceDyn: Send + Sync {
     /// Await the next video event (frame or loss). `Err` on a terminal transport failure.
     async fn next(&mut self) -> Result<VideoEvent, CoreError>;
+}
+
+/// Droppable audio egress (host role, ADR-077). **Sync + non-blocking** like [`VideoSinkDyn`]:
+/// enqueue and return, never await delivery. Only fed after the host has confirmed the session grant
+/// carries `audio.listen` (Inv 15) — the transport authenticates identity, not the right to be heard.
+pub trait AudioSink: Send + Sync {
+    /// Hand one encoded audio packet to the transport. Ordinary loss (a shed packet) is not an error.
+    fn send_audio(&self, packet: EncodedAudio);
 }
 
 /// Where frames go on the controller. Implemented by the Tauri layer (pushes to the WebCodecs

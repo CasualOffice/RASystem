@@ -39,7 +39,7 @@ pub use abr::LatencyFirstAbr;
 #[cfg(feature = "insecure-no-auth")]
 pub use deps::AllowAllValidator;
 pub use deps::{
-    ControlChannelDyn, ControlConsent, FrameSink, GrantDecision, GrantSessionValidator,
+    AudioSink, ControlChannelDyn, ControlConsent, FrameSink, GrantDecision, GrantSessionValidator,
     GrantValidator, PushResult, SessionAuthContext, SessionTransport, VideoSinkDyn, VideoSourceDyn,
 };
 pub use event::{
@@ -458,10 +458,12 @@ mod e2e {
     use crate::deps::AllowAllValidator;
     use crate::testkit::{loopback_pair, loopback_pair_with_faults, CountingFrameSink};
     use crate::{
-        ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig, LifecycleEvent,
-        LifecycleStream, SessionState, StopReason,
+        AudioSink, ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig,
+        LifecycleEvent, LifecycleStream, SessionState, StopReason,
     };
-    use ras_media::synthetic::{SyntheticCaptureBackend, SyntheticEncoder};
+    use ras_media::synthetic::{
+        SyntheticAudioCapture, SyntheticAudioEncoder, SyntheticCaptureBackend, SyntheticEncoder,
+    };
     use ras_media::MonitorId;
     use ras_protocol::KeyframeReason;
     use ras_transport_iroh::{DropReason, EndpointAddr, EndpointId, VideoEvent};
@@ -954,6 +956,90 @@ mod e2e {
         assert!(
             clip.seen().is_empty(),
             "an un-granted clipboard push must never reach the OS sink (Inv 15)"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
+    // ── Audio pump (ADR-077) ────────────────────────────────────────────────────────────────────
+    struct RecordingAudio {
+        count: std::sync::atomic::AtomicU64,
+    }
+    impl AudioSink for RecordingAudio {
+        fn send_audio(&self, _packet: ras_media::EncodedAudio) {
+            self.count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn audio_host(
+        caps_set: &[&str],
+    ) -> (
+        Arc<RecordingAudio>,
+        HostSession<SyntheticCaptureBackend, SyntheticEncoder>,
+        ControllerSession,
+    ) {
+        let rec = Arc::new(RecordingAudio {
+            count: std::sync::atomic::AtomicU64::new(0),
+        });
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(caps_set))),
+        )
+        .with_audio(
+            Box::new(SyntheticAudioCapture::new()),
+            Box::new(SyntheticAudioEncoder::new()),
+            rec.clone(),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        (rec, host, controller)
+    }
+
+    /// With `audio.listen` granted, the host audio pump captures→encodes→sends to the egress sink.
+    #[tokio::test]
+    async fn audio_streams_when_audio_listen_is_granted() {
+        let (rec, host, controller) = audio_host(&["screen.view", ras_policy::AUDIO_LISTEN]);
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        assert!(
+            wait_until(
+                || rec.count.load(std::sync::atomic::Ordering::Relaxed) > 0,
+                500
+            )
+            .await,
+            "audio packets should reach the egress sink when audio.listen is granted"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
+    /// Without `audio.listen`, the pump never starts (Inv 15) — the session is silent even though the
+    /// audio backends are wired.
+    #[tokio::test]
+    async fn audio_is_silent_when_audio_listen_is_withheld() {
+        let (rec, host, controller) = audio_host(&["screen.view"]); // no audio.listen
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+
+        // Give the pump ample time to (not) run.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            rec.count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "no audio may be captured/sent without the audio.listen capability (Inv 15)"
         );
 
         controller.disconnect(StopReason::UserRequested).await;
