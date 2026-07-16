@@ -1496,6 +1496,67 @@ mod proptests {
         })
     }
 
+    /// A capability identifier bounded well within `MAX_CAPABILITY_LEN` (ASCII, dotted).
+    fn arb_cap() -> impl Strategy<Value = String> {
+        "[a-z.]{0,32}"
+    }
+
+    /// A capability list bounded within `MAX_CAPABILITIES`.
+    fn arb_caps() -> impl Strategy<Value = Vec<String>> {
+        proptest::collection::vec(arb_cap(), 0..8)
+    }
+
+    fn arb_button() -> impl Strategy<Value = crate::PointerButton> {
+        prop_oneof![
+            Just(crate::PointerButton::Left),
+            Just(crate::PointerButton::Right),
+            Just(crate::PointerButton::Middle),
+        ]
+    }
+
+    fn arb_input_action() -> impl Strategy<Value = crate::InputAction> {
+        use crate::InputAction;
+        prop_oneof![
+            (any::<u32>(), any::<u16>(), any::<u16>(), any::<u32>()).prop_map(
+                |(display_id, nx, ny, layout_version)| InputAction::PointerMove {
+                    display_id,
+                    nx,
+                    ny,
+                    layout_version
+                }
+            ),
+            (
+                any::<u32>(),
+                any::<u16>(),
+                any::<u16>(),
+                any::<u32>(),
+                arb_button(),
+                any::<bool>()
+            )
+                .prop_map(|(display_id, nx, ny, layout_version, button, down)| {
+                    InputAction::PointerButton {
+                        display_id,
+                        nx,
+                        ny,
+                        layout_version,
+                        button,
+                        down,
+                    }
+                }),
+            (any::<i16>(), any::<i16>()).prop_map(|(dx, dy)| InputAction::PointerWheel { dx, dy }),
+            (any::<u16>(), any::<bool>(), any::<u8>()).prop_map(|(hid_usage, down, modifiers)| {
+                InputAction::KeyEvent {
+                    hid_usage,
+                    down,
+                    modifiers,
+                }
+            }),
+            // ASCII, well within MAX_TEXT_INPUT bytes.
+            "[a-zA-Z0-9 ]{0,100}".prop_map(|utf8| InputAction::TextInput { utf8 }),
+            Just(InputAction::ReleaseAllKeys),
+        ]
+    }
+
     fn arb_control_msg() -> impl Strategy<Value = ControlMsg> {
         prop_oneof![
             any::<u32>().prop_map(|protocol_version| ControlMsg::Hello { protocol_version }),
@@ -1542,6 +1603,38 @@ mod proptests {
                 payload: Bytes::from(b)
             }),
             arb_code().prop_map(|code| ControlMsg::Bye { code }),
+            arb_caps().prop_map(|capabilities| ControlMsg::ControlRequest { capabilities }),
+            (
+                any::<[u8; 16]>(),
+                any::<u32>(),
+                arb_caps(),
+                any::<u64>(),
+                proptest::collection::vec(any::<u8>(), 0..96)
+            )
+                .prop_map(|(lease_id, generation, capabilities, expires_at, sig)| {
+                    ControlMsg::ControlGranted {
+                        lease_id,
+                        generation,
+                        capabilities,
+                        expires_at,
+                        signature: Bytes::from(sig),
+                    }
+                }),
+            arb_code().prop_map(|code| ControlMsg::ControlRevoked { code }),
+            (
+                any::<[u8; 16]>(),
+                any::<u32>(),
+                any::<u64>(),
+                arb_input_action()
+            )
+                .prop_map(|(lease_id, generation, seq, action)| ControlMsg::Input(
+                    crate::InputEnvelope {
+                        lease_id,
+                        generation,
+                        seq,
+                        action,
+                    }
+                )),
         ]
     }
 
