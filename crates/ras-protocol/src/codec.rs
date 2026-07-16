@@ -506,7 +506,7 @@ fn input_action_to_pb(a: InputAction) -> pb::InputAction {
             down,
             modifiers: u32::from(modifiers),
         }),
-        InputAction::TextInput { utf8 } => Action::TextInput(pb::TextInput { utf8 }),
+        InputAction::TextInput { utf8 } => Action::TextInput(pb::TextInput { utf8: utf8.0 }),
         InputAction::ReleaseAllKeys => Action::ReleaseAllKeys(pb::ReleaseAllKeys {}),
         InputAction::SetLockState {
             caps_lock,
@@ -565,7 +565,19 @@ fn input_action_from_pb(a: pb::InputAction) -> Result<InputAction, RasError> {
                     "text input too long",
                 ));
             }
-            Ok(InputAction::TextInput { utf8: t.utf8 })
+            // Anti-smuggling (Inv 6 spirit): reject control characters — C0/C1 + DEL (`char::is_control`)
+            // — so a `keyboard.text` payload can't carry a terminal escape (ESC[…), a NUL, or newline/tab
+            // navigation. Composed printable text (CJK, emoji incl. ZWJ/variation selectors, accents) is
+            // all non-control and passes; navigation is the positional `keyboard.key` HID path, not text.
+            if t.utf8.chars().any(char::is_control) {
+                return Err(RasError::fatal(
+                    ErrorCode::InvalidMessage,
+                    "text input contains control characters",
+                ));
+            }
+            Ok(InputAction::TextInput {
+                utf8: Redacted(t.utf8),
+            })
         }
         Some(Action::ReleaseAllKeys(_)) => Ok(InputAction::ReleaseAllKeys),
         Some(Action::SetLockState(s)) => Ok(InputAction::SetLockState {
@@ -1246,7 +1258,7 @@ mod tests {
                 modifiers: 0b0000_0010,
             },
             InputAction::TextInput {
-                utf8: "héllo, 世界".to_string(),
+                utf8: Redacted("héllo, 世界 👋".to_string()),
             },
             InputAction::ReleaseAllKeys,
             InputAction::SetLockState {
@@ -1367,6 +1379,67 @@ mod tests {
             control_from_pb(too_many).unwrap_err().code,
             ErrorCode::InvalidMessage
         );
+    }
+
+    #[test]
+    fn text_input_rejects_control_characters() {
+        // A terminal-escape / NUL / newline in a keyboard.text payload is refused (anti-smuggling).
+        for bad in [
+            "\x1b[2J",
+            "before\x00after",
+            "line1\nline2",
+            "tab\there",
+            "\x7f",
+        ] {
+            let m = pb::ControlMsg {
+                kind: Some(pb::control_msg::Kind::Input(pb::InputEnvelope {
+                    lease_id: Bytes::copy_from_slice(&[0u8; 16]),
+                    generation: 0,
+                    seq: 0,
+                    action: Some(pb::InputAction {
+                        action: Some(pb::input_action::Action::TextInput(pb::TextInput {
+                            utf8: bad.to_string(),
+                        })),
+                    }),
+                })),
+            };
+            assert_eq!(
+                control_from_pb(m).unwrap_err().code,
+                ErrorCode::InvalidMessage,
+                "control chars in {bad:?} must be rejected"
+            );
+        }
+        // Composed printable Unicode (CJK + emoji incl. ZWJ) is *not* control — it must pass.
+        let ok = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::Input(pb::InputEnvelope {
+                lease_id: Bytes::copy_from_slice(&[0u8; 16]),
+                generation: 0,
+                seq: 0,
+                action: Some(pb::InputAction {
+                    action: Some(pb::input_action::Action::TextInput(pb::TextInput {
+                        utf8: "你好 👨‍👩‍👧 café".to_string(),
+                    })),
+                }),
+            })),
+        };
+        assert!(control_from_pb(ok).is_ok());
+    }
+
+    #[test]
+    fn text_input_is_redacted_in_debug() {
+        // Inv 8: typed text is a secret (passwords/PII) — it must never appear in a Debug rendering.
+        let secret = "correct-horse-battery-staple";
+        let env = InputEnvelope {
+            lease_id: [0u8; 16],
+            generation: 0,
+            seq: 0,
+            action: InputAction::TextInput {
+                utf8: Redacted(secret.to_string()),
+            },
+        };
+        let rendered = format!("{env:?}");
+        assert!(!rendered.contains(secret), "typed text leaked into Debug");
+        assert!(rendered.contains("redacted"));
     }
 
     #[test]
@@ -1801,8 +1874,10 @@ mod proptests {
                     modifiers,
                 }
             }),
-            // ASCII, well within MAX_TEXT_INPUT bytes.
-            "[a-zA-Z0-9 ]{0,100}".prop_map(|utf8| InputAction::TextInput { utf8 }),
+            // ASCII (no control chars), well within MAX_TEXT_INPUT bytes → always round-trips.
+            "[a-zA-Z0-9 ]{0,100}".prop_map(|utf8| InputAction::TextInput {
+                utf8: Redacted(utf8),
+            }),
             Just(InputAction::ReleaseAllKeys),
             (any::<bool>(), any::<bool>()).prop_map(|(caps_lock, num_lock)| {
                 InputAction::SetLockState {

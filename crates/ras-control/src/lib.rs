@@ -428,7 +428,8 @@ pub fn dispatch(sink: &dyn OsInputSink, action: &InputAction) -> Result<(), Inpu
             down,
             modifiers,
         } => sink.key(*hid_usage, *down, *modifiers),
-        InputAction::TextInput { utf8 } => sink.text(utf8),
+        // `reveal()` at the OS-injection boundary is the one sanctioned use — typing, never logging.
+        InputAction::TextInput { utf8 } => sink.text(utf8.reveal()),
         InputAction::ReleaseAllKeys => sink.release_all(),
         InputAction::SetLockState {
             caps_lock,
@@ -668,6 +669,58 @@ mod tests {
         );
         // …but a pointer move (granted) is fine.
         assert!(m.authorize_input(&move_env(&lease, g, 2), 1002).is_ok());
+    }
+
+    #[test]
+    fn keyboard_text_requires_its_own_capability() {
+        // `keyboard.text` is a broader "type-anything-into-focus" authority than physical keys, so it
+        // has its own lease bit (ADR-082-adjacent, §2.6): a lease that grants `keyboard.key` but NOT
+        // `keyboard.text` must still deny a `TextInput` (Inv 15, per-message, host-side).
+        let text = |lease: &ControlLease, gen, seq| InputEnvelope {
+            lease_id: lease.lease_id.0,
+            generation: gen,
+            seq,
+            action: InputAction::TextInput {
+                utf8: ras_protocol::Redacted("你好".into()),
+            },
+        };
+
+        let phys_only = caps(&[
+            ras_policy::CONTROL_REQUEST,
+            ras_policy::POINTER_MOVE,
+            ras_policy::KEYBOARD_KEY,
+        ]);
+        let mut m = LeaseManager::new(phys_only.clone(), 10_000_000, 1);
+        let lease = m
+            .issue(
+                [1u8; 32],
+                &phys_only,
+                &phys_only,
+                1000,
+                LEASE_DEFAULT_TTL_MS,
+            )
+            .unwrap();
+        let g = m.generation();
+        assert_eq!(
+            m.authorize_input(&text(&lease, g, 1), 1001).unwrap_err(),
+            ControlError::CapabilityDenied,
+            "a physical-key lease must not be able to inject arbitrary Unicode text"
+        );
+
+        // With `keyboard.text` in the lease, the same TextInput is authorized.
+        let with_text = caps(&[ras_policy::CONTROL_REQUEST, ras_policy::KEYBOARD_TEXT]);
+        let mut m2 = LeaseManager::new(with_text.clone(), 10_000_000, 1);
+        let lease2 = m2
+            .issue(
+                [1u8; 32],
+                &with_text,
+                &with_text,
+                1000,
+                LEASE_DEFAULT_TTL_MS,
+            )
+            .unwrap();
+        let g2 = m2.generation();
+        assert!(m2.authorize_input(&text(&lease2, g2, 1), 1001).is_ok());
     }
 
     #[test]

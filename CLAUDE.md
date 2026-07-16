@@ -129,7 +129,15 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   reads live OS lock state and taps **only on mismatch** (idempotent): Windows `GetKeyState`+`SendInput`,
   Linux `QueryPointer` mask + XTEST, macOS `CGEventSourceFlagsState` + CapsLock keycode (no NumLock,
   best-effort). `OsInputSink::set_lock_state` has a default no-op (non-breaking); wire+gate+dispatch+all
-  three overrides are cross-compile-checked green. The **cursor-shape channel** landed
+  three overrides are cross-compile-checked green. **`keyboard.text` (Unicode/IME) hardened (ADR-083):**
+  the withheld capability is now **safe to grant** without changing its deny-by-default posture —
+  `InputAction::TextInput.utf8` is a `Redacted` (was plain `String`) so typed plaintext (passwords/PII)
+  can't leak through a `Debug`/log at any layer (`.reveal()` only at the OS-injection boundary); the
+  decoder **rejects control characters** (`char::is_control` — C0/C1+DEL, so no terminal-escape/NUL/
+  newline smuggling; composed CJK/emoji/ZWJ/accents pass); it requires its **own lease bit** (a
+  `keyboard.key`-only lease denies `TextInput` at the per-message gate — tested, Inv 15) and stays out
+  of the default grantable policy. Length bounded `MAX_TEXT_INPUT=256`. Deferred: a rate bound (needs a
+  clock in the pure gate) + app IME wiring. The **cursor-shape channel** landed
   (ADR-073: `CursorShape`/`CursorCached`/`CursorHidden` `ControlMsg` variants, fail-closed codec bounded
   at `MAX_CURSOR_DIM=256` + exact `w*h*4` RGBA + hot-spot-inside) — **now with the `ras-core` plumbing
   too**: a host-side `CursorObserver` seam (`with_cursor_observer`) → a host cursor task that **dedups

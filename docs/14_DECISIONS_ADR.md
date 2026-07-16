@@ -844,6 +844,38 @@
     with content intact, each side receiving only the other peer's text. All green. UI is the on-device
     row.
 
+- **ADR-083 · Harden `keyboard.text` (Unicode/IME): `Redacted` end-to-end + control-character rejection;
+  stays deny-by-default with its own lease bit · Accepted** (`docs/20 §2.6`; keyboard cross-device
+  research). The positional HID path (`KeyEvent`, ADR-067) can't compose CJK/emoji/accents (IME lives
+  *above* the keycode layer — no HID usage "is" 你), so the withheld `keyboard.text` capability +
+  `InputAction::TextInput` already existed; this makes it **safe** to grant without changing its
+  deny-by-default posture. This is the CRD-`TextEvent` / RustDesk-Translate analogue done with the
+  invariants enforced at the type layer.
+  - **Its own lease bit (Inv 15).** `TextInput` requires the **separate** `keyboard.text` capability —
+    a broader "type-anything-into-focus" authority than physical keys (effectively scripting if focus is
+    a terminal). A lease that grants `keyboard.key` but **not** `keyboard.text` **denies** a `TextInput`
+    at the per-message gate (tested). It stays **out of the default grantable policy** — a deployment
+    must explicitly widen policy to offer it.
+  - **`Redacted` end-to-end (Inv 8).** `InputAction::TextInput.utf8` is now a [`Redacted`] (was a plain
+    `String`) — the field is literal plaintext (passwords/PII typed into focus). Its `Debug` prints only
+    a byte count, so it can't leak through a log/trace/crash line at **any** layer (wire type, envelope,
+    gate); `.reveal()` is called **only** at the OS-injection boundary (`OsInputSink::text`), never to
+    log. Audit records a content-free "text injected" event, never the text.
+  - **Control-character rejection (anti-smuggling).** The decoder refuses any payload containing a
+    control character (`char::is_control` — C0/C1 + DEL), so `keyboard.text` can't carry a terminal
+    escape (`ESC[…`), NUL, or newline/tab navigation. Composed printable Unicode — CJK, emoji (incl. ZWJ
+    sequences + variation selectors, which are format chars, not control chars), accents — all passes;
+    navigation/shortcuts remain the positional `keyboard.key` path. Length stays bounded by
+    `MAX_TEXT_INPUT = 256` (refused, never truncated).
+  - **Deferred:** a **rate** bound (chars/sec) as defense-in-depth — it needs a clock in the otherwise
+    pure per-message gate, so it is a separate hardening; the per-message length cap bounds burst size
+    today. App wiring (a controller that emits composed IME text as `TextInput`) is the on-device row —
+    and the mobile controller (§3.6), where soft-keyboard Unicode is unavoidable, depends on this.
+  - **Verify:** codec roundtrip (CJK + emoji) / control-char-rejected (ESC/NUL/newline/tab/DEL) /
+    printable-passes / redacted-in-`Debug` / oversize-refused / fuzz (ras-protocol), and the per-message
+    **own-lease-bit** gate test (`keyboard.key` lease denies `TextInput`; `keyboard.text` lease allows
+    it) in `ras-control`. All green.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

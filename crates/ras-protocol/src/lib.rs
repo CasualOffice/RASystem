@@ -274,7 +274,8 @@ pub enum ControlMsg {
 
 /// A UTF-8 secret whose `Debug` prints only its byte length, never its content — so it physically
 /// cannot leak through a `#[derive(Debug)]` log line, `tracing` field, or crash dump (Invariant 8).
-/// Used for clipboard text today; `InputAction::TextInput` should adopt it too (follow-up).
+/// Used for clipboard text, chat text ([`ControlMsg::ChatMessage`]), and typed Unicode
+/// ([`InputAction::TextInput`]) — every content-bearing wire field.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Redacted(pub String);
 
@@ -385,10 +386,13 @@ pub enum InputAction {
         modifiers: u8,
     },
     /// Layout-independent Unicode text entry (the separate `keyboard.text` capability). Never used for
-    /// shortcuts. Bounded by [`MAX_TEXT_INPUT`]; content-bearing, never logged (Invariant 8).
+    /// shortcuts. Bounded by [`MAX_TEXT_INPUT`]; **control characters are rejected at decode** (no
+    /// terminal-escape / NUL smuggling). Content-bearing plaintext (passwords/PII), so the payload is a
+    /// [`Redacted`] — its `Debug` prints only a byte count, so a typed secret can never leak through a
+    /// log/trace/crash line (Invariant 8); `.reveal()` only at the OS-injection boundary, never to log.
     TextInput {
-        /// The UTF-8 text to type.
-        utf8: String,
+        /// The UTF-8 text to type. Redacted in `Debug`; bounded by [`MAX_TEXT_INPUT`]; no control chars.
+        utf8: Redacted,
     },
     /// Release every key/button the host currently holds down — key-state cleanup on
     /// transfer/disconnect/stop. Always permitted (it only *clears* state).
