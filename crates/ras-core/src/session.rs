@@ -19,8 +19,9 @@ use tokio::sync::mpsc;
 
 use crate::abr::LatencyFirstAbr;
 use crate::deps::{
-    AudioOutput, ControlChannelDyn, ControlConsent, DenyAllControl, DialTarget, FrameSink,
-    GrantValidator, SessionAuthContext, SessionTransport,
+    AudioOutput, ControlChannelDyn, ControlConsent, CursorFrame, CursorObserver, CursorShape,
+    CursorSink, DenyAllControl, DialTarget, FrameSink, GrantValidator, SessionAuthContext,
+    SessionTransport,
 };
 use crate::event::{
     LifecycleEvent, LifecycleSink, LifecycleStream, QualitySample, SessionId, StopReason,
@@ -244,6 +245,12 @@ struct HostInner<C, E> {
     audio: Mutex<Option<AudioBackends>>,
     /// The audio pump thread handle (mirrors `media`); joined on teardown.
     audio_task: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Cursor-shape observer (ADR-073): watches the host OS cursor. `None` ⇒ the cursor channel is
+    /// silent (the controller keeps its own generic pointer). Injected via
+    /// [`HostSession::with_cursor_observer`]. Display data, never input (outside Inv 6).
+    cursor: Mutex<Option<Box<dyn CursorObserver>>>,
+    /// The cursor task handle (a tokio task); aborted on teardown.
+    cursor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// The host's audio capture + encoder, moved into the audio pump thread when it starts. The egress
@@ -300,6 +307,8 @@ where
                 clipboard_sink: Mutex::new(None),
                 audio: Mutex::new(None),
                 audio_task: Mutex::new(None),
+                cursor: Mutex::new(None),
+                cursor_task: Mutex::new(None),
             }),
         }
     }
@@ -344,6 +353,20 @@ where
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(AudioBackends { capture, encoder });
+        self
+    }
+
+    /// Inject the cursor-shape observer (ADR-073): the host's OS cursor is streamed to the controller
+    /// so it draws the real shape client-side at zero latency. Without one, the cursor channel stays
+    /// silent (the controller keeps its generic pointer). Display data, never input. Additive; call
+    /// before [`Self::start`].
+    #[must_use]
+    pub fn with_cursor_observer(self, observer: Box<dyn CursorObserver>) -> Self {
+        *self
+            .inner
+            .cursor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
         self
     }
 
@@ -566,9 +589,17 @@ where
             .bye_tx
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bye_tx);
+
+        // Cursor-shape channel (ADR-073): if an observer is wired, spawn a task that watches the OS
+        // cursor and pushes ready-to-send `ControlMsg`s (fresh shape or a cache reference) into this
+        // bounded channel; the control loop owns the wire and forwards them. Silent (no task) if no
+        // observer. Bounded + drop-oldest at the source: the cursor is advisory display data and must
+        // never backpressure control. `None` receiver when no observer, so the loop's branch is inert.
+        let cursor_rx = maybe_start_cursor(inner);
+
         let ctrl_inner = inner.clone();
         let task = tokio::spawn(async move {
-            host_control_loop(&mut control, &ctrl_inner, bye_rx).await;
+            host_control_loop(&mut control, &ctrl_inner, bye_rx, cursor_rx).await;
         });
         *inner
             .control_task
@@ -645,6 +676,7 @@ where
             let _ = h.join();
         }
         join_audio(inner);
+        abort_cursor(inner);
     }
 
     /// Emergency stop / mid-session revoke (Invariant 4). Overrides everything — grant, lease,
@@ -714,6 +746,7 @@ where
             let _ = h.join();
         }
         join_audio(inner);
+        abort_cursor(inner);
     }
 }
 
@@ -886,6 +919,20 @@ fn join_audio<C, E>(inner: &HostInner<C, E>) {
     }
 }
 
+/// Abort the cursor task if one is running (teardown, ADR-073). Idempotent. Aborting is fine — the
+/// cursor channel is advisory display data with no cleanup obligation (unlike input, which must
+/// release held keys); the control loop that consumed it has already been torn down.
+fn abort_cursor<C, E>(inner: &HostInner<C, E>) {
+    if let Some(h) = inner
+        .cursor_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        h.abort();
+    }
+}
+
 /// The stats/ABR tick. Runs off the frame path: sample health → ABR → publish bitrate + optional
 /// forced keyframe → emit `ConnectionQuality`. Exits on the stop flag.
 async fn host_stats_loop<C, E>(inner: &HostInner<C, E>, config: StreamConfig) {
@@ -932,10 +979,148 @@ async fn host_stats_loop<C, E>(inner: &HostInner<C, E>, config: StreamConfig) {
     }
 }
 
+/// Bounded depth of the host cursor→control channel. A little slack absorbs bursts of shape changes;
+/// under sustained pressure the newest update is dropped (cursor is advisory display data).
+const CURSOR_QUEUE_DEPTH: usize = 4;
+/// Cap on distinct cursor ids the host remembers as "already sent" (so it can send `CursorCached`).
+/// Real sessions cycle through a handful of shapes; this bounds memory against a pathological observer.
+const CURSOR_CACHE_CAP: usize = 128;
+
+/// The host's send-side record of which shape ids it has already transmitted in full (so a repeat can
+/// go as a `CursorCached` reference). Insertion-ordered with a hard cap; the oldest id is evicted when
+/// full (a later reoccurrence just re-sends the full shape — correct, only costs bandwidth).
+struct CursorCache {
+    seen: std::collections::HashSet<u32>,
+    order: std::collections::VecDeque<u32>,
+}
+
+impl CursorCache {
+    fn new() -> Self {
+        Self {
+            seen: std::collections::HashSet::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+    fn contains(&self, id: u32) -> bool {
+        self.seen.contains(&id)
+    }
+    fn insert(&mut self, id: u32) {
+        if self.seen.insert(id) {
+            self.order.push_back(id);
+            if self.order.len() > CURSOR_CACHE_CAP {
+                if let Some(old) = self.order.pop_front() {
+                    self.seen.remove(&old);
+                }
+            }
+        }
+    }
+}
+
+/// Validate a cursor shape against the wire bounds *before* sending — the exact checks the receiver's
+/// codec enforces on decode, so a shape that would be rejected on the wire is never transmitted.
+fn cursor_shape_is_valid(s: &CursorShape) -> bool {
+    let (w, h) = (u32::from(s.width), u32::from(s.height));
+    w >= 1
+        && h >= 1
+        && w <= ras_protocol::MAX_CURSOR_DIM
+        && h <= ras_protocol::MAX_CURSOR_DIM
+        && u32::from(s.hotspot_x) < w
+        && u32::from(s.hotspot_y) < h
+        && s.rgba.len() == (w as usize) * (h as usize) * 4
+}
+
+/// Poll the optional cursor channel inside the control-loop `select!`: pends forever when there is no
+/// channel (so the branch is inert without an observer), otherwise yields the next cursor `ControlMsg`
+/// (or `None` when the source task has ended).
+async fn recv_cursor(rx: &mut Option<mpsc::Receiver<ControlMsg>>) -> Option<ControlMsg> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Start the cursor task iff an observer is wired (ADR-073). Returns the receiver the control loop
+/// polls, or `None` when there is no observer (the loop's cursor branch then stays inert).
+fn maybe_start_cursor<C, E>(inner: &HostInner<C, E>) -> Option<mpsc::Receiver<ControlMsg>> {
+    let observer = inner
+        .cursor
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()?;
+    let (tx, rx) = mpsc::channel::<ControlMsg>(CURSOR_QUEUE_DEPTH);
+    let stop = inner.stop.clone();
+    let handle = tokio::spawn(async move {
+        cursor_pump(observer, tx, stop).await;
+    });
+    *inner
+        .cursor_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    Some(rx)
+}
+
+/// The cursor watch→dedup→enqueue loop (ADR-073). Reads the observer, maps each change to a wire
+/// message — a fresh [`ControlMsg::CursorShape`] the first time an id is seen, else a
+/// [`ControlMsg::CursorCached`] reference — validating bounds fail-closed, and enqueues it for the
+/// control loop. An id is recorded as "sent" **only after** a successful enqueue, so a dropped fresh
+/// shape is re-sent (never referenced as cached before the controller has it). Exits on `stop`, on the
+/// observer ending, or when the control loop drops the receiver.
+async fn cursor_pump(
+    mut observer: Box<dyn CursorObserver>,
+    tx: mpsc::Sender<ControlMsg>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut cache = CursorCache::new();
+    while !stop.load(Ordering::Relaxed) {
+        let Some(frame) = observer.next().await else {
+            break;
+        };
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match frame {
+            CursorFrame::Hidden => {
+                if tx.try_send(ControlMsg::CursorHidden).is_err() && tx.is_closed() {
+                    break;
+                }
+            }
+            CursorFrame::Shape(shape) => {
+                if !cursor_shape_is_valid(&shape) {
+                    continue; // malformed — never send garbage the receiver would reject
+                }
+                let id = shape.id;
+                let known = cache.contains(id);
+                let msg = if known {
+                    ControlMsg::CursorCached { id }
+                } else {
+                    ControlMsg::CursorShape {
+                        id,
+                        hotspot_x: shape.hotspot_x,
+                        hotspot_y: shape.hotspot_y,
+                        width: shape.width,
+                        height: shape.height,
+                        rgba: shape.rgba,
+                    }
+                };
+                match tx.try_send(msg) {
+                    Ok(()) => {
+                        if !known {
+                            cache.insert(id); // recorded only once the full shape is truly enqueued
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {} // advisory — drop this update
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                }
+            }
+        }
+    }
+}
+
 async fn host_control_loop<C, E>(
     control: &mut Box<dyn ControlChannelDyn>,
     inner: &HostInner<C, E>,
     mut bye_rx: mpsc::Receiver<ErrorCode>,
+    mut cursor_rx: Option<mpsc::Receiver<ControlMsg>>,
 ) {
     loop {
         tokio::select! {
@@ -948,6 +1133,15 @@ async fn host_control_loop<C, E>(
                 }
                 break;
             }
+            // Cursor-shape update ready to send (ADR-073). Host → controller display data; forwarded
+            // over the reliable control channel this loop owns. Never blocks the session — the source
+            // task already dropped-oldest under pressure. `None` = channel closed → stop polling it.
+            cur = recv_cursor(&mut cursor_rx) => match cur {
+                Some(msg) => {
+                    if control.send(msg).await.is_err() { break; }
+                }
+                None => { cursor_rx = None; }
+            },
             msg = control.recv() => match msg {
             Ok(ControlMsg::KeyframeRequest(_)) => {
                 inner.keyframe.store(true, Ordering::Relaxed);
@@ -1301,6 +1495,9 @@ struct ControllerInner {
     /// Where inbound audio packets go (ADR-077). Attached like the renderer; absent → audio is
     /// dropped at the ingest boundary (a stalled/absent output never blocks control or video).
     audio_output: Mutex<Option<Arc<dyn AudioOutput>>>,
+    /// Where inbound host cursor-shape updates go (ADR-073). Attached like the renderer; absent →
+    /// cursor updates are dropped (the app keeps its generic pointer). Display data, never input.
+    cursor_sink: Mutex<Option<Arc<dyn CursorSink>>>,
     stream_config: Mutex<Option<StreamConfig>>,
     command_tx: Mutex<Option<mpsc::Sender<ControlCommand>>>,
     /// Highest frame id delivered to the renderer (reported back as `last_decoded_frame`).
@@ -1334,6 +1531,7 @@ impl ControllerSession {
                 lifecycle: Mutex::new(None),
                 renderer: Mutex::new(None),
                 audio_output: Mutex::new(None),
+                cursor_sink: Mutex::new(None),
                 stream_config: Mutex::new(None),
                 command_tx: Mutex::new(None),
                 last_decoded_frame: AtomicU64::new(0),
@@ -1498,6 +1696,26 @@ impl ControllerSession {
         *self
             .inner
             .audio_output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Attach/replace the cursor sink (ADR-073): where the host's OS cursor-shape updates are drawn
+    /// (the pointer overlay). Decoupled from `connect` like the renderer; absent → updates are dropped
+    /// and the app keeps its generic pointer.
+    pub fn attach_cursor_sink(&self, sink: Arc<dyn CursorSink>) {
+        *self
+            .inner
+            .cursor_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+    }
+
+    /// Detach the cursor sink; cursor updates are then dropped at the boundary.
+    pub fn detach_cursor_sink(&self) {
+        *self
+            .inner
+            .cursor_sink
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
@@ -1703,6 +1921,39 @@ async fn controller_control_loop(
                         .lease
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                }
+                // Host cursor-shape updates (ADR-073): forward to the attached cursor sink (the pointer
+                // overlay). Display data, not input. The `id`-cached form reuses a previously-drawn
+                // shape; an absent sink simply drops the update.
+                Ok(ControlMsg::CursorShape { id, hotspot_x, hotspot_y, width, height, rgba }) => {
+                    if let Some(sink) = inner
+                        .cursor_sink
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.set_shape(CursorShape { id, hotspot_x, hotspot_y, width, height, rgba });
+                    }
+                }
+                Ok(ControlMsg::CursorCached { id }) => {
+                    if let Some(sink) = inner
+                        .cursor_sink
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.set_cached(id);
+                    }
+                }
+                Ok(ControlMsg::CursorHidden) => {
+                    if let Some(sink) = inner
+                        .cursor_sink
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.hide();
+                    }
                 }
                 Ok(_) => {}
                 Err(_) => {

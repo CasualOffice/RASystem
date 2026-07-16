@@ -530,12 +530,28 @@
     `width*height*4`** (no truncation/over-read into a renderer), rejects zero dimensions, and rejects
     a hot-spot outside the image. Covered by by-example negatives + the `decode_never_panics` fuzz +
     the `roundtrip_is_identity` property generator.
-  - **Scope:** this ADR lands the **wire + fail-closed codec only** (verifiable off-device). Cursor
-    *position* is deliberately **not** in this message — in control mode the controller composites at
-    its own pointer; a position-sync message is a later addition for the view-only case. Host cursor
-    **capture** (per-OS: `NSCursor`/`CGImage`, `XFixesGetCursorImage`, `GetCursorInfo`+`DrawIconEx`)
-    and controller **render** (draw the cached RGBA on the WebCodecs canvas) are the on-device/GUI
-    follow-up, plus a `cursor_embedded` fallback for backends that can't exclude the HW cursor.
+  - **Scope:** this ADR landed the **wire + fail-closed codec** first; the **`ras-core` plumbing +
+    DI seams now land too** (verifiable off-device). Cursor *position* is deliberately **not** in this
+    message — in control mode the controller composites at its own pointer; a position-sync message is a
+    later addition for the view-only case.
+  - **`ras-core` plumbing (NOW LANDED).** Two object-safe seams mirror the video path: a host-side
+    `CursorObserver` (`async fn next() -> Option<CursorFrame>` where `CursorFrame` is `Shape(CursorShape)`
+    | `Hidden`) injected by `HostSession::with_cursor_observer`, and a controller-side `CursorSink`
+    (`set_shape`/`set_cached`/`hide`) attached by `ControllerSession::attach_cursor_sink`. Cursor pixels
+    are **display data** routed through their own sink — deliberately **not** the (content-free) lifecycle
+    events, and `CursorShape`'s `Debug` elides the RGBA so a bitmap never lands in a log. A host **cursor
+    task** watches the observer, **dedups host-side** (an id seen before → `CursorCached`; else a fresh
+    `CursorShape`, recorded **only after** a successful enqueue so a dropped shape is re-sent, never
+    referenced before the controller holds it), **re-validates the same bounds the receiver's codec
+    enforces** (skip-don't-send a malformed shape), and forwards over the reliable control channel the
+    host loop owns via a bounded drop-newest queue (cursor is advisory — it never backpressures control).
+    The send-side "seen" set is capped (128 ids, oldest-evicted). Aborted on teardown (advisory data, no
+    cleanup obligation — unlike input's key-release). Loopback-tested: a repeated id arrives as
+    `CursorCached`, not a re-sent shape.
+  - **Deferred (on-device/GUI):** host cursor **capture** (per-OS: `NSCursor`/`CGImage`,
+    `XFixesGetCursorImage`, `GetCursorInfo`+`DrawIconEx`) behind the `CursorObserver` seam, controller
+    **render** (a `CursorSink` that draws the cached RGBA on the pointer overlay/WebCodecs canvas), and a
+    `cursor_embedded` fallback for backends that can't exclude the HW cursor.
 
 - **ADR-074 · Lock-key state is synced authoritatively via `InputAction::SetLockState`, not by
   forwarding lock-key edges · Accepted** (refines ADR-067; `docs/20 §2.6`; keyboard cross-device

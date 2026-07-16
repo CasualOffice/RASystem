@@ -121,6 +121,74 @@ pub enum PushResult {
     Dropped,
 }
 
+// ── Cursor-shape channel (ADR-073): host OS-cursor → controller overlay ───────────────────────────
+//
+// The host's OS cursor **shape** (arrow, I-beam, resize, hidden…) is sent out-of-band so the controller
+// draws it client-side at zero latency instead of relying on the laggy video. This is **display data**
+// (a small RGBA bitmap), routed like video frames — through a dedicated sink, **not** the (content-free)
+// lifecycle events — and it is never input (outside Inv 6).
+
+/// A host OS-cursor shape to draw on the controller (ADR-073). Top-down RGBA, `width*height*4` bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CursorShape {
+    /// Shape cache key — identical shapes share an id so a repeat can be sent as a cache reference.
+    pub id: u32,
+    /// Hot-spot x within the image (`< width`).
+    pub hotspot_x: u16,
+    /// Hot-spot y within the image (`< height`).
+    pub hotspot_y: u16,
+    /// Image width in pixels (`1..=`[`ras_protocol::MAX_CURSOR_DIM`]).
+    pub width: u16,
+    /// Image height in pixels (`1..=`[`ras_protocol::MAX_CURSOR_DIM`]).
+    pub height: u16,
+    /// Top-down RGBA pixels, exactly `width * height * 4` bytes.
+    pub rgba: bytes::Bytes,
+}
+
+impl core::fmt::Debug for CursorShape {
+    // Elide the pixels — keep cursor bitmaps out of logs (tidy, and consistent with the content-free
+    // event discipline), printing only the shape's dimensions/identity.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CursorShape")
+            .field("id", &self.id)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("rgba_len", &self.rgba.len())
+            .finish()
+    }
+}
+
+/// A host cursor change reported by a [`CursorObserver`]. The observer always reports the **full** shape;
+/// the host's send side decides whether to transmit it fresh or as a cache reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CursorFrame {
+    /// The cursor now shows this shape.
+    Shape(CursorShape),
+    /// The OS cursor is currently hidden — draw nothing.
+    Hidden,
+}
+
+/// Host-side OS-cursor watcher (ADR-073). Implemented by the OS backend (reads the live system cursor)
+/// and a synthetic double in tests. Owned by the host cursor task. `Send` (moved into the task), not
+/// `Sync`.
+#[async_trait]
+pub trait CursorObserver: Send {
+    /// Await the next cursor change. `None` when the observer ends (capture stopped / backend gone).
+    async fn next(&mut self) -> Option<CursorFrame>;
+}
+
+/// Where the host's cursor updates go on the controller (ADR-073). Implemented by the app (draws the
+/// shape on the pointer overlay) and a recorder in tests. **Sync + non-blocking** like [`FrameSink`]: a
+/// slow sink drops internally, never backpressures the control channel.
+pub trait CursorSink: Send + Sync {
+    /// A fresh cursor shape — draw it and cache it by `shape.id`.
+    fn set_shape(&self, shape: CursorShape);
+    /// Reuse a previously-sent shape by `id` (the host sent no RGBA to save bandwidth).
+    fn set_cached(&self, id: u32);
+    /// The OS cursor is hidden — draw nothing.
+    fn hide(&self);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Phase-2 auth seam (no-op in Phase 1). Object-safe (`async_trait`) so it is injectable as
 // `Arc<dyn GrantValidator>`. See design §5.5.

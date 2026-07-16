@@ -39,9 +39,9 @@ pub use abr::LatencyFirstAbr;
 #[cfg(feature = "insecure-no-auth")]
 pub use deps::AllowAllValidator;
 pub use deps::{
-    AudioOutput, AudioSink, AudioSourceDyn, ControlChannelDyn, ControlConsent, FrameSink,
-    GrantDecision, GrantSessionValidator, GrantValidator, PushResult, SessionAuthContext,
-    SessionTransport, VideoSinkDyn, VideoSourceDyn,
+    AudioOutput, AudioSink, AudioSourceDyn, ControlChannelDyn, ControlConsent, CursorFrame,
+    CursorObserver, CursorShape, CursorSink, FrameSink, GrantDecision, GrantSessionValidator,
+    GrantValidator, PushResult, SessionAuthContext, SessionTransport, VideoSinkDyn, VideoSourceDyn,
 };
 pub use event::{
     LifecycleEvent, LifecycleStream, QualitySample, SessionId, StopReason, StreamDescriptor,
@@ -1044,6 +1044,116 @@ mod e2e {
             rec.count.load(std::sync::atomic::Ordering::Relaxed),
             0,
             "no audio may be captured/sent without the audio.listen capability (Inv 15)"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
+    // ── Cursor-shape channel, host→controller (ADR-073) ──────────────────────────────────────────
+    /// A cursor observer that replays a fixed script, yielding to the runtime between updates so the
+    /// control loop drains each one (deterministic ordering without sleeps).
+    struct ScriptedCursor {
+        frames: std::collections::VecDeque<crate::CursorFrame>,
+    }
+    #[async_trait::async_trait]
+    impl crate::CursorObserver for ScriptedCursor {
+        async fn next(&mut self) -> Option<crate::CursorFrame> {
+            tokio::task::yield_now().await;
+            self.frames.pop_front()
+        }
+    }
+
+    /// A cursor sink that records the update sequence it receives (as compact strings, so the
+    /// fresh-vs-cached distinction is asserted).
+    #[derive(Default)]
+    struct RecordingCursor {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+    impl crate::CursorSink for RecordingCursor {
+        fn set_shape(&self, shape: crate::CursorShape) {
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(format!("shape:{}", shape.id));
+        }
+        fn set_cached(&self, id: u32) {
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(format!("cached:{id}"));
+        }
+        fn hide(&self) {
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push("hidden".into());
+        }
+    }
+
+    fn cursor_shape_frame(id: u32) -> crate::CursorFrame {
+        crate::CursorFrame::Shape(crate::CursorShape {
+            id,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 2,
+            height: 2,
+            rgba: bytes::Bytes::from_static(&[0u8; 16]), // 2*2*4
+        })
+    }
+
+    /// The host cursor observer streams shapes to the controller's cursor sink, and a **repeated** id
+    /// is sent as a cache reference (`CursorCached`), not re-transmitted — the host-side dedup (ADR-073).
+    #[tokio::test]
+    async fn cursor_shapes_stream_to_the_controller_with_dedup() {
+        let script = std::collections::VecDeque::from(vec![
+            cursor_shape_frame(1),
+            cursor_shape_frame(1), // repeat → CursorCached
+            cursor_shape_frame(2),
+            crate::CursorFrame::Hidden,
+        ]);
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(&["screen.view"]))),
+        )
+        .with_cursor_observer(Box::new(ScriptedCursor { frames: script }));
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let rec = Arc::new(RecordingCursor::default());
+        controller.attach_cursor_sink(rec.clone());
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+
+        assert!(
+            wait_until(
+                || rec
+                    .events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .len()
+                    >= 4,
+                500
+            )
+            .await,
+            "controller should receive all four cursor updates, got {:?}",
+            rec.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        );
+        assert_eq!(
+            *rec.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["shape:1", "cached:1", "shape:2", "hidden"],
+            "a repeated shape id must arrive as a cache reference, not a re-sent shape (ADR-073)"
         );
 
         controller.disconnect(StopReason::UserRequested).await;

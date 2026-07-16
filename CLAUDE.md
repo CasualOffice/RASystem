@@ -129,9 +129,18 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   reads live OS lock state and taps **only on mismatch** (idempotent): Windows `GetKeyState`+`SendInput`,
   Linux `QueryPointer` mask + XTEST, macOS `CGEventSourceFlagsState` + CapsLock keycode (no NumLock,
   best-effort). `OsInputSink::set_lock_state` has a default no-op (non-breaking); wire+gate+dispatch+all
-  three overrides are cross-compile-checked green. The **cursor-shape channel** wire also landed
+  three overrides are cross-compile-checked green. The **cursor-shape channel** landed
   (ADR-073: `CursorShape`/`CursorCached`/`CursorHidden` `ControlMsg` variants, fail-closed codec bounded
-  at `MAX_CURSOR_DIM=256` + exact `w*h*4` RGBA + hot-spot-inside). The **clipboard-text security spine**
+  at `MAX_CURSOR_DIM=256` + exact `w*h*4` RGBA + hot-spot-inside) — **now with the `ras-core` plumbing
+  too**: a host-side `CursorObserver` seam (`with_cursor_observer`) → a host cursor task that **dedups
+  host-side** (repeat id → `CursorCached`, else fresh `CursorShape`, id recorded only after a successful
+  enqueue so a dropped shape re-sends), re-validates the receiver's bounds, and forwards over the
+  reliable control channel via a bounded drop-newest queue (advisory — never backpressures control); and
+  a controller-side `CursorSink` seam (`attach_cursor_sink`, `set_shape`/`set_cached`/`hide`). Cursor
+  pixels are **display data** on their own sink, **not** the content-free lifecycle events (and
+  `CursorShape::Debug` elides the RGBA — Inv 8 hygiene). Loopback-tested (repeat id → cache reference).
+  OS cursor **capture** (behind the observer seam) + controller **render** are the on-device follow-up.
+  The **clipboard-text security spine**
   landed too (ADR-076): `ControlMsg::ClipboardText` with the payload in a `Redacted` newtype (Inv 8 —
   `Debug` prints only a byte count, so a copied password can't leak to a log), bounded by
   `MAX_CLIPBOARD_BYTES=768 KiB` (refused, never truncated), + the pure host-side per-direction gate
