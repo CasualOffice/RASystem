@@ -98,8 +98,19 @@ mod macos {
                     (r.origin.x, r.origin.y, r.size.width, r.size.height)
                 }
             };
-            let x = ox + f64::from(nx.clamp(0.0, 1.0)) * w;
-            let y = oy + f64::from(ny.clamp(0.0, 1.0)) * h;
+            // Defense-in-depth: a non-finite fraction (NaN passes through `f32::clamp` unchanged)
+            // maps to the display origin, never off-screen. The authorized `dispatch` path feeds only
+            // bounded `u16→f32` values, so this never triggers in production — belt-and-braces for the
+            // public `OsInputSink` surface (Inv 6).
+            let frac = |v: f32| {
+                if v.is_finite() {
+                    v.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            };
+            let x = ox + f64::from(frac(nx)) * w;
+            let y = oy + f64::from(frac(ny)) * h;
             *self.last_point.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
             CGPoint::new(x, y)
         }
@@ -234,14 +245,19 @@ mod macos {
         }
 
         fn release_all(&self) -> Result<(), InputError> {
-            // Release every key we believe is down …
+            // Best-effort key-state cleanup on the emergency-stop / teardown path (Inv 4): it must
+            // release as much as possible and **never abort early**. A transient `source()` / event
+            // failure skips that one release and continues — it never `?`-propagates out, which would
+            // otherwise leave the already-drained keys neither tracked nor released (physically stuck).
             let keys: Vec<CGKeyCode> = {
                 let mut pressed = self.pressed_keys.lock().unwrap_or_else(|e| e.into_inner());
                 pressed.drain().collect()
             };
             for keycode in keys {
-                if let Ok(event) = CGEvent::new_keyboard_event(source()?, keycode, false) {
-                    event.post(CGEventTapLocation::HID);
+                if let Ok(src) = source() {
+                    if let Ok(event) = CGEvent::new_keyboard_event(src, keycode, false) {
+                        event.post(CGEventTapLocation::HID);
+                    }
                 }
             }
             // … and every button, at the last known cursor point.
@@ -260,9 +276,10 @@ mod macos {
                     1 => (CGEventType::RightMouseUp, CGMouseButton::Right),
                     _ => (CGEventType::OtherMouseUp, CGMouseButton::Center),
                 };
-                if let Ok(event) = CGEvent::new_mouse_event(source()?, event_type, point, cg_button)
-                {
-                    event.post(CGEventTapLocation::HID);
+                if let Ok(src) = source() {
+                    if let Ok(event) = CGEvent::new_mouse_event(src, event_type, point, cg_button) {
+                        event.post(CGEventTapLocation::HID);
+                    }
                 }
             }
             Ok(())
@@ -404,6 +421,16 @@ mod macos {
             let p = sink.to_point(0, 2.0, -1.0); // out of range → clamped to [0,1]
             assert!((p.x - 100.0).abs() < 0.001);
             assert!((p.y - 0.0).abs() < 0.001);
+        }
+
+        #[test]
+        fn non_finite_coords_map_to_the_display_origin() {
+            let sink = CgEventSink::new();
+            sink.set_display_bounds(0, 50.0, 60.0, 100.0, 100.0);
+            // NaN/±∞ must never escape off-screen — they land on the display origin.
+            let p = sink.to_point(0, f32::NAN, f32::INFINITY);
+            assert!((p.x - 50.0).abs() < 0.001);
+            assert!((p.y - 60.0).abs() < 0.001);
         }
     }
 }
