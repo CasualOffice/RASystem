@@ -164,7 +164,21 @@ const ticketInput = document.getElementById("ticket");
 const connectBtn = document.getElementById("connect");
 const stopBtn = document.getElementById("stop");
 const controlBtn = document.getElementById("control");
+const macMod = document.getElementById("macmod");
+const macModCb = document.getElementById("macmod-cb");
 const banner = document.getElementById("banner");
+
+// Cmd↔Ctrl primary-modifier remap (ADR-075). Explicit, user-visible, default OFF. When on, the
+// operator's ⌘ is transmitted as Ctrl on the remote (and Ctrl as ⌘) — scoped to ONLY the primary
+// shortcut modifier so a Mac keyboard's muscle memory works against a Windows/Linux host. It is
+// purely controller-side: it rewrites which HID usage + modifier bit we send; the host is unchanged
+// and still authorizes every keystroke identically (Inv 15). Never silent — the checkbox is visible.
+let swapPrimaryMod = false;
+if (macModCb) {
+  macModCb.addEventListener("change", () => {
+    swapPrimaryMod = macModCb.checked;
+  });
+}
 
 let active = false; // a viewer session is live
 
@@ -190,6 +204,7 @@ function setLive(isLive) {
   setControlling(false);
   controlBtn.disabled = !isLive;
   controlBtn.textContent = "Take control";
+  if (macMod) macMod.hidden = !isLive;
 }
 
 async function startSession(ticket) {
@@ -378,9 +393,17 @@ window.addEventListener("pointerleave", () => {
 // content rect, exactly like the visual pointer.
 let controlling = false;
 let lastMoveAt = 0;
+// Last lock state we told the host, so we only send on a change (ADR-074). null = unknown → the next
+// key event resyncs from scratch (e.g. right after taking control).
+let lastCaps = null;
+let lastNum = null;
 
 function setControlling(on) {
   controlling = on && active;
+  if (!controlling) {
+    lastCaps = null;
+    lastNum = null;
+  }
   if (controlBtn) {
     controlBtn.textContent = controlling ? "Controlling — click to stop" : "Take control";
     controlBtn.classList.toggle("armed", controlling);
@@ -401,7 +424,28 @@ function normInput(e) {
 }
 
 function modifierBits(e) {
-  return (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+  let bits = (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+  // When the ⌘↔Ctrl swap is on, swap the Ctrl (0x02) and Cmd (0x08) flag bits so the modifier state
+  // the host applies to each keystroke matches the swapped modifier-key HID usages below.
+  if (swapPrimaryMod) {
+    const ctrl = bits & 0x02;
+    const cmd = bits & 0x08;
+    bits = (bits & ~0x0a) | (ctrl ? 0x08 : 0) | (cmd ? 0x02 : 0);
+  }
+  return bits;
+}
+
+// Swap the left/right Control (0xe0/0xe4) and GUI/⌘ (0xe3/0xe7) HID usages when the toggle is on.
+// Only the primary shortcut modifier is remapped; every other key passes through untouched.
+function remapHid(hid) {
+  if (!swapPrimaryMod) return hid;
+  switch (hid) {
+    case 0xe0: return 0xe3;
+    case 0xe3: return 0xe0;
+    case 0xe4: return 0xe7;
+    case 0xe7: return 0xe4;
+    default: return hid;
+  }
 }
 
 // JS KeyboardEvent.code → USB-HID Keyboard/Keypad usage (page 0x07). Unmapped keys are ignored.
@@ -464,10 +508,31 @@ window.addEventListener("wheel", (e) => {
 }, { passive: false });
 function forwardKey(e, down) {
   if (!controlling) return;
+  // Lock keys (Caps/Num) are synced as authoritative STATE, never forwarded as key edges (ADR-074):
+  // forwarding the raw toggle would race the state sync and cancel it. Handle before the HID lookup
+  // (NumLock has no HID mapping here on purpose, so it must be caught first).
+  if (e.code === "CapsLock" || e.code === "NumLock") {
+    e.preventDefault();
+    syncLockState(e);
+    return;
+  }
   const hid = codeToHid(e.code);
   if (hid === undefined) return;
   e.preventDefault();
-  invoke("input_key", { hidUsage: hid, down, modifiers: modifierBits(e) });
+  syncLockState(e);
+  invoke("input_key", { hidUsage: remapHid(hid), down, modifiers: modifierBits(e) });
+}
+// Push the controller's authoritative Caps/Num *state* to the host on change (ADR-074). `getModifierState`
+// is read off the same event that carries the keystroke, so lock changes land in-order with the keys
+// that caused them; the host slaves its OS lock keys to this. Value can lag by one event on the lock
+// key's own keydown (browser-dependent), but the keyup and every subsequent key resync it.
+function syncLockState(e) {
+  const caps = e.getModifierState("CapsLock");
+  const num = e.getModifierState("NumLock");
+  if (caps === lastCaps && num === lastNum) return;
+  lastCaps = caps;
+  lastNum = num;
+  invoke("input_set_lock_state", { capsLock: caps, numLock: num });
 }
 window.addEventListener("keydown", (e) => forwardKey(e, true));
 window.addEventListener("keyup", (e) => forwardKey(e, false));

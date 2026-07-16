@@ -370,6 +370,24 @@ async fn input_key(
     Ok(())
 }
 
+/// Slave the host's CapsLock/NumLock to the controller's authoritative *state* (not key edges — see
+/// ADR-074). Gated host-side on `keyboard.key`, so a pointer-only lease can't flip a lock (Inv 15).
+#[tauri::command]
+async fn input_set_lock_state(
+    state: State<'_, AppState>,
+    caps_lock: bool,
+    num_lock: bool,
+) -> Result<(), String> {
+    send_input_action(
+        &state,
+        ras_protocol::InputAction::SetLockState {
+            caps_lock,
+            num_lock,
+        },
+    );
+    Ok(())
+}
+
 // ─── Share role (agent) ──────────────────────────────────────────────────────────────────────────
 
 /// The sharer side. `session` is `Some` while a share is active; `consent` is the local Allow/Deny
@@ -936,6 +954,7 @@ fn main() {
             input_pointer_button,
             input_pointer_wheel,
             input_key,
+            input_set_lock_state,
             start_sharing,
             stop_sharing,
             respond_consent,

@@ -137,10 +137,14 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   CI-compile-gated on `windows-latest`); a macOS **global-hotkey** emergency stop (baseline stop is the
   always-visible Stop button, which already drives `revoke_all` + `release_all`; no kernel SAS on macOS
   — SAS stays the Windows path); and the Linux **`uinput`/libei** + Windows **Session-0 service/agent
-  split (S4)** follow-ups (docs/19 §3/§4). Cross-device follow-ups still open: **live on-device lock
-  reconciliation** + the app forwarding the controller's own `getModifierState` as `SetLockState` on
-  change; host cursor **capture** + controller **render** for the cursor-shape channel; and Cmd↔Ctrl
-  primary-modifier remap (docs/20 §2.6).
+  split (S4)** follow-ups (docs/19 §3/§4). **Controller keyboard app-wiring has landed (ADR-075):**
+  the Connect handler forwards the controller's own `getModifierState('CapsLock'/'NumLock')` as
+  `SetLockState` on change (state-only — raw lock-key edges are no longer forwarded, so they can't race
+  the sync), plus a **Cmd↔Ctrl primary-modifier remap** — a default-OFF, visible "⌘→Ctrl" toggle that
+  swaps the Control↔GUI HID usages + Ctrl↔Cmd modifier bits for outgoing input only (controller-side
+  policy, no wire/host change, still gated identically — Inv 15). Cross-device follow-ups still open:
+  **live on-device lock reconciliation** + the ⌘↔Ctrl on-device check (⌘C→Ctrl+C on a real non-Mac
+  host); host cursor **capture** + controller **render** for the cursor-shape channel.
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

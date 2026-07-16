@@ -557,7 +557,35 @@
   - **Verify:** wire/codec + gate + dispatch + all three backend overrides are green
     (cross-compile-checked per target, roundtrip + fuzz + a capability-gating unit test). Live lock
     reconciliation is the on-device row; the app forwarding the controller's own
-    `getModifierState('CapsLock'/'NumLock')` as `SetLockState` on change is the GUI follow-up.
+    `getModifierState('CapsLock'/'NumLock')` as `SetLockState` on change **has now landed** (ADR-074
+    app wiring — see ADR-075's sibling note).
+
+- **ADR-075 · Cmd↔Ctrl primary-modifier remap is a controller-side, explicit, user-visible policy —
+  no new wire surface, no host change · Accepted** (`docs/20 §2.6`; keyboard cross-device research).
+  ⌘/Win/Super is **one** HID usage (0x0700E3) with three OS meanings, so a Mac operator's ⌘C reaches a
+  Windows/Linux host as **Win+C** and Mac muscle memory fails. Parsec/TeamViewer both ship a "use Mac
+  shortcuts" toggle; we adopt the same shape.
+  - **Controller-side only.** A visible **default-OFF** checkbox in the Connect bar. When on, the app
+    rewrites, for outgoing input, the **left/right Control (0xe0/0xe4) ↔ GUI/⌘ (0xe3/0xe7)** HID
+    usages *and* swaps the matching **Ctrl(0x02)↔Cmd(0x08) modifier bits** so the flags the host
+    applies stay consistent with the swapped keys. **Scoped to only the primary modifier** — every
+    other key passes through untouched.
+  - **Why it's not a security change.** The host is **unchanged**: it still receives closed HID usages
+    + a modifier bitset and still authorizes every keystroke identically through `authorize_input`
+    (Inv 6/15). The remap **cannot expand authority** — a swapped ⌘ is still `keyboard.key`, subject to
+    the same lease/capability gate. It is a *presentation* choice about which of two already-permitted
+    modifier usages to transmit. Recorded as an ADR only for auditability (it's the "policy above
+    passthrough" docs/20 flagged) — **never silent**, deterministic, and reversible from the UI.
+  - **Not auto-enabled.** The swap is wrong for Mac→Mac (⌘ must stay ⌘), and the controller does not
+    yet learn the host OS, so auto-detect is unsafe today. It stays a manual toggle; auto-enable when
+    (controller is macOS ∧ host advertises non-macOS) is a future enhancement once host-OS is surfaced.
+  - **Sibling: lock-state app wiring.** The same Connect-side keyboard handler now also implements the
+    ADR-074 controller half — it reads `getModifierState('CapsLock'/'NumLock')` off each key event and
+    sends `SetLockState` on change, and it **stops forwarding the raw CapsLock/NumLock key edges**
+    (forwarding the toggle would race the state sync and cancel it). Lock keys are now *state-only*.
+  - **Verify:** app `check`/`clippy` clean; the remap + lock-sync are JS in the Connect webview, so
+    the end-to-end behavior (⌘C → Ctrl+C on a real Windows/Linux host; Caps stays in sync) is the
+    on-device/GUI row.
 
 ## Licensing
 

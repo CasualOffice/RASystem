@@ -91,6 +91,31 @@ the closed action set only (no shell/path/keysym ever crosses — Inv 6).
 
 ---
 
+## 3a. Lock-state sync (ADR-074/075 — Caps/Num stay consistent)
+
+- [ ] Set the **viewer's** CapsLock **ON** *before* taking control, host CapsLock **OFF**. Take
+      control and type a letter → it lands **uppercase** on the host (the first keystroke pushed
+      `SetLockState{caps:true}`; the host slaved its CapsLock ON). Confirms the initial-divergence fix.
+- [ ] Toggle CapsLock on the viewer mid-session → the host's CapsLock LED/state follows within a
+      keystroke, and it does **not** oscillate (raw lock-key edges are no longer forwarded).
+- [ ] (If reachable) NumLock likewise on a viewer + host that both have one.
+
+**Verifies:** the controller `getModifierState` → `SetLockState` app wiring; host-side idempotent
+reconciliation (tap only on mismatch); no raw-edge race.
+
+## 3b. Cmd↔Ctrl remap (ADR-075 — only meaningful with a non-Mac host)
+
+- [ ] From a **Mac** viewer controlling a **Windows or Linux** host, leave "⌘→Ctrl" **off** → ⌘C on
+      the host does nothing useful (lands as Win/Super+C). Confirms the problem exists.
+- [ ] Turn the **⌘→Ctrl** toggle **on** → ⌘C now performs **Ctrl+C** (copy) on the host; ⌘V pastes;
+      physical Ctrl now acts as ⌘/Super. Only the primary modifier is affected; letters/others unchanged.
+- [ ] Confirm the toggle is **visible** and **off by default** (never silent — Inv 7 spirit).
+
+**Verifies:** the controller-side HID-usage + modifier-bit swap; scope limited to the primary modifier;
+host unchanged (still authorizes identically — Inv 15).
+
+---
+
 ## 4. Secure-Input drop (the honest boundary)
 
 - [ ] On the host, focus a **password field** (login window, Keychain prompt, or a browser password
