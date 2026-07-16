@@ -507,7 +507,8 @@ integration.
 Secure-Input drop, and multi-monitor coordinate mapping need a macOS login session with the
 permission granted — the same on-device constraint as every prior media/app change. The **logic**
 (lease/generation/seq/cap gate, release-on-transfer) is fully covered by the pure `ras-control` tests
-above.
+above. The concrete, tickable steps for that run — with the invariant each one closes and the
+evidence to capture — are in **`docs/design/phase-3-on-device-verification.md`**.
 
 ---
 
