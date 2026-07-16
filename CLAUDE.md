@@ -202,8 +202,8 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     CSP set; always-visible indicators (Invariant 7). Kept **out of the root workspace** (heavy WebView
     deps); the GUI run is an on-device step (login session + Screen-Recording TCC). The `.app`/`.dmg`
     bundle was built + verified locally on macOS.
-  - **`ras-transport-iroh` — control + video + health planes are concrete, and the loopback→iroh
-    swap is wired** (iroh `=1.0.2`, ADR-059/060). Real `Endpoint` (bind/id/accept/connect +
+  - **`ras-transport-iroh` — control + video + audio + health planes are concrete, and the loopback→iroh
+    swap is wired** (iroh `=1.0.2`, ADR-059/060/077). Real `Endpoint` (bind/id/accept/connect +
     `connect_direct` for same-network dials), `Session` (`remote()` = peer's authenticated
     `EndpointId`; `close(code)` → QUIC app-close code), and `ControlChannel` running the fuzzed
     `FramedControlChannel` codec over iroh's `(RecvStream, SendStream)` — ALPN `casual-ras/1`. The
@@ -322,9 +322,17 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     path. Both transport methods **default to "unsupported"** so `IrohSessionTransport` is unchanged (the
     iroh audio sub-stream is the remaining wire follow-up); the in-memory loopback overrides both, giving
     a **true end-to-end** host→controller audio test — the controller's `AudioOutput` receives packets
-    when `audio.listen` is granted, **nothing when withheld** (Inv 15). Deferred (OS/on-device): OS
-    capture (SCK-audio / WASAPI-loopback / PipeWire), the **iroh** audio sub-stream implementing
-    `audio_sink`/`audio_source` + `AudioConfig` negotiation, "AUDIO SHARED" indicator, JS
+    when `audio.listen` is granted, **nothing when withheld** (Inv 15). The **iroh audio plane landed
+    too, over QUIC datagrams (ADR-077)**: `IrohSessionTransport` implements `audio_sink`/`audio_source`;
+    each Opus packet rides one **unreliable QUIC datagram** — deliberately separate from the per-frame
+    video uni-streams + control (no HOL blocking; a lost datagram is a PLC-covered glitch, and datagrams
+    never touch `accept_uni`), prefixed by a fail-closed 36-byte `AudioPacketHeader` (magic `RAU1` +
+    per-packet `AudioConfig` + `seq` + `captured_at_us`). **No fragmentation** — one Opus packet is one
+    datagram (≈240 B at 96 kbps/20 ms, far under the datagram MTU; an oversized packet is a
+    misconfiguration, dropped not reassembled). Verified by a real datagram round-trip over two loopback
+    iroh endpoints **and** the full ras-core spine (host pump → real iroh datagrams → controller output).
+    Deferred (OS/on-device): OS capture (SCK-audio / WASAPI-loopback / PipeWire), up-front `AudioConfig`
+    negotiation (config travels per-packet today), "AUDIO SHARED" indicator, JS
     `AudioDecoder`→`AudioContext` playback.
   - Still stubbed / deferred (`todo!()` or additive): iroh **reset-on-stale + FEC** and the
     `DatagramFec` video alternative (behind `StreamConfig::video_transport`),

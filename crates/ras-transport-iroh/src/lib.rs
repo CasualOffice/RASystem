@@ -15,7 +15,10 @@ use iroh::endpoint::{presets, Connection, RecvStream, SendStream, VarInt};
 use iroh::{
     Endpoint as IrohEndpoint, EndpointAddr as IrohEndpointAddr, EndpointId as IrohEndpointId,
 };
-use ras_media::{ColorSpace, EncodedFrame, FrameId, StreamConfig, VideoCodec, VideoTransportKind};
+use ras_media::{
+    AudioCodec, AudioConfig, ColorSpace, EncodedAudio, EncodedFrame, FrameId, StreamConfig,
+    VideoCodec, VideoTransportKind,
+};
 use ras_protocol::{BootstrapMsg, ControlMsg, ErrorCode, RasError};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -850,6 +853,194 @@ impl VideoSource {
     }
 }
 
+// ── Audio plane (ADR-077): host → controller Opus over QUIC datagrams ────────────────────────────
+//
+// Audio rides **unreliable QUIC datagrams**, not streams — deliberately. Real-time output audio wants
+// low latency and no head-of-line blocking; an Opus packet is tiny (≈240 B at 96 kbps/20 ms, far under
+// the datagram MTU) and independently decodable, so a lost datagram is a brief glitch the decoder's PLC
+// covers, never a stall. Datagrams are also a wholly separate QUIC mechanism from `accept_uni`, so the
+// audio plane never interferes with the per-frame video streams or the control stream. (The datagram
+// magic tag lets the receiver fail-closed-skip any non-audio datagram, so if the `DatagramFec` video
+// path is ever activated the two can be told apart by tag.)
+
+/// Largest audio datagram we will parse (DoS bound on hostile input). A single Opus packet + header is
+/// far smaller; QUIC already caps a datagram at the path MTU, so this is a defensive belt only.
+pub const MAX_AUDIO_PACKET: usize = 4 * 1024;
+
+/// Fixed 36-byte header prepended to each audio datagram. Carries everything needed to reconstruct an
+/// [`EncodedAudio`] except its bytes (the datagram remainder). The [`AudioConfig`] travels **per packet**
+/// (like the video per-frame header) so the plane is self-describing and a mid-stream bitrate change
+/// needs no side channel. All fields little-endian.
+///
+/// Wire: `magic:u32 | version:u8 | codec:u8 | channels:u8 | reserved:u8 | sample_rate_hz:u32 |
+/// frame_duration_us:u32 | target_bitrate_bps:u32 | seq:u64 | captured_at_us:u64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudioPacketHeader {
+    config: AudioConfig,
+    seq: u64,
+    captured_at_us: u64,
+}
+
+impl AudioPacketHeader {
+    /// `"RAU1"` big-endian ASCII tag; a mismatch means a non-audio/desync datagram (skip it).
+    const MAGIC: u32 = u32::from_be_bytes(*b"RAU1");
+    const VERSION: u8 = 1;
+    const LEN: usize = 36;
+
+    fn encode(&self) -> [u8; Self::LEN] {
+        let mut b = [0u8; Self::LEN];
+        b[0..4].copy_from_slice(&Self::MAGIC.to_le_bytes());
+        b[4] = Self::VERSION;
+        // Known variant → discriminant; an unknown future variant maps to 0xFF, which `decode`
+        // rejects — fail-closed, never silently mis-tagged.
+        b[5] = match self.config.codec {
+            AudioCodec::Opus => 0,
+            _ => 0xFF,
+        };
+        b[6] = self.config.channels;
+        // b[7] reserved (zero)
+        b[8..12].copy_from_slice(&self.config.sample_rate_hz.to_le_bytes());
+        b[12..16].copy_from_slice(&self.config.frame_duration_us.to_le_bytes());
+        b[16..20].copy_from_slice(&self.config.target_bitrate_bps.to_le_bytes());
+        b[20..28].copy_from_slice(&self.seq.to_le_bytes());
+        b[28..36].copy_from_slice(&self.captured_at_us.to_le_bytes());
+        b
+    }
+
+    /// Parse a header from the front of `buf`. `None` on any malformed field (short, bad magic,
+    /// unknown version/codec) — the caller skips that datagram. Fail-closed on an unknown codec.
+    fn decode(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::LEN {
+            return None;
+        }
+        let u32le = |o: usize| {
+            let mut a = [0u8; 4];
+            a.copy_from_slice(&buf[o..o + 4]);
+            u32::from_le_bytes(a)
+        };
+        let u64le = |o: usize| {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(&buf[o..o + 8]);
+            u64::from_le_bytes(a)
+        };
+        if u32le(0) != Self::MAGIC || buf[4] != Self::VERSION {
+            return None;
+        }
+        let codec = match buf[5] {
+            0 => AudioCodec::Opus,
+            _ => return None,
+        };
+        Some(Self {
+            config: AudioConfig {
+                codec,
+                channels: buf[6],
+                sample_rate_hz: u32le(8),
+                frame_duration_us: u32le(12),
+                target_bitrate_bps: u32le(16),
+            },
+            seq: u64le(20),
+            captured_at_us: u64le(28),
+        })
+    }
+}
+
+/// Host-side droppable audio sender (ADR-077). Non-blocking: [`send_audio`](Self::send_audio) hands the
+/// packet to a bounded channel drained by a background task that emits **one QUIC datagram per packet**.
+/// If the path can't keep up the channel fills and packets are dropped at the source — never queued
+/// unbounded (audio is droppable; a stale packet is worse than a missing one).
+pub struct AudioSink {
+    tx: mpsc::Sender<EncodedAudio>,
+}
+
+impl AudioSink {
+    /// Bounded channel depth: a little slack absorbs scheduler jitter without building audio latency.
+    const QUEUE_DEPTH: usize = 8;
+
+    /// Spawn the datagram writer task bound to `conn` and return the sender half. Must be called from
+    /// within a Tokio runtime.
+    fn spawn(conn: Connection) -> Self {
+        let (tx, mut rx) = mpsc::channel::<EncodedAudio>(Self::QUEUE_DEPTH);
+        tokio::spawn(async move {
+            while let Some(pkt) = rx.recv().await {
+                let header = AudioPacketHeader {
+                    config: pkt.config,
+                    seq: pkt.seq,
+                    captured_at_us: pkt.captured_at_us,
+                }
+                .encode();
+                let mut buf = BytesMut::with_capacity(header.len() + pkt.data.len());
+                buf.extend_from_slice(&header);
+                buf.extend_from_slice(&pkt.data);
+                // Unreliable send. A gone connection ends the task; any other error (a `TooLarge`
+                // packet — a misconfiguration, since Opus at supported bitrates/frame-durations stays
+                // far under the path MTU — or transient capacity) drops just this packet and keeps the
+                // stream alive. We do **not** fragment audio: an Opus packet is one datagram, and adding
+                // reassembly would trade the latency/simplicity the datagram choice buys us.
+                match conn.send_datagram(buf.freeze()) {
+                    Ok(()) => {}
+                    Err(e) if is_fatal_datagram_error(&e) => break,
+                    Err(_) => {}
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    /// Hand one encoded audio packet to the transport. Returns immediately; does not await delivery.
+    /// Ordinary loss (a full or closed queue) is a non-error [`SendOutcome`], not an `Err`.
+    #[allow(clippy::unnecessary_wraps)] // signature parity with the video sink
+    pub fn send_audio(&self, packet: EncodedAudio) -> Result<SendOutcome, TransportError> {
+        Ok(match self.tx.try_send(packet) {
+            Ok(()) => SendOutcome::Sent,
+            Err(mpsc::error::TrySendError::Full(_)) => SendOutcome::DroppedCongested,
+            Err(mpsc::error::TrySendError::Closed(_)) => SendOutcome::DroppedStale,
+        })
+    }
+}
+
+/// Whether a datagram send error is terminal (the connection is gone) vs. transient (drop one packet).
+/// Only a closed connection ends the writer task; capacity/size errors just drop the packet.
+fn is_fatal_datagram_error(e: &iroh::endpoint::SendDatagramError) -> bool {
+    use iroh::endpoint::SendDatagramError;
+    matches!(e, SendDatagramError::ConnectionLost(_))
+}
+
+/// Controller-side droppable audio receiver (ADR-077). Reads one datagram per packet and reconstructs
+/// the [`EncodedAudio`]. Loss (a `seq` gap) needs no recovery signal — each Opus packet is independently
+/// decodable and the decoder's PLC covers a gap — so, unlike video, a malformed/foreign datagram is
+/// simply skipped and the loop reads the next.
+pub struct AudioSource {
+    conn: Connection,
+}
+
+impl AudioSource {
+    fn new(conn: Connection) -> Self {
+        Self { conn }
+    }
+
+    /// Await the next audio packet. `Err` only on a terminal transport failure (the connection is
+    /// gone); a malformed or foreign datagram is skipped, not fatal.
+    pub async fn recv(&mut self) -> Result<EncodedAudio, TransportError> {
+        loop {
+            let dg = self.conn.read_datagram().await.map_err(|_| {
+                RasError::recoverable(ErrorCode::TransportError, "audio datagram stream ended")
+            })?;
+            if dg.len() > MAX_AUDIO_PACKET {
+                continue; // oversized — skip defensively
+            }
+            let Some(header) = AudioPacketHeader::decode(&dg) else {
+                continue; // foreign/malformed datagram — skip
+            };
+            return Ok(EncodedAudio {
+                seq: header.seq,
+                captured_at_us: header.captured_at_us,
+                data: Bytes::copy_from_slice(&dg[AudioPacketHeader::LEN..]),
+                config: header.config,
+            });
+        }
+    }
+}
+
 /// Swappable video-transport strategy. Both patterns implement this; the concrete one is chosen at
 /// session start from measured path conditions / spike results and pinned into `StreamConfig`.
 /// This trait is the seam that lets the spike change the answer without changing any caller.
@@ -953,6 +1144,24 @@ impl Session {
     pub fn video_source(&self) -> Option<VideoSource> {
         match self.role {
             Role::Controller => Some(VideoSource::new(self.conn.clone())),
+            Role::Host => None,
+        }
+    }
+
+    /// Host-side audio sink (present on the host role only; audio flows host → controller, ADR-077).
+    /// Spawns the datagram writer task bound to this connection. `None` on the controller side.
+    #[must_use]
+    pub fn audio_sink(&self) -> Option<AudioSink> {
+        match self.role {
+            Role::Host => Some(AudioSink::spawn(self.conn.clone())),
+            Role::Controller => None,
+        }
+    }
+    /// Controller-side audio source (present on the controller role only). `None` on the host side.
+    #[must_use]
+    pub fn audio_source(&self) -> Option<AudioSource> {
+        match self.role {
+            Role::Controller => Some(AudioSource::new(self.conn.clone())),
             Role::Host => None,
         }
     }
@@ -1249,7 +1458,10 @@ mod video_header_tests {
 mod iroh_session_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use ras_media::{ColorSpace, EncodedFrame, StreamConfig, VideoCodec, VideoTransportKind};
+    use ras_media::{
+        AudioCodec, AudioConfig, ColorSpace, EncodedAudio, EncodedFrame, StreamConfig, VideoCodec,
+        VideoTransportKind,
+    };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     /// A freshly-bound endpoint reports its sockets as the *unspecified* address (`0.0.0.0` /
@@ -1525,6 +1737,98 @@ mod iroh_session_tests {
             "loopback loss should be low, got {}",
             health.loss_fraction
         );
+
+        drop(sink);
+        host_ep.close().await;
+        controller.close().await;
+    }
+
+    fn test_audio(seq: u64, payload: &[u8]) -> EncodedAudio {
+        EncodedAudio {
+            seq,
+            captured_at_us: seq.wrapping_mul(20_000),
+            data: Bytes::copy_from_slice(payload),
+            config: AudioConfig {
+                codec: AudioCodec::Opus,
+                sample_rate_hz: 48_000,
+                channels: 2,
+                frame_duration_us: 20_000,
+                target_bitrate_bps: 96_000,
+            },
+        }
+    }
+
+    /// The `AudioPacketHeader` round-trips and rejects a foreign/short datagram fail-closed. Pure — no
+    /// connection needed.
+    #[test]
+    fn audio_header_round_trips_and_rejects_foreign() {
+        let h = AudioPacketHeader {
+            config: test_audio(0, b"").config,
+            seq: 42,
+            captured_at_us: 840_000,
+        };
+        let encoded = h.encode();
+        assert_eq!(AudioPacketHeader::decode(&encoded), Some(h));
+        // Too short and wrong-magic datagrams decode to None (skipped, never mis-parsed).
+        assert_eq!(AudioPacketHeader::decode(&encoded[..10]), None);
+        let mut bad = encoded;
+        bad[0] ^= 0xFF;
+        assert_eq!(AudioPacketHeader::decode(&bad), None);
+    }
+
+    /// End-to-end audio over **real QUIC datagrams** on loopback (ADR-077): the host emits one datagram
+    /// per Opus packet, the controller reconstructs each `EncodedAudio` faithfully (bytes, seq, config).
+    /// Also asserts the role split (only the host has an audio sink; only the controller a source) and
+    /// that a `seq` gap simply surfaces as the next packet — audio has no keyframe/recovery concept.
+    #[tokio::test]
+    async fn audio_streams_packet_by_packet_over_iroh_datagrams() {
+        let host = Endpoint::bind().await.unwrap();
+        let controller = Endpoint::bind().await.unwrap();
+        let host_id = host.id();
+        let host_addrs = to_loopback(&host.bound_addrs());
+
+        let host_task = tokio::spawn(async move {
+            let session = host.accept().await.unwrap().expect("an inbound session");
+            assert!(
+                session.audio_source().is_none(),
+                "the host has no audio source"
+            );
+            let sink = session.audio_sink().expect("the host has an audio sink");
+            (host, sink)
+        });
+
+        let session = controller
+            .connect_direct(&host_id, &host_addrs)
+            .await
+            .unwrap();
+        assert!(
+            session.audio_sink().is_none(),
+            "the controller has no audio sink"
+        );
+        let mut source = session
+            .audio_source()
+            .expect("the controller has an audio source");
+        let (host_ep, sink) = host_task.await.unwrap();
+
+        // Three in-order packets round-trip, bytes/seq/config intact. Datagrams are unreliable, so send
+        // one and receive one in lockstep (on a quiet loopback path delivery is effectively certain).
+        for seq in 0..3u64 {
+            let sent = sink.send_audio(test_audio(seq, b"opus-packet")).unwrap();
+            assert_eq!(sent, SendOutcome::Sent);
+            let got = source.recv().await.unwrap();
+            assert_eq!(got.seq, seq);
+            assert_eq!(&got.data[..], b"opus-packet");
+            assert_eq!(got.config.sample_rate_hz, 48_000);
+            assert_eq!(got.config.channels, 2);
+            assert_eq!(got.config.codec, AudioCodec::Opus);
+        }
+
+        // A seq gap (packet 3,4 "lost") is not special: the next delivered packet is just seq 5. Opus
+        // PLC handles the gap; the transport neither recovers nor synthesizes a loss event.
+        sink.send_audio(test_audio(5, b"after-gap")).unwrap();
+        let got = source.recv().await.unwrap();
+        assert_eq!(got.seq, 5);
+        assert_eq!(&got.data[..], b"after-gap");
 
         drop(sink);
         host_ep.close().await;

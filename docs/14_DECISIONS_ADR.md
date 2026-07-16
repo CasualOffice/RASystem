@@ -663,18 +663,30 @@
     attaches via `ControllerSession::attach_audio_output` (where received Opus packets go — a WebCodecs
     `AudioDecoder` in the app, a recorder in tests). `SessionTransport::audio_sink`/`audio_source`
     **default to "unsupported"** (a transport without an audio plane simply stays silent), so the
-    `IrohSessionTransport` is unchanged — the iroh audio sub-stream is a documented follow-up. The
-    in-memory loopback overrides both, giving a **true end-to-end** host→controller audio path in tests.
-    The real Opus codec is already available (`ras-audio-opus`, ADR-080).
+    `IrohSessionTransport` was unchanged at that step. The in-memory loopback overrides both, giving a
+    **true end-to-end** host→controller audio path in tests. The real Opus codec is already available
+    (`ras-audio-opus`, ADR-080).
+  - **iroh audio plane — NOW LANDED, over QUIC datagrams.** The concrete `IrohSessionTransport` now
+    implements `audio_sink`/`audio_source`. Audio rides **unreliable QUIC datagrams**, not streams —
+    deliberately: real-time output audio wants low latency and no head-of-line blocking; an Opus packet
+    is tiny (≈240 B at 96 kbps/20 ms, far under the datagram MTU) and independently decodable, so a lost
+    datagram is a brief PLC-covered glitch, never a stall. Datagrams are also a wholly separate QUIC
+    mechanism from `accept_uni`, so the audio plane never interferes with the per-frame video streams or
+    the control stream. A fixed 36-byte `AudioPacketHeader` (magic `RAU1` + version + per-packet
+    `AudioConfig` + `seq` + `captured_at_us`, fail-closed decode) prefixes the Opus bytes in each
+    datagram; the receiver skips any foreign/oversized/malformed datagram. **No fragmentation** — one
+    Opus packet is one datagram (an oversized packet is a misconfiguration, dropped, not reassembled).
   - **Deferred (OS/on-device):** OS output-audio capture (macOS ScreenCaptureKit audio / CoreAudio tap,
-    Windows WASAPI loopback, Linux PipeWire), the **iroh** audio sub-stream implementing
-    `audio_sink`/`audio_source` (A/V-sync'd by `captured_at_us`), `AudioConfig` wire negotiation, the
-    "AUDIO SHARED" indicator, and JS `AudioDecoder`→`AudioContext` playback.
+    Windows WASAPI loopback, Linux PipeWire), `AudioConfig` **wire negotiation** (today the config
+    travels per-packet in the header rather than being negotiated up front), the "AUDIO SHARED"
+    indicator, and JS `AudioDecoder`→`AudioContext` playback.
   - **Verify:** the audio types + `frame_samples` math, the synthetic capture→encode round-trip, the
-    `audio.listen` recognized-but-withheld/default-OFF test, **and the two loopback tests — end-to-end
+    `audio.listen` recognized-but-withheld/default-OFF test, **the two loopback spine tests** (end-to-end
     through the transport audio plane: the controller's `AudioOutput` receives packets when
-    `audio.listen` is granted, and nothing when withheld** (Inv 15) — are green. Real
-    capture→network→play is the on-device row.
+    `audio.listen` is granted, nothing when withheld — Inv 15), **an `AudioPacketHeader` round-trip +
+    fail-closed unit test, a real datagram round-trip over two loopback iroh endpoints (packet/seq/config
+    intact + seq-gap tolerance), and the full ras-core spine driving the host pump → real iroh datagrams
+    → controller output** — all green. Real capture→network→play is the on-device row.
 
 - **ADR-078 · Signed auto-update via Tauri's Ed25519 updater — the free integrity layer, distinct from
   paid OS code-signing · Accepted** (complements ADR-072; `docs/20 §2.4`). An unsigned update channel

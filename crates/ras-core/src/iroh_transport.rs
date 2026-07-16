@@ -17,14 +17,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::deps::{
-    ControlChannelDyn, DialTarget, PeerIdentity, SessionTransport, VideoSinkDyn, VideoSourceDyn,
+    AudioSink, AudioSourceDyn, ControlChannelDyn, DialTarget, PeerIdentity, SessionTransport,
+    VideoSinkDyn, VideoSourceDyn,
 };
 use crate::CoreError;
-use ras_media::EncodedFrame;
+use ras_media::{EncodedAudio, EncodedFrame};
 use ras_protocol::{ControlMsg, ErrorCode};
 use ras_transport_iroh::{
-    ConnHealth, ControlChannel, Endpoint, HealthObserver, SendOutcome, Session, VideoEvent,
-    VideoSink, VideoSource,
+    AudioSink as IrohAudioSinkInner, AudioSource as IrohAudioSourceInner, ConnHealth,
+    ControlChannel, Endpoint, HealthObserver, SendOutcome, Session, VideoEvent, VideoSink,
+    VideoSource,
 };
 
 /// A [`SessionTransport`] over one established iroh session. Holds a shared handle to the owning
@@ -84,6 +86,23 @@ impl SessionTransport for IrohSessionTransport {
             .ok_or_else(|| CoreError::fatal(ErrorCode::Internal, "no video source for this role"))
     }
 
+    async fn audio_sink(&self) -> Result<Box<dyn AudioSink>, CoreError> {
+        // Audio flows host → controller over QUIC datagrams (ADR-077). The host owns the *right* to be
+        // heard (the `audio.listen` gate in `ras-core` precedes this fetch); the transport owns the
+        // wire. `None` on the controller role.
+        self.session
+            .audio_sink()
+            .map(|s| Box::new(IrohAudioSink(s)) as Box<dyn AudioSink>)
+            .ok_or_else(|| CoreError::fatal(ErrorCode::Internal, "no audio sink for this role"))
+    }
+
+    async fn audio_source(&self) -> Result<Box<dyn AudioSourceDyn>, CoreError> {
+        self.session
+            .audio_source()
+            .map(|s| Box::new(IrohAudioSource(s)) as Box<dyn AudioSourceDyn>)
+            .ok_or_else(|| CoreError::fatal(ErrorCode::Internal, "no audio source for this role"))
+    }
+
     fn health(&self) -> ConnHealth {
         self.health.snapshot()
     }
@@ -123,6 +142,27 @@ struct IrohVideoSource(VideoSource);
 #[async_trait]
 impl VideoSourceDyn for IrohVideoSource {
     async fn next(&mut self) -> Result<VideoEvent, CoreError> {
+        self.0.recv().await
+    }
+}
+
+/// Adapts the iroh audio sink to [`AudioSink`]. Non-blocking, drop-on-pressure (audio is droppable).
+struct IrohAudioSink(IrohAudioSinkInner);
+
+impl AudioSink for IrohAudioSink {
+    fn send_audio(&self, packet: EncodedAudio) {
+        // The iroh audio sink never errs at enqueue (loss is a `SendOutcome`, not an `Err`); the
+        // `deps::AudioSink` seam is fire-and-forget, so any outcome is simply discarded here.
+        let _ = self.0.send_audio(packet);
+    }
+}
+
+/// Adapts the iroh [`AudioSource`](IrohAudioSourceInner) to [`AudioSourceDyn`].
+struct IrohAudioSource(IrohAudioSourceInner);
+
+#[async_trait]
+impl AudioSourceDyn for IrohAudioSource {
+    async fn next(&mut self) -> Result<EncodedAudio, CoreError> {
         self.0.recv().await
     }
 }
@@ -257,5 +297,137 @@ mod tests {
         host.stop(StopReason::UserRequested).await;
         assert_eq!(controller.state(), SessionState::Terminated);
         assert_eq!(host.state(), SessionState::Terminated);
+    }
+
+    /// A grant validator that authorizes with a fixed capability set — used to grant `audio.listen`
+    /// (unlike `AllowAllValidator`, which authorizes but grants nothing).
+    struct GrantsCaps(ras_policy::CapabilitySet);
+    #[async_trait::async_trait]
+    impl crate::deps::GrantValidator for GrantsCaps {
+        async fn authorize(
+            &self,
+            _ctx: &crate::deps::SessionAuthContext,
+        ) -> Result<crate::deps::GrantDecision, crate::CoreError> {
+            Ok(crate::deps::GrantDecision::Authorized(self.0.clone()))
+        }
+    }
+
+    /// Controller-side audio output that tallies packets delivered through the transport.
+    struct RecordingAudioOut(std::sync::atomic::AtomicU64);
+    impl crate::deps::AudioOutput for RecordingAudioOut {
+        fn push(&self, _packet: ras_media::EncodedAudio) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// An audio encoder double that emits a small, **MTU-safe** packet per chunk. Real Opus packets are
+    /// ≈240 B (well under the datagram MTU); the `synthetic` passthrough emits raw ~3.8 KB PCM frames,
+    /// which exceed it — so we use this to exercise the datagram plane at a realistic packet size.
+    struct SmallPacketEncoder {
+        config: ras_media::AudioConfig,
+        seq: u64,
+    }
+    impl ras_media::AudioEncoderBackend for SmallPacketEncoder {
+        fn configure(
+            &mut self,
+            config: &ras_media::AudioConfig,
+        ) -> Result<(), ras_media::MediaError> {
+            self.config = *config;
+            Ok(())
+        }
+        fn encode(
+            &mut self,
+            chunk: ras_media::CapturedAudio,
+        ) -> Result<Option<ras_media::EncodedAudio>, ras_media::MediaError> {
+            let seq = self.seq;
+            self.seq += 1;
+            Ok(Some(ras_media::EncodedAudio {
+                seq,
+                captured_at_us: chunk.captured_at_us,
+                data: bytes::Bytes::from_static(&[0u8; 200]),
+                config: self.config,
+            }))
+        }
+        fn set_bitrate(&mut self, _bitrate_bps: u32) -> Result<(), ras_media::MediaError> {
+            Ok(())
+        }
+        fn config(&self) -> ras_media::AudioConfig {
+            self.config
+        }
+    }
+
+    /// The full audio path — host pump (Inv-15 `audio.listen` gate) → real iroh **QUIC datagrams** →
+    /// controller ingest → attached `AudioOutput` — end-to-end over two real iroh endpoints on
+    /// loopback, with the synthetic audio doubles. Combines the orchestrator gate (proven on loopback
+    /// in `lib.rs`) with the real datagram plane (proven at the transport layer in the iroh crate).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audio_flows_over_real_iroh_when_granted() {
+        let host_ep = Arc::new(Endpoint::bind().await.unwrap());
+        let ctrl_ep = Arc::new(Endpoint::bind().await.unwrap());
+        let host_id = host_ep.id();
+        let host_addrs = to_loopback(&host_ep.bound_addrs());
+
+        let accept_ep = host_ep.clone();
+        let accept = tokio::spawn(async move {
+            accept_ep
+                .accept()
+                .await
+                .unwrap()
+                .expect("an inbound session")
+        });
+        let ctrl_session = ctrl_ep.connect_direct(&host_id, &host_addrs).await.unwrap();
+        let host_session = accept.await.unwrap();
+
+        let host_tp = Arc::new(IrohSessionTransport::new(host_ep, host_session));
+        let ctrl_tp = Arc::new(IrohSessionTransport::new(ctrl_ep, ctrl_session));
+
+        // Grant screen.view + audio.listen so the host audio pump is allowed to run (Inv 15).
+        let caps: ras_policy::CapabilitySet = ["screen.view", ras_policy::AUDIO_LISTEN]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(GrantsCaps(caps)),
+        )
+        .with_audio(
+            Box::new(ras_media::synthetic::SyntheticAudioCapture::new()),
+            Box::new(SmallPacketEncoder {
+                config: ras_media::AudioConfig {
+                    codec: ras_media::AudioCodec::Opus,
+                    sample_rate_hz: 48_000,
+                    channels: 2,
+                    frame_duration_us: 20_000,
+                    target_bitrate_bps: 96_000,
+                },
+                seq: 0,
+            }),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(host_id)),
+            ctrl_tp,
+        );
+        let rec = Arc::new(RecordingAudioOut(std::sync::atomic::AtomicU64::new(0)));
+        controller.attach_audio_output(rec.clone());
+
+        let (host_events, ctrl_events) = tokio::join!(host.start(), controller.connect());
+        host_events.unwrap();
+        ctrl_events.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        assert!(
+            wait_until(
+                || rec.0.load(std::sync::atomic::Ordering::Relaxed) > 0,
+                500
+            )
+            .await,
+            "audio packets should reach the controller output over real iroh datagrams when granted"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
     }
 }
