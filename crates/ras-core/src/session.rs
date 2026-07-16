@@ -30,12 +30,12 @@ use crate::{
     deps::GrantDecision, transition, AdaptiveBitrateController, CoreError, SessionEvent,
     SessionState, Transition,
 };
-use ras_control::{LeaseManager, OsInputSink, LEASE_DEFAULT_TTL_MS};
+use ras_control::{ClipboardSink, LeaseManager, OsInputSink, LEASE_DEFAULT_TTL_MS};
 use ras_media::{
     CaptureOptions, ColorSpace, MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec,
     VideoEncoderBackend, VideoTransportKind, WindowId,
 };
-use ras_policy::CapabilitySet;
+use ras_policy::{clipboard_push_allowed, CapabilitySet, ClipboardDirection};
 use ras_protocol::{
     ControlMsg, DecoderFeedback, ErrorCode, InputEnvelope, KeyframeReason, StreamConfigWire,
 };
@@ -230,6 +230,13 @@ struct HostInner<C, E> {
     lease: Mutex<Option<LeaseManager>>,
     /// The authenticated peer endpoint, captured at `Active` — the lease holder identity (informational).
     peer_endpoint: Mutex<[u8; 32]>,
+    /// The session's granted capability set, captured at `Active`. The authority for grant-level checks
+    /// that are **not** lease-gated — e.g. clipboard push (`clipboard.write`/`read`, ADR-076, Inv 15).
+    /// Empty before authorization (fail-closed).
+    granted_caps: Mutex<CapabilitySet>,
+    /// Phase-3 OS-clipboard write seam (ADR-076). `None` ⇒ this host cannot set its clipboard, so an
+    /// inbound clipboard push is refused fail-closed. Injected via [`HostSession::with_clipboard_sink`].
+    clipboard_sink: Mutex<Option<Arc<dyn ClipboardSink>>>,
 }
 
 /// Host-side view-only session. Owns capture+encode+transmit on their own thread.
@@ -275,6 +282,8 @@ where
                 control_consent: Mutex::new(Arc::new(DenyAllControl)),
                 lease: Mutex::new(None),
                 peer_endpoint: Mutex::new([0u8; 32]),
+                granted_caps: Mutex::new(CapabilitySet::new()),
+                clipboard_sink: Mutex::new(None),
             }),
         }
     }
@@ -286,6 +295,19 @@ where
         *self
             .inner
             .input_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+        self
+    }
+
+    /// Inject the Phase-3 OS-clipboard write backend (ADR-076). Without one, an inbound clipboard push
+    /// is refused fail-closed. The backend sets the OS clipboard and never pastes. Additive; call
+    /// before [`Self::start`].
+    #[must_use]
+    pub fn with_clipboard_sink(self, sink: Arc<dyn ClipboardSink>) -> Self {
+        *self
+            .inner
+            .clipboard_sink
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
         self
@@ -383,12 +405,17 @@ where
         match inner.validator.authorize(&ctx).await? {
             GrantDecision::Authorized(caps) => {
                 // The granted capability set is the ceiling for any OS-input lease (Inv 15). Seed the
-                // per-message gate with it; a lease can only ever be a subset (Phase 3).
+                // per-message gate with it; a lease can only ever be a subset (Phase 3). Also retain
+                // the full set for grant-level, non-lease checks (clipboard push, ADR-076).
                 apply(&inner.state, SessionEvent::Authorized);
                 *inner
                     .peer_endpoint
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = holder;
+                *inner
+                    .granted_caps
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = caps.clone();
                 *inner
                     .lease
                     .lock()
@@ -830,6 +857,12 @@ async fn host_control_loop<C, E>(
                     emit_lifecycle(inner, LifecycleEvent::InputRejected { code });
                 }
             }
+            // Controller → host clipboard-text push (ADR-076). Gated host-side on `clipboard.write`
+            // against the session grant (Inv 15 — never the peer's claim), then the OS clipboard is
+            // **set, never pasted** (no-auto-paste rule). Outcome is a content-free lifecycle event.
+            Ok(ControlMsg::ClipboardText { text }) => {
+                host_handle_clipboard(inner, &text);
+            }
             // Any Bye from the controller is a clean peer close — deliberately code-agnostic. A
             // controller cannot revoke the host, so a controller-claimed `SessionRevoked` is treated
             // as an ordinary close, never a privileged action (Invariants 1/15: never trust the
@@ -980,6 +1013,46 @@ fn host_handle_input<C, E>(inner: &HostInner<C, E>, env: &InputEnvelope) -> Resu
     }
 }
 
+/// Apply a controller→host clipboard-text push (ADR-076). Authorizes host-side against the session
+/// grant (`clipboard.write`, Inv 15 — never the peer's claim); on success sets the OS clipboard via the
+/// injected [`ClipboardSink`], which **sets, never pastes** (the no-auto-paste rule). Emits a
+/// content-free lifecycle outcome (never the clipboard text — Inv 8). Fail-closed: capability withheld
+/// or no backend wired ⇒ `CapabilityDenied`.
+fn host_handle_clipboard<C, E>(inner: &HostInner<C, E>, text: &ras_protocol::Redacted) {
+    let granted = inner
+        .granted_caps
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if !clipboard_push_allowed(ClipboardDirection::ControllerToHost, &granted) {
+        emit_lifecycle(
+            inner,
+            LifecycleEvent::ClipboardRejected {
+                code: ErrorCode::CapabilityDenied,
+            },
+        );
+        return;
+    }
+    let sink = inner
+        .clipboard_sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let outcome = match sink {
+        // `reveal()` here is the one sanctioned use — the OS write, not a log.
+        Some(s) => match s.set_text(text.reveal()) {
+            Ok(()) => LifecycleEvent::ClipboardApplied {
+                len: text.reveal().len(),
+            },
+            Err(e) => LifecycleEvent::ClipboardRejected { code: e.code },
+        },
+        None => LifecycleEvent::ClipboardRejected {
+            code: ErrorCode::CapabilityDenied,
+        },
+    };
+    emit_lifecycle(inner, outcome);
+}
+
 /// Revoke any active lease and flush the OS key-state (Invariant 4 key-state cleanup). Called on
 /// emergency stop and graceful teardown, before the media halt is reported to the peer. Idempotent,
 /// never blocks, never fails.
@@ -1055,6 +1128,9 @@ enum ControlCommand {
     ControlRequest(Vec<String>),
     /// One OS-input event to forward to the host (Phase 3), under a held lease.
     Input(InputEnvelope),
+    /// Push clipboard text to the host (ADR-076). Gated host-side on `clipboard.write`; the host sets
+    /// its clipboard and never pastes.
+    ClipboardText(String),
     Bye,
 }
 
@@ -1306,6 +1382,21 @@ impl ControllerSession {
         }
     }
 
+    /// Push clipboard text to the host (ADR-076) — an explicit user action ("Send clipboard"). The
+    /// host gates it on `clipboard.write` (Inv 15) and, if allowed, **sets its OS clipboard without
+    /// pasting** (the no-auto-paste rule). Best-effort; the text is a secret and is never logged (Inv 8).
+    pub fn send_clipboard_text(&self, text: String) {
+        let tx = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(ControlCommand::ClipboardText(text));
+        }
+    }
+
     /// The OS-input lease the host has granted this controller, if any: `(lease_id, generation)`.
     #[must_use]
     pub fn current_lease(&self) -> Option<([u8; 16], u32)> {
@@ -1378,6 +1469,10 @@ async fn controller_control_loop(
                 }
                 Some(ControlCommand::Input(env)) => {
                     if control.send(ControlMsg::Input(env)).await.is_err() { break; }
+                }
+                Some(ControlCommand::ClipboardText(text)) => {
+                    let msg = ControlMsg::ClipboardText { text: ras_protocol::Redacted(text) };
+                    if control.send(msg).await.is_err() { break; }
                 }
                 Some(ControlCommand::Bye) => {
                     // A controller leaving is a clean peer close, never a revoke — a controller

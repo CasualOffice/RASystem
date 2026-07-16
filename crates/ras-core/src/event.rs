@@ -182,6 +182,19 @@ pub enum LifecycleEvent {
         /// Why the event was refused (`LeaseInvalid`, `ReplayDetected`, `CapabilityDenied`, …).
         code: ErrorCode,
     },
+    /// Host-side (ADR-076): an inbound clipboard-text push was applied to the host's OS clipboard —
+    /// **set only, never pasted**. **Content-free** — carries the byte length for observability, never
+    /// the clipboard text (Inv 8).
+    ClipboardApplied {
+        /// Byte length of the applied text (metadata only — not the content).
+        len: usize,
+    },
+    /// Host-side (ADR-076): an inbound clipboard-text push was refused (capability withheld or no
+    /// clipboard backend wired), with the stable reason code. Content-free.
+    ClipboardRejected {
+        /// Why it was refused (`CapabilityDenied`, `InputFailed`, …).
+        code: ErrorCode,
+    },
 }
 
 /// The lifecycle event stream handed to the embedding app. A bounded receiver: latest-wins-ish, so

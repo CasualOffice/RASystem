@@ -459,7 +459,7 @@ mod e2e {
     use crate::testkit::{loopback_pair, loopback_pair_with_faults, CountingFrameSink};
     use crate::{
         ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig, LifecycleEvent,
-        SessionState, StopReason,
+        LifecycleStream, SessionState, StopReason,
     };
     use ras_media::synthetic::{SyntheticCaptureBackend, SyntheticEncoder};
     use ras_media::MonitorId;
@@ -814,6 +814,150 @@ mod e2e {
         );
 
         controller.disconnect(StopReason::UserRequested).await;
+    }
+
+    // ── Clipboard push (ADR-076) ────────────────────────────────────────────────────────────────
+    // A test double for the OS clipboard: it records what was *set*. (Holding the content is exactly
+    // what the real OS clipboard does — Inv 8 is about production logs, not this simulated sink.)
+    struct RecordingClipboard {
+        set: std::sync::Mutex<Vec<String>>,
+    }
+    impl RecordingClipboard {
+        fn new() -> Self {
+            Self {
+                set: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn seen(&self) -> Vec<String> {
+            self.set.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+    impl ras_control::ClipboardSink for RecordingClipboard {
+        fn set_text(&self, text: &str) -> Result<(), crate::CoreError> {
+            self.set
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(text.to_string());
+            Ok(())
+        }
+    }
+
+    /// A validator that authorizes a fixed capability set (so a test can grant `clipboard.write`,
+    /// which the default policies withhold).
+    struct FixedCaps(ras_policy::CapabilitySet);
+    #[async_trait::async_trait]
+    impl crate::deps::GrantValidator for FixedCaps {
+        async fn authorize(
+            &self,
+            _ctx: &crate::deps::SessionAuthContext,
+        ) -> Result<crate::deps::GrantDecision, crate::CoreError> {
+            Ok(crate::deps::GrantDecision::Authorized(self.0.clone()))
+        }
+    }
+
+    async fn drain_for_clipboard_outcome(events: &mut LifecycleStream) -> Option<LifecycleEvent> {
+        for _ in 0..50 {
+            while let Ok(ev) = events.try_recv() {
+                if matches!(
+                    ev,
+                    LifecycleEvent::ClipboardApplied { .. }
+                        | LifecycleEvent::ClipboardRejected { .. }
+                ) {
+                    return Some(ev);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        None
+    }
+
+    fn caps(items: &[&str]) -> ras_policy::CapabilitySet {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// With `clipboard.write` granted and a backend wired, a controller push sets the host clipboard
+    /// (never pastes) and reports `ClipboardApplied` with the byte length only (Inv 8).
+    #[tokio::test]
+    async fn clipboard_push_reaches_the_os_sink_when_granted() {
+        let clip = Arc::new(RecordingClipboard::new());
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(&[
+                "screen.view",
+                ras_policy::CLIPBOARD_WRITE,
+            ]))),
+        )
+        .with_clipboard_sink(clip.clone());
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let mut host_events = host_r.unwrap();
+        let _c = ctrl_r.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        let payload = "clipboard from the controller 📋";
+        controller.send_clipboard_text(payload.to_string());
+
+        match drain_for_clipboard_outcome(&mut host_events).await {
+            Some(LifecycleEvent::ClipboardApplied { len }) => {
+                assert_eq!(len, payload.len(), "event carries byte length, not content");
+            }
+            other => panic!("expected ClipboardApplied, got {other:?}"),
+        }
+        assert_eq!(
+            clip.seen(),
+            vec![payload.to_string()],
+            "the granted push must reach the OS clipboard sink exactly once"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
+    /// Without `clipboard.write` in the grant, the same push is refused host-side (Inv 15) and never
+    /// touches the sink — even though a backend is wired.
+    #[tokio::test]
+    async fn clipboard_push_refused_without_the_write_capability() {
+        let clip = Arc::new(RecordingClipboard::new());
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            // view-only grant: clipboard.write withheld.
+            Arc::new(FixedCaps(caps(&["screen.view"]))),
+        )
+        .with_clipboard_sink(clip.clone());
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let mut host_events = host_r.unwrap();
+        let _c = ctrl_r.unwrap();
+
+        controller.send_clipboard_text("should be blocked".to_string());
+
+        match drain_for_clipboard_outcome(&mut host_events).await {
+            Some(LifecycleEvent::ClipboardRejected { code }) => {
+                assert_eq!(code, ras_protocol::ErrorCode::CapabilityDenied);
+            }
+            other => panic!("expected ClipboardRejected, got {other:?}"),
+        }
+        assert!(
+            clip.seen().is_empty(),
+            "an un-granted clipboard push must never reach the OS sink (Inv 15)"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
     }
 
     #[tokio::test]

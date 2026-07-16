@@ -611,14 +611,23 @@
     by-discipline note (which should adopt `Redacted` too, follow-up). Bounded by `MAX_CLIPBOARD_BYTES`
     (768 KiB, under `MAX_CONTROL_FRAME`); oversize is **refused, never truncated** (truncation silently
     corrupts). Bytes pass through as-is — no CRLF/LF normalization (it would corrupt non-plain text).
-  - **Deferred to follow-up (GUI/on-device):** the per-OS `ClipboardBackend` (NSPasteboard / X11
-    selections + `wl-clipboard` / Win32), the `ras-core` host-loop wiring (receive → `clipboard_push_
-    allowed` → set clipboard **without** paste), the app "Send clipboard" button + a "clipboard shared"
-    indicator (Inv 7), echo-suppression ownership tag, and the rule that a **pre-connection** clipboard
-    is never auto-synced.
-  - **Verify:** wire round-trip + oversize-refusal + `Debug`-redaction tests (ras-protocol), the
-    per-direction/default-denied gate + recognized-but-withheld tests (ras-policy), decoder fuzz — all
-    green. End-to-end paste behavior is the on-device row.
+  - **Orchestrator wiring — NOW LANDED.** A `ras_control::ClipboardSink` DI seam (deliberately *not*
+    part of `OsInputSink` — setting the clipboard is not OS input and is gated by a separate capability)
+    with `HostSession::with_clipboard_sink`; the host control loop handles `ControlMsg::ClipboardText`
+    by capturing the session's granted caps at authorization, calling `clipboard_push_allowed`
+    (controller→host), and — only if allowed and a backend is wired — invoking `set_text` (which sets,
+    never pastes). Outcomes are content-free `LifecycleEvent::ClipboardApplied { len }` /
+    `ClipboardRejected { code }` (Inv 8 — the byte length, never the text). Fail-closed: no capability
+    or no backend ⇒ `CapabilityDenied`, sink untouched. `ControllerSession::send_clipboard_text` is the
+    push API the app's "Send clipboard" will call. Two loopback tests: granted → reaches the sink once
+    + `ClipboardApplied`; withheld → `ClipboardRejected` + sink never touched (Inv 15).
+  - **Deferred to follow-up (GUI/on-device):** the per-OS `ClipboardSink` impl (NSPasteboard / X11
+    selections + `wl-clipboard` / Win32), the app "Send clipboard" button + a "clipboard shared"
+    indicator (Inv 7), echo-suppression ownership tag, the host→controller (`clipboard.read`) direction,
+    and the rule that a **pre-connection** clipboard is never auto-synced.
+  - **Verify:** wire round-trip + oversize-refusal + `Debug`-redaction (ras-protocol), the
+    per-direction/default-denied gate + recognized-but-withheld (ras-policy), the two host-loop loopback
+    tests (ras-core), decoder fuzz — all green. Real OS clipboard set + no-paste is the on-device row.
 
 ## Licensing
 

@@ -137,8 +137,12 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   `MAX_CLIPBOARD_BYTES=768 KiB` (refused, never truncated), + the pure host-side per-direction gate
   `ras_policy::clipboard_push_allowed` (controller→host = `clipboard.write`, host→controller =
   `clipboard.read`, both recognized-but-withheld → **default OFF**), with the **no-auto-paste** rule
-  (receiver only sets the OS clipboard, never injects a paste) documented on the wire type; the per-OS
-  `ClipboardBackend` + host-loop wiring + app "Send clipboard"/indicator are the follow-up. **Still pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
+  (receiver only sets the OS clipboard, never injects a paste) documented on the wire type. The **host
+  loop now enforces it end-to-end**: a `ras_control::ClipboardSink` DI seam + `with_clipboard_sink`, the
+  loop captures granted caps at auth → gates → (if allowed + backend wired) `set_text` without paste,
+  emitting content-free `ClipboardApplied{len}`/`ClipboardRejected{code}`; `send_clipboard_text` is the
+  controller push API; two loopback tests (granted reaches sink, withheld refused). The per-OS
+  `ClipboardSink` impl + app "Send clipboard"/indicator are the follow-up. **Still pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
   Secure-Input drop (macOS); the analogous **Linux on-device** XTEST run (a real X11/Xwayland session);
   the **Windows on-device** `SendInput` run (**needs Windows hardware the team lacks** — stays
   CI-compile-gated on `windows-latest`); a macOS **global-hotkey** emergency stop (baseline stop is the

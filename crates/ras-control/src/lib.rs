@@ -385,6 +385,22 @@ pub trait OsInputSink: Send + Sync {
     fn input_permitted(&self) -> bool;
 }
 
+/// The host's OS-clipboard **write** seam (ADR-076). A platform backend sets the OS clipboard to the
+/// given text and **must never inject a paste keystroke** — the no-auto-paste rule that severs the
+/// clipboard-hijack→RCE chain (Reverse-RDP / RustDesk CVE class). This is deliberately *not* part of
+/// [`OsInputSink`]: setting the clipboard is not OS input and is gated by a separate session capability
+/// ([`ras_policy::clipboard_push_allowed`]), which the caller checks *before* invoking this. Object-safe
+/// for DI. Distinct from OS input so a host may allow clipboard sync without allowing input, or vice
+/// versa.
+pub trait ClipboardSink: Send + Sync {
+    /// Set the OS clipboard to `text` (plain UTF-8). **Never** pastes. `text` is a secret — never log
+    /// it (Inv 8).
+    ///
+    /// # Errors
+    /// Backend/OS failure (clipboard unavailable, write refused).
+    fn set_text(&self, text: &str) -> Result<(), InputError>;
+}
+
 /// Dispatch an already-authorized [`InputAction`] to an [`OsInputSink`], normalizing the fixed-point
 /// `0..=65535` coordinates to `0.0..=1.0` fractions. Only ever called with a gate-approved action.
 ///
