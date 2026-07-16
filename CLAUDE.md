@@ -442,6 +442,7 @@ casual-ras/
 | `docs/17_ROADMAP_AND_MILESTONES.md` | Milestones + phase-wise task plan with per-phase design gates |
 | `docs/18_HOST_PLATFORM_MACOS.md` | macOS host deep-dive — dev-lead platform (ADR-054/055) |
 | `docs/19_CROSS_PLATFORM_HOST_RESEARCH.md` | Linux/Windows capture·input·encode·build survey + permissive recommended stack (Inv 18 license verdicts) |
+| `docs/20_FEATURE_GAPS_AND_ROADMAP.md` | Where we lapse vs incumbents (clipboard/file/audio/multi-monitor/cursor/chat/whiteboard/auto-update/…) + safe designs + priority, from a 5-stream cross-device research sweep |
 | `docs/design/phase-<n>-design.md` | Per-phase design notes (written at each phase's design gate) |
 
 ---
