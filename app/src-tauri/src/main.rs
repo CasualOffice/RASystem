@@ -785,15 +785,19 @@ async fn serve_one(
 
     let _ = app.emit("share-status", "A viewer is connecting…");
 
-    // Phase-3 OS-input backend (macOS only). Prompt for PostEvent access up front so that, by the time
-    // a viewer asks for control, `input_permitted()` is true; otherwise the host refuses the lease
-    // fail-closed. Held concretely so we can feed it the shared display's bounds (below).
+    // Phase-3 OS-input backend. Held concretely so we can feed it the shared display's bounds (below).
+    // macOS: prompt for PostEvent access up front so that, by the time a viewer asks for control,
+    // `input_permitted()` is true; otherwise the host refuses the lease fail-closed.
     #[cfg(target_os = "macos")]
     let input_sink = {
         let s = Arc::new(ras_input_macos::CgEventSink::new());
         let _ = s.request_access();
         s
     };
+    // Linux: XTEST over x11rb (ADR-070). No permission prompt — it connects to $DISPLAY as the user
+    // and is fail-closed when no X server is reachable (`input_permitted()` false ⇒ lease refused).
+    #[cfg(target_os = "linux")]
+    let input_sink = Arc::new(ras_input_linux::X11InputSink::new());
 
     let (capture, encoder) = make_backends();
     let transport = Arc::new(IrohSessionTransport::new(endpoint.clone(), session));
@@ -811,9 +815,9 @@ async fn serve_one(
     )
     // The control-lease consent prompt (Invariant 1) — a second, input-specific Allow/Deny.
     .with_control_consent(consent.clone());
-    // On macOS, feed the OS-input backend so a granted lease can actually inject (elsewhere, no
+    // On macOS/Linux, feed the OS-input backend so a granted lease can actually inject (elsewhere, no
     // backend ⇒ control requests are refused fail-closed).
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let host = host.with_input_sink(input_sink.clone());
 
     // `start()` runs the handshake, then blocks in the consent gate until Allow/Deny. Deny → Err.
@@ -861,7 +865,7 @@ async fn serve_one(
                     }
                     // Feed the same bounds to the input backend so normalized input maps to the right
                     // pixels on the shared display (display id 0 in the single-display MVP).
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     input_sink.set_display_bounds(
                         0,
                         f64::from(x),
