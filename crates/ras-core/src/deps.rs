@@ -35,6 +35,22 @@ pub trait SessionTransport: Send + Sync {
     async fn video_sink(&self) -> Result<Box<dyn VideoSinkDyn>, CoreError>;
     /// Droppable video ingress (controller role only).
     async fn video_source(&self) -> Result<Box<dyn VideoSourceDyn>, CoreError>;
+    /// Droppable audio egress (host role, ADR-077). **Default: unsupported** — a transport that does
+    /// not carry an audio plane (the iroh audio sub-stream is a follow-up) simply reports no audio, and
+    /// the host stays silent. Overridden by transports that do (the loopback for tests).
+    async fn audio_sink(&self) -> Result<Box<dyn AudioSink>, CoreError> {
+        Err(CoreError::fatal(
+            ErrorCode::Internal,
+            "audio transport not supported",
+        ))
+    }
+    /// Droppable audio ingress (controller role, ADR-077). **Default: unsupported** (see [`Self::audio_sink`]).
+    async fn audio_source(&self) -> Result<Box<dyn AudioSourceDyn>, CoreError> {
+        Err(CoreError::fatal(
+            ErrorCode::Internal,
+            "audio transport not supported",
+        ))
+    }
     /// Non-blocking health snapshot for `ConnectionQuality` events.
     fn health(&self) -> ConnHealth;
 }
@@ -69,6 +85,21 @@ pub trait VideoSourceDyn: Send + Sync {
 pub trait AudioSink: Send + Sync {
     /// Hand one encoded audio packet to the transport. Ordinary loss (a shed packet) is not an error.
     fn send_audio(&self, packet: EncodedAudio);
+}
+
+/// Droppable audio ingress on the controller (ADR-077). Mirrors [`VideoSourceDyn`].
+#[async_trait]
+pub trait AudioSourceDyn: Send + Sync {
+    /// Await the next encoded audio packet. `Err` on a terminal transport failure / closed channel.
+    async fn next(&mut self) -> Result<EncodedAudio, CoreError>;
+}
+
+/// Where received audio goes on the controller (ADR-077). Implemented by the Tauri layer (forwards the
+/// Opus packet to a WebCodecs `AudioDecoder`) and by a recording sink in tests. **Sync + non-blocking**
+/// like [`FrameSink`]: a slow consumer drops internally, never backpressures ingest.
+pub trait AudioOutput: Send + Sync {
+    /// Deliver one encoded audio packet. Returns immediately; never awaits.
+    fn push(&self, packet: EncodedAudio);
 }
 
 /// Where frames go on the controller. Implemented by the Tauri layer (pushes to the WebCodecs

@@ -651,21 +651,30 @@
     dependency-free `SyntheticAudioCapture` (tone source) + `SyntheticAudioEncoder` (PCM→bytes
     passthrough) exercise the seam in CI. **No new C dependency** yet (libopus lands with the real
     backend, behind its own license note).
-  - **Host pump + gate — NOW LANDED.** `HostSession::with_audio(capture, encoder, sink)` injects the
-    pipeline behind an `AudioSink` egress seam; after authorization the host starts an audio pump thread
-    (mirroring the video media thread) **iff the grant carries `audio.listen`** — the Inv-15 host-side
-    audio gate. The pump captures→encodes→`send_audio`, re-checks the stop flag between encode and send
-    (Inv 4), and is joined on teardown. Loopback-tested with the synthetic backends: **streams when
-    `audio.listen` is granted; silent when withheld** even with backends wired. The real Opus codec is
-    already available (`ras-audio-opus`, ADR-080).
+  - **Host pump + gate — LANDED.** `HostSession::with_audio(capture, encoder)` injects the pipeline;
+    after authorization the host starts an audio pump thread (mirroring the video media thread) **iff the
+    grant carries `audio.listen`** — the Inv-15 host-side audio gate — and the transport carries an audio
+    plane. The pump captures→encodes→`send_audio`, re-checks the stop flag between encode and send
+    (Inv 4), and is joined on teardown.
+  - **Transport plane + controller ingest — NOW LANDED.** The egress `AudioSink` is fetched from the
+    **transport** (`SessionTransport::audio_sink()`), symmetric to the video plane — the transport owns
+    the wire path, the host owns the *right* to be heard (the gate precedes the fetch). Mirror seams:
+    `audio_source()` (controller ingress, `AudioSourceDyn`) and an `AudioOutput` sink the controller
+    attaches via `ControllerSession::attach_audio_output` (where received Opus packets go — a WebCodecs
+    `AudioDecoder` in the app, a recorder in tests). `SessionTransport::audio_sink`/`audio_source`
+    **default to "unsupported"** (a transport without an audio plane simply stays silent), so the
+    `IrohSessionTransport` is unchanged — the iroh audio sub-stream is a documented follow-up. The
+    in-memory loopback overrides both, giving a **true end-to-end** host→controller audio path in tests.
+    The real Opus codec is already available (`ras-audio-opus`, ADR-080).
   - **Deferred (OS/on-device):** OS output-audio capture (macOS ScreenCaptureKit audio / CoreAudio tap,
-    Windows WASAPI loopback, Linux PipeWire), the audio transport plane (its own QUIC stream or
-    datagrams, A/V-sync'd by `captured_at_us`) + the `AudioSink`/source wiring into `SessionTransport`,
-    `AudioConfig` wire negotiation, the "AUDIO SHARED" indicator, and JS `AudioDecoder`→`AudioContext`
-    playback.
+    Windows WASAPI loopback, Linux PipeWire), the **iroh** audio sub-stream implementing
+    `audio_sink`/`audio_source` (A/V-sync'd by `captured_at_us`), `AudioConfig` wire negotiation, the
+    "AUDIO SHARED" indicator, and JS `AudioDecoder`→`AudioContext` playback.
   - **Verify:** the audio types + `frame_samples` math, the synthetic capture→encode round-trip, the
-    `audio.listen` recognized-but-withheld/default-OFF test, **and the two host-pump loopback tests
-    (granted → streams, withheld → silent)** are green. Real capture→network→play is the on-device row.
+    `audio.listen` recognized-but-withheld/default-OFF test, **and the two loopback tests — end-to-end
+    through the transport audio plane: the controller's `AudioOutput` receives packets when
+    `audio.listen` is granted, and nothing when withheld** (Inv 15) — are green. Real
+    capture→network→play is the on-device row.
 
 - **ADR-078 · Signed auto-update via Tauri's Ed25519 updater — the free integrity layer, distinct from
   paid OS code-signing · Accepted** (complements ADR-072; `docs/20 §2.4`). An unsigned update channel

@@ -13,11 +13,11 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, watch};
 
 use crate::deps::{
-    ControlChannelDyn, DialTarget, FrameSink, PeerIdentity, PushResult, SessionTransport,
-    VideoSinkDyn, VideoSourceDyn,
+    AudioSink, AudioSourceDyn, ControlChannelDyn, DialTarget, FrameSink, PeerIdentity, PushResult,
+    SessionTransport, VideoSinkDyn, VideoSourceDyn,
 };
 use crate::CoreError;
-use ras_media::{EncodedFrame, StreamConfig};
+use ras_media::{EncodedAudio, EncodedFrame, StreamConfig};
 use ras_protocol::{ControlMsg, ErrorCode};
 use ras_transport_iroh::{ConnHealth, EndpointId, LinkState, PathKind, SendOutcome, VideoEvent};
 
@@ -136,6 +136,51 @@ impl VideoSourceDyn for LoopbackSource {
     }
 }
 
+/// Host-side audio egress double: pushes encoded packets into the host→controller audio channel.
+/// Non-blocking, drop-on-full (audio is droppable like video).
+struct LoopbackAudioSink {
+    tx: mpsc::Sender<EncodedAudio>,
+    cut: watch::Receiver<bool>,
+}
+
+impl AudioSink for LoopbackAudioSink {
+    fn send_audio(&self, packet: EncodedAudio) {
+        if *self.cut.borrow() {
+            return; // link severed — nothing to send onto
+        }
+        let _ = self.tx.try_send(packet); // drop-on-full / closed; loss is not an error
+    }
+}
+
+/// Controller-side audio ingress double: yields packets from the host→controller audio channel.
+struct LoopbackAudioSource {
+    rx: mpsc::Receiver<EncodedAudio>,
+    cut: watch::Receiver<bool>,
+}
+
+fn audio_closed() -> CoreError {
+    CoreError::fatal(ErrorCode::TransportError, "loopback audio closed")
+}
+
+#[async_trait]
+impl AudioSourceDyn for LoopbackAudioSource {
+    async fn next(&mut self) -> Result<EncodedAudio, CoreError> {
+        if *self.cut.borrow() {
+            return Err(severed());
+        }
+        loop {
+            tokio::select! {
+                verdict = poll_cut(&mut self.cut) => match verdict {
+                    CutPoll::Cut => return Err(severed()),
+                    CutPoll::Continue => continue,
+                    CutPoll::SenderGone => return self.rx.recv().await.ok_or_else(audio_closed),
+                },
+                pkt = self.rx.recv() => return pkt.ok_or_else(audio_closed),
+            }
+        }
+    }
+}
+
 /// One end of an in-memory session. Build a wired pair with [`loopback_pair`] (or
 /// [`loopback_pair_with_faults`] to also get a fault handle).
 pub struct LoopbackTransport {
@@ -143,6 +188,8 @@ pub struct LoopbackTransport {
     control: Mutex<Option<LoopbackControl>>,
     video_sink: Mutex<Option<mpsc::Sender<VideoEvent>>>,
     video_source: Mutex<Option<mpsc::Receiver<VideoEvent>>>,
+    audio_sink: Mutex<Option<mpsc::Sender<EncodedAudio>>>,
+    audio_source: Mutex<Option<mpsc::Receiver<EncodedAudio>>>,
     /// Shared severed-link flag, cloned into every sink/source this transport hands out.
     cut: watch::Receiver<bool>,
     /// Keeps the cut `Sender` alive for a plain [`loopback_pair`] (so `changed()` never reports the
@@ -207,6 +254,48 @@ impl SessionTransport for LoopbackTransport {
         }
     }
 
+    async fn audio_sink(&self) -> Result<Box<dyn AudioSink>, CoreError> {
+        match self.role {
+            Role::Host => self
+                .audio_sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .map(|tx| {
+                    Box::new(LoopbackAudioSink {
+                        tx,
+                        cut: self.cut.clone(),
+                    }) as Box<dyn AudioSink>
+                })
+                .ok_or_else(|| CoreError::fatal(ErrorCode::Internal, "audio sink already taken")),
+            Role::Controller => Err(CoreError::fatal(
+                ErrorCode::Internal,
+                "controller has no audio sink",
+            )),
+        }
+    }
+
+    async fn audio_source(&self) -> Result<Box<dyn AudioSourceDyn>, CoreError> {
+        match self.role {
+            Role::Controller => self
+                .audio_source
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .map(|rx| {
+                    Box::new(LoopbackAudioSource {
+                        rx,
+                        cut: self.cut.clone(),
+                    }) as Box<dyn AudioSourceDyn>
+                })
+                .ok_or_else(|| CoreError::fatal(ErrorCode::Internal, "audio source already taken")),
+            Role::Host => Err(CoreError::fatal(
+                ErrorCode::Internal,
+                "host has no audio source",
+            )),
+        }
+    }
+
     fn health(&self) -> ConnHealth {
         ConnHealth {
             path: PathKind::Direct,
@@ -258,6 +347,7 @@ fn build_pair(
     let (h2c_tx, h2c_rx) = mpsc::channel(64); // host → controller control
     let (c2h_tx, c2h_rx) = mpsc::channel(64); // controller → host control
     let (vid_tx, vid_rx) = mpsc::channel(8); // host → controller video (bounded, droppable)
+    let (aud_tx, aud_rx) = mpsc::channel(16); // host → controller audio (bounded, droppable)
 
     let host = LoopbackTransport {
         role: Role::Host,
@@ -268,6 +358,8 @@ fn build_pair(
         })),
         video_sink: Mutex::new(Some(vid_tx.clone())),
         video_source: Mutex::new(None),
+        audio_sink: Mutex::new(Some(aud_tx)),
+        audio_source: Mutex::new(None),
         cut: cut_rx.clone(),
         _cut_keepalive: keepalive,
     };
@@ -280,6 +372,8 @@ fn build_pair(
         })),
         video_sink: Mutex::new(None),
         video_source: Mutex::new(Some(vid_rx)),
+        audio_sink: Mutex::new(None),
+        audio_source: Mutex::new(Some(aud_rx)),
         cut: cut_rx,
         _cut_keepalive: None,
     };

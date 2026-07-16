@@ -19,8 +19,8 @@ use tokio::sync::mpsc;
 
 use crate::abr::LatencyFirstAbr;
 use crate::deps::{
-    ControlChannelDyn, ControlConsent, DenyAllControl, DialTarget, FrameSink, GrantValidator,
-    SessionAuthContext, SessionTransport,
+    AudioOutput, ControlChannelDyn, ControlConsent, DenyAllControl, DialTarget, FrameSink,
+    GrantValidator, SessionAuthContext, SessionTransport,
 };
 use crate::event::{
     LifecycleEvent, LifecycleSink, LifecycleStream, QualitySample, SessionId, StopReason,
@@ -246,11 +246,11 @@ struct HostInner<C, E> {
     audio_task: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
-/// The host's audio capture + encoder + egress sink, moved into the audio pump thread when it starts.
+/// The host's audio capture + encoder, moved into the audio pump thread when it starts. The egress
+/// sink comes from the transport (`audio_sink()`), like video — the transport owns the wire path.
 struct AudioBackends {
     capture: Box<dyn AudioCaptureBackend>,
     encoder: Box<dyn AudioEncoderBackend>,
-    sink: Arc<dyn crate::deps::AudioSink>,
 }
 
 /// Host-side view-only session. Owns capture+encode+transmit on their own thread.
@@ -329,25 +329,21 @@ where
         self
     }
 
-    /// Inject the audio pipeline (ADR-077): output-audio `capture` + `encoder` + egress `sink`. The
-    /// pump only runs if the session grant carries `audio.listen` (Inv 15) — otherwise no audio is
-    /// captured or sent. Additive; call before [`Self::start`].
+    /// Inject the audio pipeline (ADR-077): output-audio `capture` + `encoder`. The pump only runs if
+    /// the session grant carries `audio.listen` (Inv 15) **and** the transport provides an audio sink
+    /// (`audio_sink()`); otherwise no audio is captured or sent. Additive; call before [`Self::start`].
     #[must_use]
     pub fn with_audio(
         self,
         capture: Box<dyn AudioCaptureBackend>,
         encoder: Box<dyn AudioEncoderBackend>,
-        sink: Arc<dyn crate::deps::AudioSink>,
     ) -> Self {
         *self
             .inner
             .audio
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(AudioBackends {
-            capture,
-            encoder,
-            sink,
-        });
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(AudioBackends { capture, encoder });
         self
     }
 
@@ -548,10 +544,19 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
 
         // Audio pump (ADR-077): host→controller output audio, gated on `audio.listen` (Inv 15 — the
-        // host streams sound only if the grant permits it). Starts only if audio backends are wired
-        // AND the capability is granted; otherwise the session is silent. Runs on its own thread,
-        // stopped by the shared `stop` flag and joined on teardown.
-        maybe_start_audio(inner);
+        // host streams sound only if the grant permits it). Starts only if audio backends are wired,
+        // the capability is granted, AND the transport carries an audio plane; otherwise the session
+        // is silent. Runs on its own thread, stopped by the shared `stop` flag and joined on teardown.
+        let audio_allowed = inner
+            .granted_caps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(AUDIO_LISTEN);
+        if audio_allowed {
+            if let Ok(audio_sink) = inner.transport.audio_sink().await {
+                maybe_start_audio(inner, audio_sink);
+            }
+        }
 
         // Control reader: turns inbound KeyframeRequest into a forced IDR; Bye stops the session.
         // The `bye` channel lets a local teardown (graceful or emergency) flush a final Bye out the
@@ -787,18 +792,10 @@ fn default_audio_config() -> AudioConfig {
     }
 }
 
-/// Start the audio pump iff the grant carries `audio.listen` (Inv 15) and audio backends are wired.
-/// Consumes the injected backends (moves them into the thread). Silent otherwise — no capture, no
-/// stream. The thread stops on the shared `stop` flag and is joined on teardown.
-fn maybe_start_audio<C, E>(inner: &HostInner<C, E>) {
-    let allowed = inner
-        .granted_caps
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(AUDIO_LISTEN);
-    if !allowed {
-        return;
-    }
+/// Start the audio pump given the transport's egress `sink` (the caller has already checked the
+/// `audio.listen` gate, Inv 15). Consumes the injected backends (moves them into the thread). No-op if
+/// no audio backends are wired. The thread stops on the shared `stop` flag and is joined on teardown.
+fn maybe_start_audio<C, E>(inner: &HostInner<C, E>, sink: Box<dyn crate::deps::AudioSink>) {
     let backends = inner
         .audio
         .lock()
@@ -807,7 +804,6 @@ fn maybe_start_audio<C, E>(inner: &HostInner<C, E>) {
     let Some(AudioBackends {
         mut capture,
         mut encoder,
-        sink,
     }) = backends
     else {
         return;
@@ -1302,6 +1298,9 @@ struct ControllerInner {
     stop: AtomicBool,
     lifecycle: Mutex<Option<LifecycleSink>>,
     renderer: Mutex<Option<Arc<dyn FrameSink>>>,
+    /// Where inbound audio packets go (ADR-077). Attached like the renderer; absent → audio is
+    /// dropped at the ingest boundary (a stalled/absent output never blocks control or video).
+    audio_output: Mutex<Option<Arc<dyn AudioOutput>>>,
     stream_config: Mutex<Option<StreamConfig>>,
     command_tx: Mutex<Option<mpsc::Sender<ControlCommand>>>,
     /// Highest frame id delivered to the renderer (reported back as `last_decoded_frame`).
@@ -1334,6 +1333,7 @@ impl ControllerSession {
                 stop: AtomicBool::new(false),
                 lifecycle: Mutex::new(None),
                 renderer: Mutex::new(None),
+                audio_output: Mutex::new(None),
                 stream_config: Mutex::new(None),
                 command_tx: Mutex::new(None),
                 last_decoded_frame: AtomicU64::new(0),
@@ -1436,6 +1436,11 @@ impl ControllerSession {
         let fb_inner = inner.clone();
         let fb_task = tokio::spawn(async move { controller_feedback_loop(&fb_inner).await });
 
+        // Audio ingest task (ADR-077): pulls encoded audio packets and pushes to whatever output is
+        // attached; drops otherwise. Returns immediately on transports without an audio plane.
+        let aud_inner = inner.clone();
+        let aud_task = tokio::spawn(async move { controller_audio_loop(&aud_inner).await });
+
         let mut tasks = inner
             .tasks
             .lock()
@@ -1443,6 +1448,7 @@ impl ControllerSession {
         tasks.push(ctrl_task);
         tasks.push(vid_task);
         tasks.push(fb_task);
+        tasks.push(aud_task);
 
         Ok(rx)
     }
@@ -1474,6 +1480,26 @@ impl ControllerSession {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         Ok(())
+    }
+
+    /// Attach/replace the audio output (ADR-077). Decoupled from `connect` like the renderer, so audio
+    /// can flow (and be dropped) before playback exists. No keyframe concept — Opus packets are each
+    /// independently decodable, so a freshly attached output plays from the next packet.
+    pub fn attach_audio_output(&self, output: Arc<dyn AudioOutput>) {
+        *self
+            .inner
+            .audio_output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(output);
+    }
+
+    /// Detach the audio output; ingest continues and drops packets at the boundary.
+    pub fn detach_audio_output(&self) {
+        *self
+            .inner
+            .audio_output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Ask the host for a fresh IDR (PLI-style) over the reliable control channel. Never blocks
@@ -1790,6 +1816,31 @@ async fn controller_video_loop(inner: &ControllerInner) {
                             .send(ControlCommand::Keyframe(KeyframeReason::UnrecoverableLoss))
                             .await;
                     }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// Pull inbound audio packets and hand them to the attached output (ADR-077). Mirrors the video loop:
+/// a terminal transport error ends the loop; an absent output drops the packet. Returns immediately on
+/// transports without an audio plane (`audio_source()` reports unsupported).
+async fn controller_audio_loop(inner: &ControllerInner) {
+    let mut source = match inner.transport.audio_source().await {
+        Ok(s) => s,
+        Err(_) => return, // no audio plane on this transport — silent, by design
+    };
+    while !inner.stop.load(Ordering::Relaxed) {
+        match source.next().await {
+            Ok(packet) => {
+                if let Some(out) = inner
+                    .audio_output
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                {
+                    out.push(packet);
                 }
             }
             Err(_) => break,

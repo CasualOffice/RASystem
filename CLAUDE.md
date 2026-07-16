@@ -312,12 +312,19 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     buffering + live `set_bitrate`), verified by a real **encode→decode roundtrip** (a tone survives) —
     not the RustDesk `magnum-opus` fork; `.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5`
     (the cmake-4 fix for the vendored libopus build). The **host pump + gate landed too**:
-    `HostSession::with_audio(capture, encoder, sink)` behind an `AudioSink` egress seam starts an audio
-    pump thread (mirrors the video media thread) **iff the grant carries `audio.listen`** (the Inv-15
-    host-side audio gate), re-checks stop between encode/send (Inv 4), joined on teardown; loopback-
-    tested — **streams when granted, silent when withheld**. Deferred (OS/on-device): OS capture
-    (SCK-audio / WASAPI-loopback / PipeWire), the audio QUIC sub-stream + `AudioSink`/source into
-    `SessionTransport` + `AudioConfig` negotiation, "AUDIO SHARED" indicator, JS
+    `HostSession::with_audio(capture, encoder)` starts an audio pump thread (mirrors the video media
+    thread) **iff the grant carries `audio.listen`** (the Inv-15 host-side audio gate) **and** the
+    transport carries an audio plane, re-checks stop between encode/send (Inv 4), joined on teardown.
+    The **transport plane + controller ingest landed too**: the egress `AudioSink` is fetched from the
+    transport (`SessionTransport::audio_sink()`, symmetric to video — the transport owns the wire, the
+    host owns the *right* to be heard, gate before fetch); the mirror `audio_source()` (`AudioSourceDyn`)
+    + an `AudioOutput` the controller attaches (`ControllerSession::attach_audio_output`) complete the
+    path. Both transport methods **default to "unsupported"** so `IrohSessionTransport` is unchanged (the
+    iroh audio sub-stream is the remaining wire follow-up); the in-memory loopback overrides both, giving
+    a **true end-to-end** host→controller audio test — the controller's `AudioOutput` receives packets
+    when `audio.listen` is granted, **nothing when withheld** (Inv 15). Deferred (OS/on-device): OS
+    capture (SCK-audio / WASAPI-loopback / PipeWire), the **iroh** audio sub-stream implementing
+    `audio_sink`/`audio_source` + `AudioConfig` negotiation, "AUDIO SHARED" indicator, JS
     `AudioDecoder`→`AudioContext` playback.
   - Still stubbed / deferred (`todo!()` or additive): iroh **reset-on-stale + FEC** and the
     `DatagramFec` video alternative (behind `StreamConfig::video_transport`),

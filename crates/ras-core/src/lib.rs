@@ -39,8 +39,9 @@ pub use abr::LatencyFirstAbr;
 #[cfg(feature = "insecure-no-auth")]
 pub use deps::AllowAllValidator;
 pub use deps::{
-    AudioSink, ControlChannelDyn, ControlConsent, FrameSink, GrantDecision, GrantSessionValidator,
-    GrantValidator, PushResult, SessionAuthContext, SessionTransport, VideoSinkDyn, VideoSourceDyn,
+    AudioOutput, AudioSink, AudioSourceDyn, ControlChannelDyn, ControlConsent, FrameSink,
+    GrantDecision, GrantSessionValidator, GrantValidator, PushResult, SessionAuthContext,
+    SessionTransport, VideoSinkDyn, VideoSourceDyn,
 };
 pub use event::{
     LifecycleEvent, LifecycleStream, QualitySample, SessionId, StopReason, StreamDescriptor,
@@ -458,8 +459,8 @@ mod e2e {
     use crate::deps::AllowAllValidator;
     use crate::testkit::{loopback_pair, loopback_pair_with_faults, CountingFrameSink};
     use crate::{
-        AudioSink, ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig,
-        LifecycleEvent, LifecycleStream, SessionState, StopReason,
+        ControllerSession, ControllerSessionConfig, HostSession, HostSessionConfig, LifecycleEvent,
+        LifecycleStream, SessionState, StopReason,
     };
     use ras_media::synthetic::{
         SyntheticAudioCapture, SyntheticAudioEncoder, SyntheticCaptureBackend, SyntheticEncoder,
@@ -962,12 +963,14 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
-    // ── Audio pump (ADR-077) ────────────────────────────────────────────────────────────────────
+    // ── Audio plane, host→controller (ADR-077) ──────────────────────────────────────────────────
+    /// Controller-side [`AudioOutput`] that tallies packets delivered through the transport — proves a
+    /// true end-to-end host→controller flow, not just a host-local send.
     struct RecordingAudio {
         count: std::sync::atomic::AtomicU64,
     }
-    impl AudioSink for RecordingAudio {
-        fn send_audio(&self, _packet: ras_media::EncodedAudio) {
+    impl crate::deps::AudioOutput for RecordingAudio {
+        fn push(&self, _packet: ras_media::EncodedAudio) {
             self.count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -994,16 +997,17 @@ mod e2e {
         .with_audio(
             Box::new(SyntheticAudioCapture::new()),
             Box::new(SyntheticAudioEncoder::new()),
-            rec.clone(),
         );
         let controller = ControllerSession::new(
             ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
             ctrl_tp,
         );
+        controller.attach_audio_output(rec.clone());
         (rec, host, controller)
     }
 
-    /// With `audio.listen` granted, the host audio pump captures→encodes→sends to the egress sink.
+    /// With `audio.listen` granted, the host audio pump captures→encodes→sends through the transport
+    /// audio plane and the controller's output receives the packets (end-to-end).
     #[tokio::test]
     async fn audio_streams_when_audio_listen_is_granted() {
         let (rec, host, controller) = audio_host(&["screen.view", ras_policy::AUDIO_LISTEN]);
@@ -1018,15 +1022,15 @@ mod e2e {
                 500
             )
             .await,
-            "audio packets should reach the egress sink when audio.listen is granted"
+            "audio packets should reach the controller output when audio.listen is granted"
         );
 
         controller.disconnect(StopReason::UserRequested).await;
         host.stop(StopReason::UserRequested).await;
     }
 
-    /// Without `audio.listen`, the pump never starts (Inv 15) — the session is silent even though the
-    /// audio backends are wired.
+    /// Without `audio.listen`, the pump never starts (Inv 15) — the controller receives nothing even
+    /// though the audio backends and transport plane are both wired.
     #[tokio::test]
     async fn audio_is_silent_when_audio_listen_is_withheld() {
         let (rec, host, controller) = audio_host(&["screen.view"]); // no audio.listen
