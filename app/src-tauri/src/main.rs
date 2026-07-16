@@ -929,6 +929,48 @@ async fn serve_one(
 
 // ─── Entrypoint ──────────────────────────────────────────────────────────────────────────────────
 
+// ─── Signed auto-update (ADR-078) ─────────────────────────────────────────────────────────────────
+// The updater verifies each downloaded artifact against the embedded Ed25519 (minisign) public key
+// before applying (Inv-spirit: the machine only runs code the publisher signed). Updates are
+// **user-initiated** here — no silent background replacement — and applied only on explicit consent,
+// consistent with "the local user is the final owner of the machine" (Inv 1).
+
+/// Check the configured endpoint for a newer signed release. `Ok(Some(version))` if one is available,
+/// `Ok(None)` if up to date, `Err(msg)` if the updater is not configured / unreachable (surfaced to
+/// the user, never silently swallowed).
+#[tauri::command]
+async fn check_for_updates(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await {
+        Ok(Some(update)) => Ok(Some(update.version.clone())),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Download and apply the pending signed update, then relaunch. Only ever called after the local user
+/// explicitly consents in the UI. The download is signature-verified by the plugin; a bad signature
+/// aborts the install (no unsigned code is ever run).
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no update available".to_string())?;
+    // Signature is verified against the embedded pubkey inside download_and_install; on failure this
+    // returns Err and nothing is applied.
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    // Relaunch into the freshly-installed version. `restart` diverges (never returns).
+    app.restart();
+}
+
 fn main() {
     // WebKitGTK's DMABUF renderer crashes or paints white artifacts on many Linux
     // GPU/driver/compositor combinations — a well-known Tauri-on-Linux failure, and worse here
@@ -943,6 +985,11 @@ fn main() {
     // App entrypoint: a failed event loop is an unrecoverable startup fault, not a request path.
     #[allow(clippy::expect_used)]
     tauri::Builder::default()
+        // Signed auto-update (ADR-078). The plugin verifies each downloaded update against the
+        // embedded public key before applying; a bad/absent signature is refused. Registration is
+        // harmless when no key/endpoint is provisioned — `check_for_updates` just reports "not
+        // configured".
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             connect_to_host,
             disconnect,
@@ -959,6 +1006,8 @@ fn main() {
             stop_sharing,
             respond_consent,
             respond_control_consent,
+            check_for_updates,
+            install_update,
         ])
         .setup(|app| {
             let consent = Arc::new(LocalConsent::new(app.handle().clone()));

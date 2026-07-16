@@ -78,6 +78,13 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signed auto-update (ADR-078). These sign the update artifacts + `latest.json` with the
+          # project's Ed25519 (minisign) key. Harmless while the secrets are unset (no signing runs and
+          # `createUpdaterArtifacts` is off, so nothing errors). To activate signed updates: generate a
+          # key, add these two repo secrets, paste the public key into `tauri.conf.json`
+          # (`plugins.updater.pubkey`), and set `bundle.createUpdaterArtifacts: true` — see the runbook.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: app/src-tauri
           tagName: ${{ github.event.inputs.tag || github.ref_name }}

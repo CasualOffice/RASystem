@@ -249,8 +249,17 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     **builds ship UNSIGNED (no OS code-signing / notarization) — Gatekeeper/SmartScreen warn — and
     stay that way *until a GitHub sponsor (or equivalent) funds the certificates* (ADR-072).** This is
     only the *OS-vouches-for-the-installer* layer; the **free** Tauri Ed25519 **update-integrity**
-    signing is still adopted when auto-update lands (`docs/20 §2.4`), so unsigned ≠ unverified updates.
+    signing is a separate layer, now **wired (ADR-078)** — so unsigned-by-OS ≠ unverified updates.
     The controller `.app`/`.dmg` bundle was built and verified locally on macOS.
+  - **Signed auto-update wired (ADR-078), activated by a one-time key setup.** The Tauri updater plugin
+    is registered; two Rust commands (`check_for_updates`/`install_update`) drive a **user-initiated,
+    two-click** flow (check → explicit "Install & restart" — never silent, Inv 1); `updater:default`
+    capability + `plugins.updater` config (GitHub-releases `latest.json` endpoint) + CI signing env
+    (`TAURI_SIGNING_PRIVATE_KEY`/password secrets) are in place. Deliberately **inert until
+    provisioned**: `bundle.createUpdaterArtifacts` off + committed `pubkey` empty (so keyless CI stays
+    green and no throwaway key ships). Activation = generate key → paste pubkey → add secrets → flip the
+    flag (**runbook: `docs/design/auto-update-runbook.md`**). App `check`/`clippy` clean; the real
+    signature-verified download+install+relaunch is the on-device row.
   - **Cross-platform sharing implemented (ADR-063) — Share now targets macOS + Linux + Windows.** A
     shared **software encoder `ras-media-openh264`** (`VideoEncoderBackend`): CPU BGRA → I420 →
     Annex-B with in-band SPS/PPS on every IDR, forced-IDR-on-demand; permissive Cisco **BSD-2**

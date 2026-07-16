@@ -661,6 +661,32 @@
     (monotonic `seq`, gap-free, correct sample counts, stop-yields-none) are green; the `audio.listen`
     recognized-but-withheld/default-OFF test is green. Real capture/encode/playback is the on-device row.
 
+- **ADR-078 · Signed auto-update via Tauri's Ed25519 updater — the free integrity layer, distinct from
+  paid OS code-signing · Accepted** (complements ADR-072; `docs/20 §2.4`). An unsigned update channel
+  is a supply-chain hole: whoever controls the release host controls what every installed copy runs.
+  Tauri's updater verifies each artifact against an **embedded Ed25519 (minisign) public key** before
+  applying — a **free** protection we adopt now, orthogonal to the OS-vouches-for-the-installer layer
+  (Gatekeeper/SmartScreen) that stays deferred until a sponsor funds certs (ADR-072). *Unsigned by the
+  OS ≠ unverified updates* — the two layers are independent, and this ADR closes the integrity one.
+  - **Verify-before-apply, always.** The plugin refuses any artifact whose signature doesn't match the
+    embedded pubkey; a compromised release file cannot be installed. The private key lives **only** in
+    CI secrets (`TAURI_SIGNING_PRIVATE_KEY` + password) and the developer's keystore — **never in the
+    repo**.
+  - **User-initiated, never silent (Inv 1).** No background auto-replacement. Two Rust commands
+    (`check_for_updates`, `install_update`) drive a **two-click** UI: check → then an explicit "Install
+    & restart". The machine owner decides when code changes — fitting for a remote-access tool.
+  - **Scaffolded now, activated by a one-time key setup.** The plugin, commands, `updater:default`
+    capability, `plugins.updater` config (GitHub-releases `latest.json` endpoint), and the CI signing
+    env (wired to secrets) are all in place; `bundle.createUpdaterArtifacts` stays **off** and the
+    committed `pubkey` is an **empty placeholder**, so keyless CI stays green and no throwaway key ships.
+    Activation = generate a key, paste the pubkey, add two secrets, flip the flag (runbook:
+    `docs/design/auto-update-runbook.md`). Same posture as ADR-072's deferred OS signing.
+  - **Update integrity ≠ transport auth.** This signs *the software*; the session's identity/authority
+    model (grants, consent, per-message gate) is unchanged and unrelated.
+  - **Verify:** app `cargo check`/`clippy` clean (config parses at `generate_context!`, plugin +
+    commands compile); the signature-verified download + install + relaunch is the on-device row (needs
+    a provisioned key + a published `latest.json`).
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

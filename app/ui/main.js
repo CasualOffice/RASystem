@@ -38,6 +38,46 @@ document.querySelectorAll("[data-home]").forEach((b) =>
   }),
 );
 
+// ── Signed auto-update (ADR-078) ───────────────────────────────────────────────────────────────────
+// User-initiated, two-click: first click checks; if an update exists the button becomes "Install &
+// restart" so applying it is an explicit second choice (Inv 1 — the local user decides; nothing is
+// installed silently). The download is signature-verified in Rust against the embedded key.
+(function () {
+  const btn = document.getElementById("check-updates");
+  const status = document.getElementById("update-status");
+  if (!btn) return;
+  let pendingVersion = null;
+  btn.addEventListener("click", async () => {
+    if (pendingVersion) {
+      status.textContent = "Installing… the app will restart.";
+      btn.disabled = true;
+      try {
+        await invoke("install_update"); // app relaunches on success
+      } catch (e) {
+        status.textContent = "Install failed.";
+        btn.disabled = false;
+        console.warn("update install:", e);
+      }
+      return;
+    }
+    status.textContent = "Checking…";
+    try {
+      const version = await invoke("check_for_updates");
+      if (!version) {
+        status.textContent = "You're up to date.";
+        return;
+      }
+      pendingVersion = version;
+      status.textContent = `Version ${version} available.`;
+      btn.textContent = `Install ${version} & restart`;
+    } catch (e) {
+      // No key/endpoint provisioned yet, or the endpoint is unreachable — honest, not a crash.
+      status.textContent = "Update check unavailable.";
+      console.warn("update check:", e);
+    }
+  });
+})();
+
 // ── Video decode (Connect role) ──────────────────────────────────────────────────────────────────
 const HEADER_LEN = 24;
 const FRAME_MAGIC = 0x52415331; // "RAS1" big-endian — a frame blob
