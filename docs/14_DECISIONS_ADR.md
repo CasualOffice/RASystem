@@ -424,6 +424,37 @@
     `ControlGranted` signature; the wire and the `LeaseManager` logic are unchanged — only *where* the
     check runs moves.
 
+- **ADR-070 · Linux OS-input backend is a new `ras-input-linux` crate; X11 XTest (`x11rb`) first, with
+  `uinput` + libei as additive follow-ups · Accepted** (implements ADR-054 cross-platform intent;
+  mirrors ADR-068's macOS split; grounded in `docs/19`). A new backend crate fills the same
+  `ras-control::OsInputSink` seam behind the same host-authoritative gate (ADR-069); it is empty on
+  non-Linux so macOS/Windows CI stays green.
+  - **X11 XTest via `x11rb` (MIT/Apache-2.0), and it is `unsafe`-free.** Unlike `ras-input-macos`
+    (CGEvent FFI), `x11rb` is a **pure-Rust** X11 protocol client — no C bindings, no `unsafe`. So this
+    crate keeps the workspace default `unsafe_code = "deny"` (it does *not* relax it as ADR-068 did).
+    Injection is `XTEST` `fake_input` (motion/button/key press+release) against the root window;
+    normalized coords map to global pixels **host-side after authorization** (Inv 6), reusing the
+    macOS backend's `set_display_bounds` capture-geometry seam.
+  - **Deliberately unprivileged (ADR-055).** The X11 path connects to `$DISPLAY` as the logged-in user
+    — no root, no `/dev/uinput`. Consequence, surfaced honestly: it works only inside an **X11 (or
+    Xwayland) session**; on a pure-Wayland compositor XTest reaches only Xwayland clients, not the
+    Wayland desktop. Fail-closed: no reachable X server ⇒ `input_permitted()` is `false` and the host
+    **refuses the lease** (never a silent no-op) — same contract as the macOS PostEvent preflight.
+  - **Keyboard = USB-HID usage → Linux evdev keycode (`+8` = X keycode).** A closed HID→evdev table
+    (Inv 6), never a keysym. The X11 modifier model has no per-event flag, so the backend **reconciles
+    a held-modifier set** (fake press/release of the modifier keycodes) to match each event's modifier
+    bitset, and tracks pressed keys/buttons/modifiers for an exact `release_all` (Inv 4). `TextInput`
+    (the separate `keyboard.text` cap, withheld by `phase3_default_policy`) needs server keymap
+    remapping and is **not supported on X11 v1** — it fails closed rather than mis-typing.
+  - **Follow-ups, additive behind the trait (`docs/19 §3`):** a **`uinput` privileged-helper** backend
+    (X11/Wayland-agnostic, needs a udev `uaccess` rule — the S4 privileged-input-helper boundary) for
+    robustness + unattended, and the **`ashpd` `RemoteDesktop` + `reis` libei** consented-Wayland path
+    (both MIT; `reis` is pre-1.0 — pin exact). None link GPL/FFmpeg (Inv 18).
+  - **Verification honesty:** the crate **cross-compile-*checks* for `x86_64-unknown-linux-gnu` from the
+    macOS dev machine** (pure-Rust deps, no cross-linker needed) and its pure-logic tables are
+    unit-tested; the live XTest injection is an **on-device step on the developer's Linux machine**
+    (an X11/Xwayland session), the Linux analogue of the macOS on-device row (`docs/19 §7`).
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

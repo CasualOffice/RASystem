@@ -105,11 +105,22 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     and surfaces a "REMOTE CONTROL ACTIVE" indicator; Connect has a "Take control" button + forwards
     the viewer's pointer/keyboard/wheel as `Input` (normalized to the video rect, JS→USB-HID map,
     monotonic seq) when it holds the lease. App `check`/`clippy`/`fmt` clean.
-  macOS is the lead input platform (ADR-054/055). **Still pending:** the **on-device** GUI run of the
-  real CGEvent injection + PostEvent-TCC prompt + Secure-Input drop (same constraint as every prior
-  macOS backend); a macOS **global-hotkey** emergency stop (baseline stop is the always-visible Stop
-  button, which already drives `revoke_all` + `release_all`; no kernel SAS on macOS — SAS stays the
-  Windows path); and the **Windows** input backend (parallel port of `ras-input-macos`).
+  macOS is the lead input platform (ADR-054/055). A **Linux X11 input backend has landed**
+  (`ras-input-linux`, **ADR-070**): a second `OsInputSink` over the X11 **XTEST** extension via the
+  **pure-Rust `x11rb`** (so it is `unsafe`-free, unlike the CGEvent crate), deliberately unprivileged
+  (connects to `$DISPLAY` as the user — X11/Xwayland only, no root/uinput, fail-closed when no X server
+  so the host refuses the lease), HID→evdev(+8) keycode map, held-modifier reconciliation (X11 has no
+  per-event flag), tracked-key best-effort `release_all` (Inv 4), and the same normalized→pixel
+  geometry seam. Empty off-Linux; **cross-compile-checked + clippy-clean for `x86_64-unknown-linux-gnu`
+  from the macOS dev machine** and unit-tested (HID table, coord clamp, non-finite guard); its x11rb
+  tree passes `cargo-deny` (Inv 18). **Still pending:** the **on-device** GUI run of the real CGEvent
+  injection + PostEvent-TCC prompt + Secure-Input drop (same constraint as every prior macOS backend)
+  and the analogous **Linux on-device** XTEST run (a real X11/Xwayland session); app wiring of the
+  Linux sink into Share's `make_backends`; a macOS **global-hotkey** emergency stop (baseline stop is
+  the always-visible Stop button, which already drives `revoke_all` + `release_all`; no kernel SAS on
+  macOS — SAS stays the Windows path); the Linux **`uinput`/libei** follow-up backends (docs/19 §3);
+  and the **Windows** input backend (parallel port of `ras-input-macos`, `windows-rs SendInput`, no
+  UIAccess — docs/19 §4).
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.
