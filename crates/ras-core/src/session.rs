@@ -918,6 +918,12 @@ async fn host_handle_control_request<C, E>(
     if consented.is_empty() {
         return Err(ErrorCode::ConsentDenied);
     }
+    // Re-check after the (possibly long, up to 90 s) consent await: an emergency stop or teardown that
+    // landed *during* the prompt must abort issuance, or `issue` would resurrect a lease (bump the
+    // generation + install an active lease) after `revoke_all` had already cleared it (Inv 4).
+    if inner.stop.load(Ordering::SeqCst) {
+        return Err(ErrorCode::SessionRevoked);
+    }
     let holder = *inner
         .peer_endpoint
         .lock()
