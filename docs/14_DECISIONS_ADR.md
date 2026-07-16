@@ -776,6 +776,12 @@
     C-based `ras-media-openh264` (nasm) already in the workspace.
   - **License:** `audiopus`/`audiopus_sys` are **ISC** (already allowed); vendored libopus is **BSD-3**
     (Xiph) — no new `cargo-deny` allowance needed.
+  - **Maintenance caveat (RUSTSEC-2026-0150, added later).** `audiopus_sys` is flagged **unmaintained**
+    (informational, not a CVE); 0.2.2 is the latest, so no upgrade exists. Its only concrete concern —
+    a pre-3.5 CMake policy CMake 4.0 rejects — is **already** mitigated by our
+    `CMAKE_POLICY_VERSION_MINIMUM=3.5` above, so libopus builds cleanly. Ignored as a single named
+    exception in `deny.toml` (like `paste` RUSTSEC-2024-0436); **follow-up:** evaluate a maintained Opus
+    binding once one that vendors cleanly exists. (Real vulnerabilities + yanked crates still fail CI.)
   - **Not yet wired.** Like the audio seam itself, this codec is unconnected until the audio pump lands
     (transport sub-stream + OS capture + `ras-core` pump + `audio.listen` gate + JS playback, ADR-077).
   - **Verify:** builds + roundtrip/bitrate/buffering/error tests green **natively on macOS** (and in the

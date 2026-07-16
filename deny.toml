@@ -36,11 +36,19 @@ exceptions = [
 confidence-threshold = 0.9
 
 [advisories]
-# `paste` is flagged *unmaintained* (RUSTSEC-2024-0436) — an advisory, not a vulnerability. It is a
-# stable, ubiquitous proc-macro helper pulled transitively by iroh (CLAUDE §6); there is no drop-in
-# replacement and it carries no known security issue. Real vulnerability + yanked advisories still
-# fail the build (this ignore is a single, named exception).
-ignore = ["RUSTSEC-2024-0436"]
+# Each entry is *unmaintained* (informational), NOT a vulnerability. Real vulnerability + yanked
+# advisories still fail the build — these are single, named, justified exceptions.
+#
+# - RUSTSEC-2024-0436 `paste`: a stable, ubiquitous proc-macro helper pulled transitively by iroh
+#   (CLAUDE §6); no drop-in replacement, no known security issue.
+# - RUSTSEC-2026-0150 `audiopus_sys`: the thin FFI `-sys` wrapper under `audiopus` (our Opus codec,
+#   ADR-080) is unmaintained, and 0.2.2 is the latest — no safe upgrade exists. The advisory's *only*
+#   concrete concern is that it references a pre-3.5 CMake policy that CMake 4.0 rejects; we **already
+#   mitigate** that at the build level (`.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5`,
+#   ADR-080), so the vendored libopus (BSD-3, Xiph — permissive, Inv 18) still builds cleanly on every
+#   CI runner. No CVE, no exploitable surface (encode/decode of our own audio). Follow-up: evaluate a
+#   maintained Opus binding (e.g. a `libopus`/`opus` wrapper) once one that vendors cleanly exists.
+ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2026-0150"]
 
 [bans]
 multiple-versions = "warn"
