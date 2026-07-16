@@ -221,6 +221,9 @@ struct HostInner<C, E> {
     /// to the controller (it owns the control channel). Best-effort — a wedged peer must never
     /// delay the local teardown.
     bye_tx: Mutex<Option<mpsc::Sender<ErrorCode>>>,
+    /// Set in `start()`. Proactive host→controller `ControlMsg`s (cursor shapes, chat) that the control
+    /// loop forwards over the wire it owns. Fed by the cursor task and [`HostSession::send_chat`].
+    outbound_tx: Mutex<Option<mpsc::Sender<ControlMsg>>>,
     /// Phase-3 OS-input backend (`ras-input-macos` in the app). `None` ⇒ this host cannot inject, so a
     /// control request is refused. Injected via [`HostSession::with_input_sink`].
     input_sink: Mutex<Option<Arc<dyn OsInputSink>>>,
@@ -299,6 +302,7 @@ where
                 control_task: Mutex::new(None),
                 stats_task: Mutex::new(None),
                 bye_tx: Mutex::new(None),
+                outbound_tx: Mutex::new(None),
                 input_sink: Mutex::new(None),
                 control_consent: Mutex::new(Arc::new(DenyAllControl)),
                 lease: Mutex::new(None),
@@ -603,16 +607,21 @@ where
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bye_tx);
 
-        // Cursor-shape channel (ADR-073): if an observer is wired, spawn a task that watches the OS
-        // cursor and pushes ready-to-send `ControlMsg`s (fresh shape or a cache reference) into this
-        // bounded channel; the control loop owns the wire and forwards them. Silent (no task) if no
-        // observer. Bounded + drop-oldest at the source: the cursor is advisory display data and must
-        // never backpressure control. `None` receiver when no observer, so the loop's branch is inert.
-        let cursor_rx = maybe_start_cursor(inner);
+        // Host outbound-control channel: proactive host→controller `ControlMsg`s that the control loop
+        // (which owns the wire) forwards. Fed by the cursor task (ADR-073) and by `send_chat` (ADR-082).
+        // Bounded + drop-newest at the source: these are advisory and must never backpressure control.
+        let (outbound_tx, outbound_rx) = mpsc::channel::<ControlMsg>(OUTBOUND_QUEUE_DEPTH);
+        *inner
+            .outbound_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outbound_tx.clone());
+        // Cursor-shape task (ADR-073): if an observer is wired, watch the OS cursor and push ready
+        // `ControlMsg`s (fresh shape / cache reference) into the outbound channel. Silent if no observer.
+        maybe_start_cursor(inner, outbound_tx);
 
         let ctrl_inner = inner.clone();
         let task = tokio::spawn(async move {
-            host_control_loop(&mut control, &ctrl_inner, bye_rx, cursor_rx).await;
+            host_control_loop(&mut control, &ctrl_inner, bye_rx, outbound_rx).await;
         });
         *inner
             .control_task
@@ -760,6 +769,27 @@ where
         }
         join_audio(inner);
         abort_cursor(inner);
+    }
+
+    /// Send an in-session chat message to the connected controller (ADR-082). Base session comms (no
+    /// capability). The text is a secret and is never logged (Inv 8); an oversized message
+    /// (> `MAX_CHAT_BYTES`) is dropped rather than sent. Best-effort — no-op before `start` / after
+    /// teardown, or if the advisory outbound queue is full.
+    pub fn send_chat(&self, text: String) {
+        if text.len() > ras_protocol::MAX_CHAT_BYTES {
+            return;
+        }
+        let tx = self
+            .inner
+            .outbound_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(ControlMsg::ChatMessage {
+                text: ras_protocol::Redacted(text),
+            });
+        }
     }
 }
 
@@ -992,9 +1022,9 @@ async fn host_stats_loop<C, E>(inner: &HostInner<C, E>, config: StreamConfig) {
     }
 }
 
-/// Bounded depth of the host cursor→control channel. A little slack absorbs bursts of shape changes;
-/// under sustained pressure the newest update is dropped (cursor is advisory display data).
-const CURSOR_QUEUE_DEPTH: usize = 4;
+/// Bounded depth of the host outbound-control channel (cursor shapes, chat). A little slack absorbs
+/// bursts; under sustained pressure the newest message is dropped (these are advisory, not control).
+const OUTBOUND_QUEUE_DEPTH: usize = 8;
 /// Cap on distinct cursor ids the host remembers as "already sent" (so it can send `CursorCached`).
 /// Real sessions cycle through a handful of shapes; this bounds memory against a pathological observer.
 const CURSOR_CACHE_CAP: usize = 128;
@@ -1042,25 +1072,17 @@ fn cursor_shape_is_valid(s: &CursorShape) -> bool {
         && s.rgba.len() == (w as usize) * (h as usize) * 4
 }
 
-/// Poll the optional cursor channel inside the control-loop `select!`: pends forever when there is no
-/// channel (so the branch is inert without an observer), otherwise yields the next cursor `ControlMsg`
-/// (or `None` when the source task has ended).
-async fn recv_cursor(rx: &mut Option<mpsc::Receiver<ControlMsg>>) -> Option<ControlMsg> {
-    match rx {
-        Some(r) => r.recv().await,
-        None => std::future::pending().await,
-    }
-}
-
-/// Start the cursor task iff an observer is wired (ADR-073). Returns the receiver the control loop
-/// polls, or `None` when there is no observer (the loop's cursor branch then stays inert).
-fn maybe_start_cursor<C, E>(inner: &HostInner<C, E>) -> Option<mpsc::Receiver<ControlMsg>> {
-    let observer = inner
+/// Start the cursor task iff an observer is wired (ADR-073). The task feeds the shared host
+/// outbound-control channel (`tx`); no-op if there is no observer.
+fn maybe_start_cursor<C, E>(inner: &HostInner<C, E>, tx: mpsc::Sender<ControlMsg>) {
+    let Some(observer) = inner
         .cursor
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()?;
-    let (tx, rx) = mpsc::channel::<ControlMsg>(CURSOR_QUEUE_DEPTH);
+        .take()
+    else {
+        return;
+    };
     let stop = inner.stop.clone();
     let handle = tokio::spawn(async move {
         cursor_pump(observer, tx, stop).await;
@@ -1069,7 +1091,6 @@ fn maybe_start_cursor<C, E>(inner: &HostInner<C, E>) -> Option<mpsc::Receiver<Co
         .cursor_task
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
-    Some(rx)
 }
 
 /// The cursor watch→dedup→enqueue loop (ADR-073). Reads the observer, maps each change to a wire
@@ -1133,7 +1154,7 @@ async fn host_control_loop<C, E>(
     control: &mut Box<dyn ControlChannelDyn>,
     inner: &HostInner<C, E>,
     mut bye_rx: mpsc::Receiver<ErrorCode>,
-    mut cursor_rx: Option<mpsc::Receiver<ControlMsg>>,
+    mut outbound_rx: mpsc::Receiver<ControlMsg>,
 ) {
     loop {
         tokio::select! {
@@ -1146,14 +1167,15 @@ async fn host_control_loop<C, E>(
                 }
                 break;
             }
-            // Cursor-shape update ready to send (ADR-073). Host → controller display data; forwarded
-            // over the reliable control channel this loop owns. Never blocks the session — the source
-            // task already dropped-oldest under pressure. `None` = channel closed → stop polling it.
-            cur = recv_cursor(&mut cursor_rx) => match cur {
+            // A proactive host→controller message (cursor shape ADR-073, chat ADR-082) is ready to
+            // send; forward it over the reliable control channel this loop owns. Never blocks the
+            // session — the source already dropped-newest under pressure. `None` = all senders gone
+            // (teardown) → exit.
+            out = outbound_rx.recv() => match out {
                 Some(msg) => {
                     if control.send(msg).await.is_err() { break; }
                 }
-                None => { cursor_rx = None; }
+                None => break,
             },
             msg = control.recv() => match msg {
             Ok(ControlMsg::KeyframeRequest(_)) => {
@@ -1226,6 +1248,11 @@ async fn host_control_loop<C, E>(
             // **set, never pasted** (no-auto-paste rule). Outcome is a content-free lifecycle event.
             Ok(ControlMsg::ClipboardText { text }) => {
                 host_handle_clipboard(inner, &text);
+            }
+            // Chat from the controller (ADR-082): surface it for the host UI. Base session comms —
+            // content-bearing but never logged (the payload stays wrapped in `Redacted`, Inv 8).
+            Ok(ControlMsg::ChatMessage { text }) => {
+                emit_lifecycle(inner, LifecycleEvent::ChatMessage { text });
             }
             // Any Bye from the controller is a clean peer close — deliberately code-agnostic. A
             // controller cannot revoke the host, so a controller-claimed `SessionRevoked` is treated
@@ -1495,6 +1522,8 @@ enum ControlCommand {
     /// Push clipboard text to the host (ADR-076). Gated host-side on `clipboard.write`; the host sets
     /// its clipboard and never pastes.
     ClipboardText(String),
+    /// Send an in-session chat message to the host (ADR-082). Base session comms; never logged (Inv 8).
+    Chat(String),
     Bye,
 }
 
@@ -1815,6 +1844,24 @@ impl ControllerSession {
         }
     }
 
+    /// Send an in-session chat message to the host (ADR-082). Base session comms (no capability). The
+    /// text is a secret and is never logged (Inv 8); an oversized message (> `MAX_CHAT_BYTES`) is
+    /// dropped rather than sent (the wire would refuse it). Best-effort.
+    pub fn send_chat(&self, text: String) {
+        if text.len() > ras_protocol::MAX_CHAT_BYTES {
+            return;
+        }
+        let tx = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(ControlCommand::Chat(text));
+        }
+    }
+
     /// The OS-input lease the host has granted this controller, if any: `(lease_id, generation)`.
     #[must_use]
     pub fn current_lease(&self) -> Option<([u8; 16], u32)> {
@@ -1892,6 +1939,10 @@ async fn controller_control_loop(
                     let msg = ControlMsg::ClipboardText { text: ras_protocol::Redacted(text) };
                     if control.send(msg).await.is_err() { break; }
                 }
+                Some(ControlCommand::Chat(text)) => {
+                    let msg = ControlMsg::ChatMessage { text: ras_protocol::Redacted(text) };
+                    if control.send(msg).await.is_err() { break; }
+                }
                 Some(ControlCommand::Bye) => {
                     // A controller leaving is a clean peer close, never a revoke — a controller
                     // cannot revoke the host (Invariants 1/13). Use the benign closure code.
@@ -1966,6 +2017,18 @@ async fn controller_control_loop(
                         .clone()
                     {
                         sink.hide();
+                    }
+                }
+                // Chat from the host (ADR-082): surface it for the controller UI. Content-bearing but
+                // never logged (the payload stays wrapped in `Redacted`, Inv 8).
+                Ok(ControlMsg::ChatMessage { text }) => {
+                    if let Some(sink) = inner
+                        .lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.emit(LifecycleEvent::ChatMessage { text });
                     }
                 }
                 Ok(_) => {}

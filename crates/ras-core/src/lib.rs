@@ -1217,6 +1217,61 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
+    /// In-session chat (ADR-082) flows **both** directions: the controller's message surfaces on the
+    /// host's lifecycle stream and the host's on the controller's. Content survives; each side receives
+    /// only the *other* peer's text.
+    #[tokio::test]
+    async fn chat_flows_both_directions() {
+        async fn wait_for_chat(events: &mut LifecycleStream) -> Option<String> {
+            for _ in 0..50 {
+                match tokio::time::timeout(Duration::from_millis(50), events.recv()).await {
+                    Ok(Some(LifecycleEvent::ChatMessage { text })) => {
+                        return Some(text.reveal().to_string())
+                    }
+                    Ok(Some(_)) => continue,
+                    _ => return None,
+                }
+            }
+            None
+        }
+
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(&["screen.view"]))),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let mut host_events = host_r.unwrap();
+        let mut ctrl_events = ctrl_r.unwrap();
+        assert!(wait_until(|| controller.state() == SessionState::Active, 200).await);
+
+        // Controller → host.
+        controller.send_chat("click the button, top-right".to_string());
+        assert_eq!(
+            wait_for_chat(&mut host_events).await.as_deref(),
+            Some("click the button, top-right"),
+            "the host should receive the controller's chat"
+        );
+
+        // Host → controller.
+        host.send_chat("done, thanks!".to_string());
+        assert_eq!(
+            wait_for_chat(&mut ctrl_events).await.as_deref(),
+            Some("done, thanks!"),
+            "the controller should receive the host's chat"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     #[tokio::test]
     async fn controller_suspends_then_terminates_when_transport_drops() {
         let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();

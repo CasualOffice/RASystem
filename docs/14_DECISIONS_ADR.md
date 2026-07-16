@@ -818,6 +818,32 @@
     descriptor, and a `ras-core` loopback test asserting the host emits `CaptureDisplay` with the shared
     display's dims — all green in the full gate. Real per-OS enumeration is the on-device row.
 
+- **ADR-082 · In-session chat is base session communication (no capability), bidirectional, bounded, and
+  `Redacted` end-to-end · Accepted** (`docs/20 §3.1`). A simple text channel between the two consented
+  peers — useful for the support use-case ("click the button, top-right").
+  - **Not a privileged behavior → no capability.** Chat touches no OS/input/screen surface; a live
+    session already required local consent (Inv 1). Gating it behind a capability would be
+    security-theater (unlike clipboard/input/audio, which *do* reach the OS). It is base session comms,
+    like keyframe requests or feedback. (Inv 2 governs *privileged* behaviors; chat is not one.)
+  - **Inv 8 is the load-bearing rule.** Chat text is content (users paste anything — a PIN, a link).
+    The payload is a [`Redacted`] newtype on the wire (`ControlMsg::ChatMessage`), through the codec, and
+    even in the `LifecycleEvent::ChatMessage` that surfaces it — so its `Debug` prints only a byte count
+    and it **cannot** leak through any log/trace/crash-dump line. It is **never logged or
+    audited-as-content**; only `.reveal()`d at the point of display. This is the sole content-bearing
+    lifecycle event, and only because `Redacted` makes it log-safe.
+  - **Bounded + fail-closed.** `MAX_CHAT_BYTES = 4 KiB` (chat is short prose, far under
+    `MAX_CONTROL_FRAME`); an oversized message is **refused, never truncated** (codec) and dropped
+    before send (both `send_chat` APIs). Fail-closed codec + fuzz.
+  - **Bidirectional, direction-implicit.** Both `HostSession::send_chat` and
+    `ControllerSession::send_chat`; a received `ChatMessage` is always *from the remote peer*, surfaced
+    on each side's own lifecycle stream — no direction field needed. The host send reuses a generalized
+    **outbound-control channel** (the cursor task now shares it, ADR-073), so one path carries all
+    proactive host→controller messages.
+  - **Verify:** wire roundtrip / oversize-refused / redacted-in-`Debug` / fuzz (ras-protocol) + a
+    `ras-core` loopback test proving chat flows **both** directions (controller→host and host→controller)
+    with content intact, each side receiving only the other peer's text. All green. UI is the on-device
+    row.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

@@ -4,7 +4,7 @@
 //! They ride a bounded channel ([`LifecycleStream`]) so a slow lifecycle consumer can never
 //! backpressure the session's hot tasks.
 
-use ras_protocol::ErrorCode;
+use ras_protocol::{ErrorCode, Redacted};
 use ras_transport_iroh::PathKind;
 
 /// Opaque per-session id (content-free, log-safe). Monotonic within a process run.
@@ -94,7 +94,9 @@ impl QualitySample {
     }
 }
 
-/// Typed lifecycle event stream item. Content-free.
+/// Typed lifecycle event stream item. Content-free — the **only** exception is chat text
+/// ([`Self::ChatMessage`]), which is carried in a [`Redacted`] newtype so it still cannot leak through
+/// a `Debug`/log line (Inv 8).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum LifecycleEvent {
@@ -216,6 +218,14 @@ pub enum LifecycleEvent {
     ClipboardRejected {
         /// Why it was refused (`CapabilityDenied`, `InputFailed`, …).
         code: ErrorCode,
+    },
+    /// An in-session **chat** message received **from the remote peer** (ADR-082). Surfaced on each
+    /// side's own stream — on the host's stream it came from the controller and vice versa. The text is
+    /// [`Redacted`] (Inv 8 — chat is content; its `Debug` prints only a byte count). Call `.reveal()`
+    /// only at the point of display, never to log it.
+    ChatMessage {
+        /// The received chat text (redacted in `Debug`).
+        text: Redacted,
     },
 }
 

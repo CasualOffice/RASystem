@@ -154,7 +154,15 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   landed too (ADR-079)**: `ras-clipboard::ArboardClipboardSink` over `arboard` (NSPasteboard/Win32/X11),
   sets-never-pastes, fail-closed, `default-features=false` (text-only, X11-only Linux), BSL-1.0 scoped
   in cargo-deny; wired into Share via `with_clipboard_sink` but **inert until `clipboard.write` is
-  granted** (default OFF). Enabling the grant + app "Send clipboard"/indicator is the follow-up. **Still pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
+  granted** (default OFF). Enabling the grant + app "Send clipboard"/indicator is the follow-up. **In-session chat landed (ADR-082):** `ControlMsg::ChatMessage` with the payload in a `Redacted` newtype
+  **end-to-end** (wire + codec + the `LifecycleEvent::ChatMessage` that surfaces it), so chat text — a
+  secret in the Inv-8 sense — can never leak to a log/trace; `.reveal()`d only at display. **No
+  capability** (base session comms — touches no OS/input/screen surface; a live session already required
+  consent — so gating would be security-theater), bounded by `MAX_CHAT_BYTES=4 KiB` (refused, never
+  truncated), fail-closed codec + fuzz. **Bidirectional** (`HostSession::send_chat` +
+  `ControllerSession::send_chat`; a received message is always from the remote peer, surfaced on each
+  side's own lifecycle stream); the host send reuses a **generalized outbound-control channel** the
+  cursor task now shares. Loopback-tested both directions; the app chat panel is the on-device follow-up. **Still pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
   Secure-Input drop (macOS); the analogous **Linux on-device** XTEST run (a real X11/Xwayland session);
   the **Windows on-device** `SendInput` run (**needs Windows hardware the team lacks** — stays
   CI-compile-gated on `windows-latest`); a macOS **global-hotkey** emergency stop (baseline stop is the

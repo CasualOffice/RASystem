@@ -249,6 +249,13 @@ message ClipboardText {
   string text = 1; // UTF-8; bounded by MAX_CLIPBOARD_BYTES
 }
 
+// In-session chat text between the two consented peers (ADR-082). Base session communication (no
+// capability — touches no OS/input/screen surface). The payload is a secret in the Inv-8 sense; it is
+// length-capped (ras_protocol::MAX_CHAT_BYTES) and never logged. ras_protocol::ControlMsg::ChatMessage.
+message ChatMessage {
+  string text = 1; // UTF-8; bounded by MAX_CHAT_BYTES
+}
+
 // ---------------------------------------------------------------------------
 // Top-level control-channel message
 // ---------------------------------------------------------------------------
@@ -273,6 +280,7 @@ message ControlMsg {
     CursorCached    cursor_cached    = 13;
     CursorHidden    cursor_hidden    = 14;
     ClipboardText   clipboard_text   = 15;
+    ChatMessage     chat_message     = 16;
   }
 }
 

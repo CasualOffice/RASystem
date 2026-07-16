@@ -259,6 +259,17 @@ pub enum ControlMsg {
         /// The UTF-8 clipboard text. Redacted in `Debug`; bounded by [`MAX_CLIPBOARD_BYTES`].
         text: Redacted,
     },
+    /// In-session **chat** text between the two consented peers (ADR-082). Bidirectional; a received
+    /// `ChatMessage` is always *from the remote peer*. This is **base session communication**, not a
+    /// privileged behavior — it touches no OS/input/screen surface, so it carries no capability (a live
+    /// session already required consent). Content-bearing — chat text is a secret in the Inv-8 sense
+    /// (users paste anything), so the payload is [`Redacted`] (its `Debug` prints only a byte count, so
+    /// it can never leak through a log/trace line) and it is **never** logged or audited-as-content.
+    /// Bounded by [`MAX_CHAT_BYTES`]; an oversized message is refused, never truncated.
+    ChatMessage {
+        /// The UTF-8 chat text. Redacted in `Debug`; bounded by [`MAX_CHAT_BYTES`].
+        text: Redacted,
+    },
 }
 
 /// A UTF-8 secret whose `Debug` prints only its byte length, never its content — so it physically
@@ -286,6 +297,11 @@ impl Redacted {
 /// maximal clipboard still fits one framed control message with protobuf headroom. Oversized
 /// clipboards are **refused**, never truncated (truncation would silently corrupt the paste).
 pub const MAX_CLIPBOARD_BYTES: usize = 768 * 1024;
+
+/// Maximum chat-message payload (bytes). Chat is short prose; a small bound keeps it well under
+/// [`MAX_CONTROL_FRAME`] and caps the per-message DoS surface. Oversized messages are **refused**,
+/// never truncated.
+pub const MAX_CHAT_BYTES: usize = 4 * 1024;
 
 /// Maximum cursor image dimension (pixels) on either axis — a DoS guard. Real cursors are ≤ 32×32,
 /// up to ~128 on HiDPI; 256 is generous headroom. A larger dimension is a malformed message.

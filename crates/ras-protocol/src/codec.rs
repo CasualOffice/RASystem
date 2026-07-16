@@ -23,8 +23,8 @@ use prost::Message;
 use crate::{
     AccessOutcome, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode, InputAction,
     InputEnvelope, KeyframeReason, KeyframeRequest, PointerButton, PointerUpdate, RasError,
-    Redacted, StreamConfigWire, MAX_CAPABILITIES, MAX_CAPABILITY_LEN, MAX_CLIPBOARD_BYTES,
-    MAX_CONTROL_FRAME, MAX_CURSOR_DIM, MAX_DISPLAY_NAME, MAX_TEXT_INPUT,
+    Redacted, StreamConfigWire, MAX_CAPABILITIES, MAX_CAPABILITY_LEN, MAX_CHAT_BYTES,
+    MAX_CLIPBOARD_BYTES, MAX_CONTROL_FRAME, MAX_CURSOR_DIM, MAX_DISPLAY_NAME, MAX_TEXT_INPUT,
 };
 
 /// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
@@ -276,6 +276,7 @@ fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
         ControlMsg::ClipboardText { text } => {
             Kind::ClipboardText(pb::ClipboardText { text: text.0 })
         }
+        ControlMsg::ChatMessage { text } => Kind::ChatMessage(pb::ChatMessage { text: text.0 }),
     };
     pb::ControlMsg { kind: Some(kind) }
 }
@@ -329,6 +330,20 @@ fn clipboard_text_from_pb(c: pb::ClipboardText) -> Result<ControlMsg, RasError> 
     })
 }
 
+/// Wire → Rust chat text, fail-closed. Byte length bounded by [`MAX_CHAT_BYTES`] (prost guarantees
+/// valid UTF-8); an oversized payload is **refused**, never truncated.
+fn chat_message_from_pb(c: pb::ChatMessage) -> Result<ControlMsg, RasError> {
+    if c.text.len() > MAX_CHAT_BYTES {
+        return Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "chat text too large",
+        ));
+    }
+    Ok(ControlMsg::ChatMessage {
+        text: Redacted(c.text),
+    })
+}
+
 /// Wire → Rust [`ControlMsg`]. Partial: an unset oneof or any invalid enum/range is a typed
 /// [`RasError`] with [`ErrorCode::InvalidMessage`].
 fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
@@ -372,6 +387,7 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
         Some(Kind::CursorCached(c)) => Ok(ControlMsg::CursorCached { id: c.id }),
         Some(Kind::CursorHidden(_)) => Ok(ControlMsg::CursorHidden),
         Some(Kind::ClipboardText(c)) => clipboard_text_from_pb(c),
+        Some(Kind::ChatMessage(c)) => chat_message_from_pb(c),
         // No valid empty control message: unset oneof (empty bytes, or a future variant an old
         // build doesn't recognize) is rejected, never silently defaulted.
         None => Err(RasError::fatal(
@@ -1169,6 +1185,43 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_chat_message() {
+        assert_roundtrip(&ControlMsg::ChatMessage {
+            text: Redacted("click the button, top-right 👉".to_string()),
+        });
+        assert_roundtrip(&ControlMsg::ChatMessage {
+            text: Redacted(String::new()),
+        });
+    }
+
+    #[test]
+    fn chat_message_refused_when_oversized() {
+        let ok = pb::ChatMessage {
+            text: "a".repeat(MAX_CHAT_BYTES),
+        };
+        assert!(chat_message_from_pb(ok).is_ok());
+        let too_big = pb::ChatMessage {
+            text: "a".repeat(MAX_CHAT_BYTES + 1),
+        };
+        assert_eq!(
+            chat_message_from_pb(too_big).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+    }
+
+    #[test]
+    fn chat_message_is_redacted_in_debug() {
+        // Inv 8: chat text is content — it must never appear in a Debug/log rendering.
+        let secret = "my bank PIN is 4321";
+        let msg = ControlMsg::ChatMessage {
+            text: Redacted(secret.to_string()),
+        };
+        let rendered = format!("{msg:?}");
+        assert!(!rendered.contains("4321"), "chat text leaked into Debug");
+        assert!(rendered.contains("redacted"));
+    }
+
+    #[test]
     fn roundtrip_all_input_actions() {
         use crate::InputEnvelope;
         let actions = [
@@ -1859,6 +1912,8 @@ mod proptests {
             // Clipboard text: arbitrary UTF-8, default proptest sizing (far below MAX_CLIPBOARD_BYTES),
             // so every generated value round-trips. Oversize refusal is covered by a by-example test.
             any::<String>().prop_map(|s| ControlMsg::ClipboardText { text: Redacted(s) }),
+            // Chat text: same shape (default sizing is far below MAX_CHAT_BYTES).
+            any::<String>().prop_map(|s| ControlMsg::ChatMessage { text: Redacted(s) }),
         ]
     }
 

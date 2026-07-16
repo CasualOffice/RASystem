@@ -30,7 +30,7 @@ Friction = how hard the feature fights the Non-Negotiable Invariants. Priority =
 | **Cursor-shape channel** | ◐ wire+codec+ras-core-plumbing (ADR-073) | Out-of-band, client-rendered (all but game-streamers) | **Low** | **P1** | `CursorShape` msg + host observer/dedup + controller sink landed; OS capture + render pending |
 | **Multi-monitor** | ◐ coord-spine+enum+HiDPI model (ADR-081) | Monitor picker + switch (all) | **Low** | **P1** | `MonitorDef` enumeration + HiDPI `CaptureDisplay` landed; OS enumeration + picker UI pending |
 | **Clipboard sync** | ◐ spine+host-loop+OS-backend (ADR-076/079) | All; TeamViewer most granular | **Medium** | **P1** | wire+gate+host enforcement+arboard backend landed; enabling grant + app "Send clipboard" UI pending |
-| **Chat (in-session text)** | ❌ | TeamViewer/RustDesk/AnyDesk | **Low** | **P2** | content-free-of-logs text channel |
+| **Chat (in-session text)** | ◐ wire+plumbing (ADR-082) | TeamViewer/RustDesk/AnyDesk | **Low** | **P2** | bidirectional, Redacted end-to-end, bounded; loopback e2e. UI pending |
 | **Whiteboard / annotation** | ◐ **partial-done** | TeamViewer/Zoom | **Low** | **P2** | extend the existing overlay |
 | **Auto-update** | ◐ wired (ADR-078) | All auto-update | **Medium** (supply-chain) | **P1** | Tauri updater + Ed25519 signature-verify wired; activate via key setup (runbook) |
 | **Unattended access** | ❌ | All (password/account) | **High** | **P2** | Tier-gated standing grant, revocable |
@@ -102,6 +102,7 @@ The keyboard research **confirmed our core choice is sound and well-precedented*
 
 ### 3.1 Chat (in-session text) — P2, low friction
 Simple text channel between the two peers during a session. Design: content-free-of-logs (Inv 8 — chat text is content, never logged), a bounded message size, an ADR. Low risk; mostly UI. Useful for the support use-case ("click the button top-right"). **P2.**
+- **Status: WIRE + ORCHESTRATOR PLUMBING LANDED (ADR-082).** `ControlMsg::ChatMessage` with the payload in a `Redacted` newtype **end-to-end** — wire, codec, *and* the `LifecycleEvent::ChatMessage` that surfaces it — so chat text (a secret in the Inv-8 sense: users paste PINs/links) can never leak through a log/trace/crash line; `.reveal()`d only at display. **No capability** — chat touches no OS/input/screen surface and a live session already required consent, so gating it would be security-theater (unlike clipboard/input/audio). Bounded by `MAX_CHAT_BYTES=4 KiB` (**refused, never truncated**), fail-closed codec + fuzz. **Bidirectional**: `HostSession::send_chat` + `ControllerSession::send_chat`; a received message is always *from the remote peer*, surfaced on each side's own lifecycle stream. The host send reuses a **generalized outbound-control channel** (the cursor task now shares it). Loopback-tested both directions. **Follow-up (GUI/on-device):** the app chat panel (input + transcript, `.reveal()` at render only).
 
 ### 3.2 Whiteboard / annotation — P2, **partly already built**
 Not a full gap: the app **already** has viewer-side annotation + an overlay **remote pointer** drawn on the host's screen (ADR-061). The gap is persistence/richness (shapes, host-side draw-back, multi-user annotation). Extend the existing transparent overlay + `Pointer` channel (visual, outside Inv 6/14 by design). **P2.**
