@@ -184,6 +184,17 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   policy, no wire/host change, still gated identically — Inv 15). Cross-device follow-ups still open:
   **live on-device lock reconciliation** + the ⌘↔Ctrl on-device check (⌘C→Ctrl+C on a real non-Mac
   host); host cursor **capture** + controller **render** for the cursor-shape channel.
+- **Persistent paired-controller registry — pure model landed (ADR-084, §3.5 → unlocks unattended
+  access §3.4).** `ras-identity` gains a `PairingRegistry` (`pair`/`is_paired`/`get`/`list`/`touch`/
+  `revoke`, in-memory MVP impl) over `PairedController` records (id + user label +
+  `first_paired_at`/`last_seen_at`; re-pair preserves the pairing age, revoke = kill-switch). The
+  load-bearing rule is **structural**: the pairing decision is a bare 2-variant enum
+  (`SkipPairingPrompt`/`RequirePairingPrompt`) with **no capabilities**, so a registry hit governs only
+  the *human prompt* — a known controller still mints a fresh grant + per-message enforcement +
+  emergency stop (Inv 3/9). Key-change detection is free (keys on `ControllerId` = the pubkey).
+  `pairing_code(id)` renders the pubkey as grouped **Crockford-base32** (omits `I L O U`) for the QR-side
+  human check. Pure (no clock; caller passes timestamps). Follow-up: **SQLite** durable store, wiring the
+  decision into the app connect/consent flow + host-displayed QR, then unattended access.
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.
@@ -506,7 +517,7 @@ casual-ras/
   crates/                 # shared Rust core (the future SDK internals)
     ras-core/             # session orchestration, state machines
     ras-protocol/         # protobuf messages, framing, versioning
-    ras-identity/         # Ed25519 identities, key storage
+    ras-identity/         # Ed25519 identities, key storage, paired-controller registry (ADR-084)
     ras-grant/            # access requests, session grants, issuer trait
     ras-policy/           # capability intersection, local policy
     ras-control/          # control leases, generations, input routing + OsInputSink/ClipboardSink seams

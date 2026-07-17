@@ -10,7 +10,7 @@
 //! (ADR-065): no dalek type crosses the API — callers see only raw `[u8; 32]` keys and `[u8; 64]`
 //! signatures — so a libsodium / TPM / Secure-Enclave store is a drop-in `KeyStore` impl later.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
@@ -253,44 +253,154 @@ pub fn verify(
     vk.verify_strict(msg, &signature).map_err(|_| sig_invalid())
 }
 
-/// The paired-controller registry (`docs/16 §11`). A controller is trusted only after the local user
-/// accepts its pairing; **de-listing is a kill-switch** (one of the three, `docs/16`). MVP is
-/// in-memory; the SQLite-backed impl (restart-survival) lands with identity persistence.
-pub trait TrustedControllers: Send + Sync {
-    /// Whether this controller has been paired and not since revoked.
-    fn is_trusted(&self, id: &ControllerId) -> bool;
-    /// Record a controller as trusted (after a human pairing accept).
-    fn trust(&self, id: ControllerId);
+/// Milliseconds since the Unix epoch (host clock). Callers pass the time in — this crate stays
+/// **pure** (no clock read), so tests are deterministic. Aliased locally to stay dependency-light.
+pub type UnixMillis = u64;
+
+/// A controller the local user has paired (`docs/16 §11`, ADR-084 / §3.5). Persisted host-side after a
+/// first attended, consented pairing so future sessions from the same key skip re-pairing — but they
+/// **still mint a fresh, short-lived grant** (Inv 3) and **still honor emergency stop** (Inv 4). The
+/// registry authenticates *identity*, never confers *authority* (Inv 9); a lookup can never authorize
+/// input on its own. Content-light — a public key + a user label + timestamps; no secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairedController {
+    /// The controller's stable public identity (the allow-list key).
+    pub id: ControllerId,
+    /// A human label the local user set at pairing (e.g. "Alice's laptop"). Never security-bearing.
+    pub label: String,
+    /// When the controller was first paired (host clock).
+    pub first_paired_at: UnixMillis,
+    /// When it was last seen connecting (host clock); refreshed per session for the UI.
+    pub last_seen_at: UnixMillis,
+}
+
+/// Crockford-base32 rendering of a controller's public identity, grouped into 4-char blocks for human
+/// comparison — the pairing code shown **alongside** the QR (host displays, controller scans; the QR
+/// carries the machine-readable key, this is the eyeball/verbal check). Deterministic; the Crockford
+/// alphabet omits `I L O U` so it survives readback without typos. No hash is applied: `ControllerId`
+/// is already a 256-bit uniform Ed25519 key, so rendering it directly *is* the Syncthing-style device
+/// id (Syncthing digests only because its input is a large certificate).
+#[must_use]
+pub fn pairing_code(id: &ControllerId) -> String {
+    const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut out = String::with_capacity(52 + 12);
+    let mut acc: u32 = 0;
+    let mut nbits: u32 = 0;
+    let mut symbols: usize = 0;
+    let push = |idx: usize, out: &mut String, symbols: &mut usize| {
+        if *symbols > 0 && symbols.is_multiple_of(4) {
+            out.push('-');
+        }
+        out.push(ALPHABET[idx] as char);
+        *symbols += 1;
+    };
+    for &b in id.as_bytes() {
+        acc = (acc << 8) | u32::from(b);
+        nbits += 8;
+        while nbits >= 5 {
+            nbits -= 5;
+            push(((acc >> nbits) & 0x1f) as usize, &mut out, &mut symbols);
+        }
+        acc &= (1u32 << nbits) - 1; // keep only the ≤4 leftover bits — no accumulation/overflow
+    }
+    if nbits > 0 {
+        push(
+            ((acc << (5 - nbits)) & 0x1f) as usize,
+            &mut out,
+            &mut symbols,
+        );
+    }
+    out
+}
+
+/// What the pairing layer should do when a controller connects (ADR-084 / §3.5). It governs the
+/// **pairing prompt only** — never authority: a [`Self::SkipPairingPrompt`] controller **still** goes
+/// through fresh grant issuance, per-message capability enforcement, and emergency stop (Inv 3/4/9). A
+/// registry lookup cannot, by itself, authorize anything — hence this enum carries no capabilities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairingDecision {
+    /// Known controller: skip the attended pairing accept — but issue a fresh grant as always.
+    SkipPairingPrompt,
+    /// Unknown controller: require the local user's explicit pairing accept first (Inv 1).
+    RequirePairingPrompt,
+}
+
+/// Decide the pairing step from a registry membership check. Pure — the caller consults its
+/// [`PairingRegistry`] and passes the result. Deliberately trivial and authority-free: it only decides
+/// whether the *human pairing prompt* is shown, so it can never be a place authority leaks in.
+#[must_use]
+pub fn pairing_decision(is_paired: bool) -> PairingDecision {
+    if is_paired {
+        PairingDecision::SkipPairingPrompt
+    } else {
+        PairingDecision::RequirePairingPrompt
+    }
+}
+
+/// The paired-controller registry (`docs/16 §11`, ADR-084). The local user owns the list (Inv 1);
+/// **de-listing is a kill-switch** — removing a key revokes its skip-pairing standing (future sessions
+/// require a fresh attended accept). MVP is in-memory; a SQLite-backed impl (restart-survival) is the
+/// durable follow-up.
+pub trait PairingRegistry: Send + Sync {
+    /// Whether this controller is paired (and not since revoked).
+    fn is_paired(&self, id: &ControllerId) -> bool;
+    /// Record/refresh a pairing (after a human accept). For an existing id this refreshes the label +
+    /// `last_seen_at` but **preserves the original `first_paired_at`** (a re-pair is not a new pairing).
+    fn pair(&self, controller: PairedController);
+    /// Look up a paired controller's full record.
+    fn get(&self, id: &ControllerId) -> Option<PairedController>;
+    /// All paired controllers, for the host's management UI. Order is unspecified.
+    fn list(&self) -> Vec<PairedController>;
+    /// Refresh `last_seen_at` for a paired controller (no-op if unknown).
+    fn touch(&self, id: &ControllerId, now: UnixMillis);
     /// De-list a controller (kill-switch). Idempotent.
     fn revoke(&self, id: &ControllerId);
 }
 
-/// In-memory [`TrustedControllers`] for the attended MVP. A host restart clears it (attended sessions
-/// end on restart anyway); durable pairing is the SQLite impl (later).
+/// In-memory [`PairingRegistry`] for the attended MVP. A host restart clears it; durable pairing is the
+/// SQLite impl (later).
 #[derive(Default)]
-pub struct InMemoryTrustedControllers {
-    inner: Mutex<HashSet<ControllerId>>,
+pub struct InMemoryPairingRegistry {
+    inner: Mutex<HashMap<ControllerId, PairedController>>,
 }
 
-impl InMemoryTrustedControllers {
+impl InMemoryPairingRegistry {
     /// A fresh, empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<ControllerId>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ControllerId, PairedController>> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
-impl TrustedControllers for InMemoryTrustedControllers {
-    fn is_trusted(&self, id: &ControllerId) -> bool {
-        self.lock().contains(id)
+impl PairingRegistry for InMemoryPairingRegistry {
+    fn is_paired(&self, id: &ControllerId) -> bool {
+        self.lock().contains_key(id)
     }
-    fn trust(&self, id: ControllerId) {
-        self.lock().insert(id);
+    fn pair(&self, controller: PairedController) {
+        let mut g = self.lock();
+        if let Some(existing) = g.get_mut(&controller.id) {
+            existing.label = controller.label;
+            existing.last_seen_at = controller.last_seen_at;
+            // first_paired_at is preserved — a re-pair does not reset the pairing age.
+        } else {
+            g.insert(controller.id, controller);
+        }
+    }
+    fn get(&self, id: &ControllerId) -> Option<PairedController> {
+        self.lock().get(id).cloned()
+    }
+    fn list(&self) -> Vec<PairedController> {
+        self.lock().values().cloned().collect()
+    }
+    fn touch(&self, id: &ControllerId, now: UnixMillis) {
+        if let Some(c) = self.lock().get_mut(id) {
+            c.last_seen_at = now;
+        }
     }
     fn revoke(&self, id: &ControllerId) {
         self.lock().remove(id);
@@ -374,14 +484,95 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    fn paired(
+        id: ControllerId,
+        label: &str,
+        first: UnixMillis,
+        seen: UnixMillis,
+    ) -> PairedController {
+        PairedController {
+            id,
+            label: label.to_string(),
+            first_paired_at: first,
+            last_seen_at: seen,
+        }
+    }
+
     #[test]
-    fn trusted_registry_trust_lookup_revoke() {
-        let reg = InMemoryTrustedControllers::new();
+    fn pairing_registry_pair_lookup_revoke_is_a_kill_switch() {
+        let reg = InMemoryPairingRegistry::new();
         let id = ControllerId::from_bytes([7u8; PUBLIC_KEY_LEN]);
-        assert!(!reg.is_trusted(&id));
-        reg.trust(id);
-        assert!(reg.is_trusted(&id));
+        assert!(!reg.is_paired(&id));
+        reg.pair(paired(id, "Alice's laptop", 1000, 1000));
+        assert!(reg.is_paired(&id));
+        assert_eq!(reg.get(&id).unwrap().label, "Alice's laptop");
+        assert_eq!(reg.list().len(), 1);
         reg.revoke(&id);
-        assert!(!reg.is_trusted(&id), "de-listing is a kill-switch");
+        assert!(!reg.is_paired(&id), "de-listing is a kill-switch");
+        assert!(reg.get(&id).is_none());
+    }
+
+    #[test]
+    fn re_pairing_preserves_first_paired_at_and_touch_updates_last_seen() {
+        let reg = InMemoryPairingRegistry::new();
+        let id = ControllerId::from_bytes([9u8; PUBLIC_KEY_LEN]);
+        reg.pair(paired(id, "old label", 1000, 1000));
+        // A re-pair refreshes the label + last_seen but must NOT reset the pairing age.
+        reg.pair(paired(id, "new label", 5000, 5000));
+        let rec = reg.get(&id).unwrap();
+        assert_eq!(
+            rec.first_paired_at, 1000,
+            "re-pair must not reset the pairing age"
+        );
+        assert_eq!(rec.label, "new label");
+        assert_eq!(rec.last_seen_at, 5000);
+        // touch only moves last_seen.
+        reg.touch(&id, 9000);
+        assert_eq!(reg.get(&id).unwrap().last_seen_at, 9000);
+        assert_eq!(reg.get(&id).unwrap().first_paired_at, 1000);
+        // touch on an unknown id is a no-op.
+        reg.touch(&ControllerId::from_bytes([1u8; PUBLIC_KEY_LEN]), 9000);
+    }
+
+    #[test]
+    fn pairing_decision_governs_the_prompt_only_never_authority() {
+        // Known → skip the prompt; unknown → require it. This is the whole decision surface: a
+        // 2-variant enum with NO capabilities, so a registry hit can never authorize input on its own —
+        // a skipped-prompt controller still goes through fresh grant issuance (Inv 3/9).
+        let reg = InMemoryPairingRegistry::new();
+        let known = ControllerId::from_bytes([2u8; PUBLIC_KEY_LEN]);
+        let unknown = ControllerId::from_bytes([3u8; PUBLIC_KEY_LEN]);
+        reg.pair(paired(known, "known", 1, 1));
+        assert_eq!(
+            pairing_decision(reg.is_paired(&known)),
+            PairingDecision::SkipPairingPrompt
+        );
+        assert_eq!(
+            pairing_decision(reg.is_paired(&unknown)),
+            PairingDecision::RequirePairingPrompt
+        );
+        // Revocation flips a known controller back to requiring the attended accept.
+        reg.revoke(&known);
+        assert_eq!(
+            pairing_decision(reg.is_paired(&known)),
+            PairingDecision::RequirePairingPrompt
+        );
+    }
+
+    #[test]
+    fn pairing_code_is_deterministic_grouped_and_key_specific() {
+        let a = ControllerId::from_bytes([0xABu8; PUBLIC_KEY_LEN]);
+        let b = ControllerId::from_bytes([0xCDu8; PUBLIC_KEY_LEN]);
+        let code_a = pairing_code(&a);
+        assert_eq!(code_a, pairing_code(&a), "deterministic");
+        assert_ne!(code_a, pairing_code(&b), "distinct keys → distinct codes");
+        // 32 bytes = 256 bits → 52 Crockford-base32 symbols, grouped in 4s (12 dashes).
+        assert_eq!(code_a.chars().filter(|c| *c != '-').count(), 52);
+        assert_eq!(code_a.matches('-').count(), 12);
+        // Crockford alphabet only: uppercase A–Z (no I,L,O,U) + digits, plus the group separator.
+        assert!(code_a
+            .chars()
+            .all(|c| c == '-' || c.is_ascii_uppercase() || c.is_ascii_digit()));
+        assert!(!code_a.contains(['I', 'L', 'O', 'U']));
     }
 }

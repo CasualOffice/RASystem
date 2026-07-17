@@ -882,6 +882,38 @@
     **own-lease-bit** gate test (`keyboard.key` lease denies `TextInput`; `keyboard.text` lease allows
     it) in `ras-control`. All green.
 
+- **ADR-084 · Persistent paired-controller registry: identity allow-list that skips re-pairing but
+  never confers authority · Accepted** (`docs/20 §3.5`, `docs/16 §11`; the foundation for unattended
+  access §3.4). After a first **attended, consented** session, the host may persist the controller's
+  Ed25519 identity so future sessions from that key skip the pairing prompt — the opposite of a standing
+  password.
+  - **Skip-pairing ≠ standing authority (the load-bearing rule).** A known controller **still mints a
+    fresh, short-lived, endpoint-bound grant** (Inv 3), **still** enforces capabilities per message
+    (Inv 15), and **still** honors emergency stop (Inv 4). The registry authenticates *identity* only;
+    authority stays the per-session grant's (Inv 9). This is encoded so it can't drift: the pairing
+    decision is a bare 2-variant enum (`SkipPairingPrompt` / `RequirePairingPrompt`) carrying **no
+    capabilities** — a registry hit governs the *human prompt*, never authorization. Tested.
+  - **Local user owns the list (Inv 1); de-listing is a kill-switch.** `PairingRegistry`
+    (`pair`/`is_paired`/`get`/`list`/`touch`/`revoke`) with an in-memory MVP impl; a `PairedController`
+    record carries the id + a user label + `first_paired_at`/`last_seen_at`. Re-pairing preserves the
+    original pairing age; revocation removes the skip-pairing standing (future sessions require a fresh
+    attended accept). **Pure** — the crate reads no clock; the caller passes timestamps in (deterministic
+    tests).
+  - **Structural key-change detection + a human-comparable code.** The registry keys on `ControllerId`
+    (= the raw pubkey), so a changed key is structurally a *different* entry — a silently-rotated key is
+    never trusted under the old identity. `pairing_code(id)` renders the pubkey as grouped
+    **Crockford-base32** (omits `I L O U`) — the eyeball/verbal check shown **alongside** the
+    host-displayed QR (host shows, controller scans — the direction that dodges the Signal-QR-hijack
+    coached-victim vector, §3.5). No hash step: a `ControllerId` is already a 256-bit uniform key, so
+    rendering it directly *is* the Syncthing-style device id.
+  - **Scope:** this lands the **pure registry model + decision + code** (verifiable off-device). Deferred:
+    a **SQLite-backed** durable impl (restart-survival; adds a store dep — kept out of this pure spine),
+    wiring the decision into the app's connect/consent flow + the host-displayed QR, and unattended
+    access (§3.4) on top. Replaces the earlier bare `TrustedControllers` set (nothing consumed it yet).
+  - **Verify:** pair/lookup/revoke-kill-switch, re-pair-preserves-`first_paired_at` + `touch`,
+    decision-governs-prompt-only (+ revocation flips it back), and `pairing_code`
+    deterministic/grouped/key-specific/Crockford-only — all green.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
