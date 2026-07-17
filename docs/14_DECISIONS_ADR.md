@@ -637,10 +637,17 @@
     or no backend ⇒ `CapabilityDenied`, sink untouched. `ControllerSession::send_clipboard_text` is the
     push API the app's "Send clipboard" will call. Two loopback tests: granted → reaches the sink once
     + `ClipboardApplied`; withheld → `ClipboardRejected` + sink never touched (Inv 15).
-  - **Deferred to follow-up (GUI/on-device):** the per-OS `ClipboardSink` impl (NSPasteboard / X11
-    selections + `wl-clipboard` / Win32), the app "Send clipboard" button + a "clipboard shared"
-    indicator (Inv 7), echo-suppression ownership tag, the host→controller (`clipboard.read`) direction,
-    and the rule that a **pre-connection** clipboard is never auto-synced.
+  - **Host→controller direction (`clipboard.read`) — NOW LANDED (both directions wired).**
+    `HostSession::send_clipboard_text` gates the host's own clipboard push on `clipboard.read` against
+    the session grant (Inv 15) and, if allowed, forwards it over the generalized outbound-control channel
+    (shared with cursor/chat); the controller applies it via a `ClipboardSink` it attaches
+    (`attach_clipboard_sink`) — **set, never pasted** — and surfaces the same content-free
+    `ClipboardApplied{len}`/`ClipboardRejected{code}`. Audited too. A loopback test proves both: granted →
+    the controller's sink receives the host text + a `ClipboardApplied`; withheld → the host gate drops it
+    so **nothing crosses the wire** (Inv 15). Clipboard is now symmetric behind its two direction caps.
+  - **Deferred to follow-up (GUI/on-device):** the app "Send clipboard" button + a "clipboard shared"
+    indicator (Inv 7), echo-suppression ownership tag, and the rule that a **pre-connection** clipboard is
+    never auto-synced. (The per-OS `ClipboardSink` impl landed as `ras-clipboard`, ADR-079.)
   - **Verify:** wire round-trip + oversize-refusal + `Debug`-redaction (ras-protocol), the
     per-direction/default-denied gate + recognized-but-withheld (ras-policy), the two host-loop loopback
     tests (ras-core), decoder fuzz — all green. Real OS clipboard set + no-paste is the on-device row.

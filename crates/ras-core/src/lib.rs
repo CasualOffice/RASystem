@@ -964,6 +964,60 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
+    /// The reverse direction (ADR-076, `clipboard.read`): the host pushes its clipboard to the
+    /// controller, which **sets** its OS clipboard (never pastes). Granted → the controller's sink
+    /// receives it; withheld → nothing crosses the wire (Inv 15).
+    #[tokio::test]
+    async fn clipboard_read_direction_host_to_controller() {
+        async fn run(caps_set: &[&str]) -> (Arc<RecordingClipboard>, Option<LifecycleEvent>) {
+            let clip = Arc::new(RecordingClipboard::new());
+            let (host_tp, ctrl_tp) = loopback_pair();
+            let host = HostSession::new(
+                HostSessionConfig::new(MonitorId(0)),
+                host_tp,
+                SyntheticCaptureBackend::new(320, 240),
+                SyntheticEncoder::new(),
+                Arc::new(FixedCaps(caps(caps_set))),
+            );
+            let controller = ControllerSession::new(
+                ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+                ctrl_tp,
+            );
+            controller.attach_clipboard_sink(clip.clone());
+            let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+            host_r.unwrap();
+            let mut ctrl_events = ctrl_r.unwrap();
+
+            host.send_clipboard_text("clipboard from the host 📋".to_string());
+            // Give the outbound message time to cross the loopback (or be dropped by the gate).
+            let ev = tokio::time::timeout(
+                Duration::from_millis(300),
+                drain_for_clipboard_outcome(&mut ctrl_events),
+            )
+            .await
+            .ok()
+            .flatten();
+            controller.disconnect(StopReason::UserRequested).await;
+            host.stop(StopReason::UserRequested).await;
+            (clip, ev)
+        }
+
+        // Granted: the controller's OS clipboard sink receives the host's text; a ClipboardApplied event.
+        let (clip, ev) = run(&["screen.view", ras_policy::CLIPBOARD_READ]).await;
+        assert_eq!(clip.seen(), vec!["clipboard from the host 📋".to_string()]);
+        assert!(
+            matches!(ev, Some(LifecycleEvent::ClipboardApplied { .. })),
+            "granted read direction should apply + report, got {ev:?}"
+        );
+
+        // Withheld: the host gate drops the send — nothing reaches the controller's sink (Inv 15).
+        let (clip, _ev) = run(&["screen.view"]).await;
+        assert!(
+            clip.seen().is_empty(),
+            "without clipboard.read the host must not send its clipboard (Inv 15)"
+        );
+    }
+
     // ── Audio plane, host→controller (ADR-077) ──────────────────────────────────────────────────
     /// Controller-side [`AudioOutput`] that tallies packets delivered through the transport — proves a
     /// true end-to-end host→controller flow, not just a host-local send.

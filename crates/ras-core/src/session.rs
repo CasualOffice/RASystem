@@ -819,6 +819,54 @@ where
             });
         }
     }
+
+    /// Push the host's clipboard text to the controller (ADR-076, host→controller direction). Gated
+    /// host-side on `clipboard.read` against the session grant (Inv 15 — the controller must have been
+    /// authorized to read the host's clipboard); refused fail-closed otherwise, and the controller only
+    /// **sets** its OS clipboard, never pastes (no-auto-paste rule). The text is a secret and is never
+    /// logged (Inv 8); an oversized push (> `MAX_CLIPBOARD_BYTES`) or an ungranted one is dropped, not
+    /// sent. Best-effort; audited.
+    pub fn send_clipboard_text(&self, text: String) {
+        let inner = &self.inner;
+        if text.len() > ras_protocol::MAX_CLIPBOARD_BYTES {
+            return;
+        }
+        let granted = inner
+            .granted_caps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if !clipboard_push_allowed(ClipboardDirection::HostToController, &granted) {
+            record_audit(
+                inner,
+                ras_audit::AuditEvent::ClipboardRejected {
+                    code: ErrorCode::CapabilityDenied,
+                },
+            );
+            return;
+        }
+        let tx = inner
+            .outbound_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let len = text.len();
+            if tx
+                .try_send(ControlMsg::ClipboardText {
+                    text: ras_protocol::Redacted(text),
+                })
+                .is_ok()
+            {
+                record_audit(
+                    inner,
+                    ras_audit::AuditEvent::ClipboardApplied {
+                        len: u32::try_from(len).unwrap_or(u32::MAX),
+                    },
+                );
+            }
+        }
+    }
 }
 
 /// Lock-free signals shared between the async orchestrator and the blocking media thread.
@@ -1612,6 +1660,10 @@ struct ControllerInner {
     /// Where inbound host cursor-shape updates go (ADR-073). Attached like the renderer; absent →
     /// cursor updates are dropped (the app keeps its generic pointer). Display data, never input.
     cursor_sink: Mutex<Option<Arc<dyn CursorSink>>>,
+    /// Where an inbound host→controller clipboard push is applied (ADR-076, `clipboard.read`). The host
+    /// gated it on `clipboard.read`; this sink only **sets** the OS clipboard, never pastes. Absent →
+    /// the push is dropped.
+    clipboard_sink: Mutex<Option<Arc<dyn ClipboardSink>>>,
     stream_config: Mutex<Option<StreamConfig>>,
     command_tx: Mutex<Option<mpsc::Sender<ControlCommand>>>,
     /// Highest frame id delivered to the renderer (reported back as `last_decoded_frame`).
@@ -1646,6 +1698,7 @@ impl ControllerSession {
                 renderer: Mutex::new(None),
                 audio_output: Mutex::new(None),
                 cursor_sink: Mutex::new(None),
+                clipboard_sink: Mutex::new(None),
                 stream_config: Mutex::new(None),
                 command_tx: Mutex::new(None),
                 last_decoded_frame: AtomicU64::new(0),
@@ -1832,6 +1885,17 @@ impl ControllerSession {
             .cursor_sink
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Attach/replace the clipboard sink (ADR-076): where an inbound host→controller clipboard push is
+    /// applied to the controller's OS clipboard (**set, never pasted**). Absent → pushes are dropped.
+    /// The host has already gated the push on `clipboard.read` (Inv 15).
+    pub fn attach_clipboard_sink(&self, sink: Arc<dyn ClipboardSink>) {
+        *self
+            .inner
+            .clipboard_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
     }
 
     /// Ask the host for a fresh IDR (PLI-style) over the reliable control channel. Never blocks
@@ -2101,6 +2165,36 @@ async fn controller_control_loop(
                         .clone()
                     {
                         sink.emit(LifecycleEvent::ChatMessage { text });
+                    }
+                }
+                // Host → controller clipboard push (ADR-076, `clipboard.read`). The host already gated it
+                // on `clipboard.read`; apply it to the controller's OS clipboard — **set, never pasted**
+                // (no-auto-paste rule) — and surface a content-free outcome. Absent sink → dropped.
+                Ok(ControlMsg::ClipboardText { text }) => {
+                    let sink = inner
+                        .clipboard_sink
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    let outcome = match sink {
+                        // `reveal()` at the OS-write boundary is the one sanctioned use, never a log.
+                        Some(s) => match s.set_text(text.reveal()) {
+                            Ok(()) => LifecycleEvent::ClipboardApplied {
+                                len: text.reveal().len(),
+                            },
+                            Err(e) => LifecycleEvent::ClipboardRejected { code: e.code },
+                        },
+                        None => LifecycleEvent::ClipboardRejected {
+                            code: ErrorCode::CapabilityDenied,
+                        },
+                    };
+                    if let Some(sink) = inner
+                        .lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.emit(outcome);
                     }
                 }
                 Ok(_) => {}

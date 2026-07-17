@@ -174,7 +174,12 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   landed too (ADR-079)**: `ras-clipboard::ArboardClipboardSink` over `arboard` (NSPasteboard/Win32/X11),
   sets-never-pastes, fail-closed, `default-features=false` (text-only, X11-only Linux), BSL-1.0 scoped
   in cargo-deny; wired into Share via `with_clipboard_sink` but **inert until `clipboard.write` is
-  granted** (default OFF). Enabling the grant + app "Send clipboard"/indicator is the follow-up. **In-session chat landed (ADR-082):** `ControlMsg::ChatMessage` with the payload in a `Redacted` newtype
+  granted** (default OFF). **Both clipboard directions now wired (ADR-076):** `HostSession::send_clipboard_text`
+  gates the host's push on `clipboard.read` and forwards it over the outbound channel; the controller
+  applies it via an attached `ClipboardSink` (`attach_clipboard_sink`, set-never-paste) with the same
+  content-free `ClipboardApplied`/`Rejected` outcome. Loopback-tested both ways (granted → controller
+  sink receives; withheld → nothing crosses the wire, Inv 15). Enabling the grant + app "Send
+  clipboard"/indicator is the follow-up. **In-session chat landed (ADR-082):** `ControlMsg::ChatMessage` with the payload in a `Redacted` newtype
   **end-to-end** (wire + codec + the `LifecycleEvent::ChatMessage` that surfaces it), so chat text — a
   secret in the Inv-8 sense — can never leak to a log/trace; `.reveal()`d only at display. **No
   capability** (base session comms — touches no OS/input/screen surface; a live session already required
