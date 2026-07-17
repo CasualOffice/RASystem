@@ -18,7 +18,7 @@ mod paseto;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use ras_identity::{verify, KeyStore};
+use ras_identity::{verify, AssuranceTier, KeyStore};
 use ras_policy::{grantable, recognize, CapabilitySet};
 use ras_protocol::{ErrorCode, RasError, PROTOCOL_VERSION};
 
@@ -583,6 +583,92 @@ impl<K: KeyStore> SessionGrantIssuer for LocalHostGrantIssuer<K> {
             paseto::v4_public_sign(|m| self.keystore.sign(m), &grant.encode_claims(), b"", b"")?;
         Ok(Bytes::from(token.into_bytes()))
     }
+}
+
+// ── Unattended access (§3.4, ADR-085) ─────────────────────────────────────────────────────────────
+//
+// The opposite of a standing password. A host may **pre-authorize** a *paired* controller (ADR-084) to
+// obtain a session **without a live consent click** — but this grants no standing *session*: every
+// connect still mints a fresh, short-lived, endpoint-bound `SessionGrant` (Inv 3), enforced per message
+// (Inv 15) and overridable by emergency stop (Inv 4). "Unattended" means only that the *issuer*
+// pre-approves without a live human, which **raises** the bar on expiry / scope / revocation.
+
+/// A standing, host-recorded pre-authorization letting a paired controller be granted a session
+/// unattended (§3.4). Host-local for the MVP (the host trusts its own store, Inv 1); a signed/portable
+/// form reusing the PASETO envelope is the control-plane follow-up. Revocation = drop this record **or**
+/// de-list the controller key (ADR-084) — either kills unattended, falling back to attended consent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnattendedAuthorization {
+    /// The paired controller this pre-authorization is bound to.
+    pub controller_id: [u8; 32],
+    /// The capability **ceiling** auto-issuable without a click. Not authority on its own — at issuance
+    /// it is still `requested ∩ policy ∩ this`, so policy can only ever *narrow* it (Inv 15).
+    pub capabilities: CapabilitySet,
+    /// Absolute expiry of the standing authorization (host clock). Short-lived + host-renewed before
+    /// expiry; a lapsed authorization is **not** honored (never a silently-permanent standing access,
+    /// Inv 3) — the session falls back to attended consent.
+    pub expires_at: UnixMillis,
+}
+
+/// Why unattended (no-click) issuance was refused. Each maps to "fall back to attended consent"; none
+/// is a hard failure (the controller can always try the attended path).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnattendedRefusal {
+    /// The deployment's key store is software-only (Tier 0); unattended requires an attested Tier ≥1
+    /// store (Inv 16 — no phishable factor recovers a phishing-resistant one). The hard cap.
+    InsufficientTier,
+    /// The controller is not (or no longer) paired — de-listing kills unattended too (Inv 1).
+    NotPaired,
+    /// No standing authorization on file for this controller.
+    NotAuthorized,
+    /// The standing authorization has expired (Inv 3 — never silently permanent).
+    Expired,
+}
+
+/// The unattended-issuance decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnattendedDecision {
+    /// Auto-issue a fresh session grant **without** a live prompt, bounded by the authorization's
+    /// capability ceiling (still re-intersected with policy + the request at issuance).
+    Proceed,
+    /// Require the local user's live consent this session (the ordinary attended path).
+    RequireAttendedConsent(UnattendedRefusal),
+}
+
+/// Decide whether a connecting controller may be granted a session **unattended** (§3.4, Inv 16/3/1/4).
+/// **Pure** — the caller supplies the facts (all sourced host-side, never from the controller's claim):
+/// - `is_paired`: from the host's [`PairingRegistry`](ras_identity::PairingRegistry) (Inv 1 owns the list),
+/// - `tier`: the host key store's [`AssuranceTier`] (Inv 16),
+/// - `authorization`: the standing record for this controller, if any,
+/// - `now`: the host clock (ms).
+///
+/// **Fail-closed + ordered:** the Tier cap is checked first (a Tier-0 deployment can *never* do
+/// unattended, whatever else is true), then pairing, then the authorization's presence, then expiry.
+/// A `Proceed` never bypasses grant issuance — it only skips the *live prompt*; the fresh
+/// `SessionGrant` (endpoint-bound, per-message-enforced, emergency-stoppable) is still minted.
+#[must_use]
+pub fn unattended_decision(
+    is_paired: bool,
+    tier: AssuranceTier,
+    authorization: Option<&UnattendedAuthorization>,
+    now: UnixMillis,
+) -> UnattendedDecision {
+    use UnattendedDecision::{Proceed, RequireAttendedConsent};
+    // Inv 16 — the hard cap: unattended access above Tier 0 requires attested hardware key storage.
+    if tier < AssuranceTier::Tier1 {
+        return RequireAttendedConsent(UnattendedRefusal::InsufficientTier);
+    }
+    if !is_paired {
+        return RequireAttendedConsent(UnattendedRefusal::NotPaired);
+    }
+    let Some(auth) = authorization else {
+        return RequireAttendedConsent(UnattendedRefusal::NotAuthorized);
+    };
+    if now >= auth.expires_at {
+        return RequireAttendedConsent(UnattendedRefusal::Expired);
+    }
+    Proceed
 }
 
 /// Validate a PASETO grant token host-side (design §5). `host_verifying_key` is the issuer's public

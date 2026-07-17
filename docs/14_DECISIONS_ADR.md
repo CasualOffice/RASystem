@@ -914,6 +914,36 @@
     decision-governs-prompt-only (+ revocation flips it back), and `pairing_code`
     deterministic/grouped/key-specific/Crockford-only — all green.
 
+- **ADR-085 · Unattended access: a Tier-gated standing pre-authorization that skips the live prompt but
+  never the fresh grant · Accepted** (`docs/20 §3.4`, `docs/16`; builds on the pairing registry ADR-084).
+  Incumbents ship a **standing password** (RustDesk) or a shared account (TeamViewer — whose 2016
+  credential-stuffing wave shows the wrong shape). We build the **opposite**: the host pre-authorizes the
+  *issuer*, not a standing session.
+  - **Unattended ≠ standing session.** A `Proceed` decision only skips the **live consent click** — every
+    connect **still** mints a fresh, short-lived, **endpoint-bound** `SessionGrant` (Inv 3), enforced per
+    message (Inv 15) and overridable by emergency stop (Inv 4). So "unattended" *raises* the bar on
+    expiry / scope / revocation rather than lowering it. Encoded so it can't drift: `unattended_decision`
+    returns `Proceed | RequireAttendedConsent(reason)` and never issues anything — issuance stays the
+    `SessionGrantIssuer`'s `requested ∩ policy ∩ ceiling`, so policy can only ever *narrow* the standing
+    ceiling.
+  - **Tier-16 is the hard cap, checked first.** Unattended above Tier 0 requires an **attested Tier ≥1**
+    key store (Inv 16 — no phishable factor recovers a phishing-resistant one). A software-only (Tier 0)
+    deployment can **never** do unattended, whatever else is true (tested). Then, fail-closed and ordered:
+    paired (Inv 1 — de-listing the key kills unattended) → a standing authorization exists → not expired
+    (Inv 3 — never silently permanent; the host renews before expiry, a lapse falls back to attended).
+  - **`UnattendedAuthorization`** is a host-local record (controller id + capability **ceiling** + expiry);
+    the host trusts its own store (Inv 1). Revocation = drop the record **or** de-list the key (ADR-084) —
+    either falls back to attended consent. All facts fed to the pure decision are host-side, never the
+    controller's claim.
+  - **Scope:** pure decision + model (verifiable off-device), in `ras-grant` (the authorization heart,
+    which already sees identity + policy). Deferred: a **signed/portable** authorization form reusing the
+    PASETO envelope (control-plane track), wiring the decision into the connect/consent flow + a host UI
+    to grant/revoke unattended, and the auto-renew loop. Depends on the pairing registry (ADR-084) and the
+    `AssuranceTier` model already in `ras-identity`.
+  - **Verify:** the one `Proceed` path (attested + paired + authorized + unexpired, incl. a higher tier);
+    Tier-0-is-capped-regardless; and not-paired / not-authorized / expired (with the `now == expiry`
+    boundary + one-ms-before proceeds) — all green.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

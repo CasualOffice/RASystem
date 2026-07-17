@@ -412,3 +412,65 @@ proptest! {
         prop_assert_eq!(decoded, req);
     }
 }
+
+// ── Unattended access (§3.4, ADR-085) ─────────────────────────────────────────────────────────────
+
+fn authz(caps_set: &[&str], expires_at: UnixMillis) -> UnattendedAuthorization {
+    UnattendedAuthorization {
+        controller_id: [0x42; 32],
+        capabilities: caps(caps_set),
+        expires_at,
+    }
+}
+
+#[test]
+fn unattended_proceeds_only_when_tier_paired_authorized_and_unexpired() {
+    let auth = authz(&["screen.view", "pointer.virtual"], NOW + 60_000);
+    // The one path that skips the live prompt: attested tier, paired, authorized, not expired.
+    assert_eq!(
+        unattended_decision(true, AssuranceTier::Tier1, Some(&auth), NOW),
+        UnattendedDecision::Proceed
+    );
+    // A higher tier is still fine.
+    assert_eq!(
+        unattended_decision(true, AssuranceTier::Tier2, Some(&auth), NOW),
+        UnattendedDecision::Proceed
+    );
+}
+
+#[test]
+fn unattended_tier0_is_capped_regardless_of_everything_else() {
+    // Inv 16: a software-only (Tier 0) deployment can NEVER do unattended, even paired + authorized.
+    let auth = authz(&["screen.view"], NOW + 60_000);
+    assert_eq!(
+        unattended_decision(true, AssuranceTier::Tier0, Some(&auth), NOW),
+        UnattendedDecision::RequireAttendedConsent(UnattendedRefusal::InsufficientTier)
+    );
+}
+
+#[test]
+fn unattended_requires_pairing_authorization_and_freshness() {
+    let auth = authz(&["screen.view"], NOW + 60_000);
+    // Not paired → fall back to attended (Inv 1 — de-listing the key kills unattended).
+    assert_eq!(
+        unattended_decision(false, AssuranceTier::Tier1, Some(&auth), NOW),
+        UnattendedDecision::RequireAttendedConsent(UnattendedRefusal::NotPaired)
+    );
+    // Paired + attested but no standing authorization on file.
+    assert_eq!(
+        unattended_decision(true, AssuranceTier::Tier1, None, NOW),
+        UnattendedDecision::RequireAttendedConsent(UnattendedRefusal::NotAuthorized)
+    );
+    // Authorization present but expired (Inv 3 — never silently permanent). Boundary: `now == expiry`.
+    let expired = authz(&["screen.view"], NOW);
+    assert_eq!(
+        unattended_decision(true, AssuranceTier::Tier1, Some(&expired), NOW),
+        UnattendedDecision::RequireAttendedConsent(UnattendedRefusal::Expired)
+    );
+    // One ms before expiry still proceeds.
+    let almost = authz(&["screen.view"], NOW + 1);
+    assert_eq!(
+        unattended_decision(true, AssuranceTier::Tier1, Some(&almost), NOW),
+        UnattendedDecision::Proceed
+    );
+}

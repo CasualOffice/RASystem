@@ -195,6 +195,16 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   `pairing_code(id)` renders the pubkey as grouped **Crockford-base32** (omits `I L O U`) for the QR-side
   human check. Pure (no clock; caller passes timestamps). Follow-up: **SQLite** durable store, wiring the
   decision into the app connect/consent flow + host-displayed QR, then unattended access.
+- **Unattended access — decision model landed (ADR-085, §3.4).** `ras-grant` (the authorization heart)
+  gains the pure `unattended_decision(is_paired, tier, authorization, now) → Proceed |
+  RequireAttendedConsent(reason)` + the `UnattendedAuthorization` record (controller id + capability
+  **ceiling** + expiry). **Structural rule:** a `Proceed` never issues anything — it only skips the *live
+  prompt*; issuance stays the `SessionGrantIssuer`'s `requested ∩ policy ∩ ceiling` (policy can only
+  narrow), so every connect still mints a fresh, endpoint-bound, per-message-enforced, emergency-stoppable
+  `SessionGrant` (Inv 3/4/15). **Fail-closed + ordered:** Tier-16 cap first (software-only Tier 0 can
+  *never* do unattended — tested) → paired (Inv 1, de-listing kills it) → authorization exists → not
+  expired (Inv 3). All facts host-side, never the controller's claim. Follow-up: a signed/portable
+  authorization (PASETO), connect/consent-flow wiring + grant/revoke UI, auto-renew loop.
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.
@@ -518,7 +528,7 @@ casual-ras/
     ras-core/             # session orchestration, state machines
     ras-protocol/         # protobuf messages, framing, versioning
     ras-identity/         # Ed25519 identities, key storage, paired-controller registry (ADR-084)
-    ras-grant/            # access requests, session grants, issuer trait
+    ras-grant/            # access requests, session grants, issuer trait, unattended-access model (ADR-085)
     ras-policy/           # capability intersection, local policy
     ras-control/          # control leases, generations, input routing + OsInputSink/ClipboardSink seams
     ras-clipboard/        # cross-platform clipboard write backend (arboard; set-never-paste, ADR-079)
