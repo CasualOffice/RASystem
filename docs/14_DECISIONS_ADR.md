@@ -988,11 +988,16 @@
   - **Same `pointer.move` capability, gated identically (Inv 15).** Relative motion is still cursor
     movement, so `required_cap` maps it to `pointer.move` — a lease without it denies a relative move at
     the per-message gate (tested); no new capability (it is not a broader authority than absolute move).
-  - **`OsInputSink::pointer_move_relative` has a default no-op** so the three existing backends stay
-    source-compatible; a backend that supports it overrides (CGEvent / XTEST / `SendInput`
-    `MOUSEEVENTF_MOVE`). The **client-side touch-gesture → closed-action translator** (so the host only
-    ever sees clicks/wheel/relative-moves — preserving Inv 6) and the real backend overrides are the
-    on-device/app follow-up; the mobile controller also depends on `keyboard.text` (ADR-083, done).
+  - **`OsInputSink::pointer_move_relative` has a default no-op** so backends stay source-compatible; a
+    backend that supports it overrides. The **macOS (CGEvent) override has landed** (`ras-input-macos`):
+    it reads the *live* cursor position (a null `CGEvent` reports it, so it composes with local motion),
+    adds the delta, **clamps to the whole-desktop union** so it can never park off-screen (Inv 6
+    fail-safe), and posts a `MouseMoved` that also carries `kCGMouseEventDeltaX/Y` so relative-aware apps
+    (games) see the motion — compile+clippy-clean on macOS, the union math unit-tested; live injection is
+    the on-device row. The **Linux (XTEST) / Windows (`SendInput` `MOUSEEVENTF_MOVE`) overrides** and the
+    **client-side touch-gesture → closed-action translator** (so the host only ever sees
+    clicks/wheel/relative-moves — Inv 6) are the remaining follow-up; the mobile controller also depends
+    on `keyboard.text` (ADR-083, done).
   - **Verify:** codec roundtrip + fuzz (ras-protocol) and the per-message gate test (`pointer.move`-less
     lease denies it; with it, authorized) in `ras-control` — green.
 

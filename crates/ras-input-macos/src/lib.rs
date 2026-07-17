@@ -26,7 +26,7 @@ mod macos {
     use core_graphics::display::CGDisplay;
     use core_graphics::event::{
         CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGKeyCode, CGMouseButton,
-        ScrollEventUnit,
+        EventField, ScrollEventUnit,
     };
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::CGPoint;
@@ -117,6 +117,28 @@ mod macos {
             *self.last_point.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
             CGPoint::new(x, y)
         }
+
+        /// The global bounding box `(x, y, w, h)` of the whole desktop — the union of registered display
+        /// bounds, or the main display if none are registered. Used to keep relative motion on-screen.
+        fn desktop_bounds(&self) -> (f64, f64, f64, f64) {
+            let d = self.displays.lock().unwrap_or_else(|e| e.into_inner());
+            if d.is_empty() {
+                let r = CGDisplay::main().bounds();
+                (r.origin.x, r.origin.y, r.size.width, r.size.height)
+            } else {
+                let min_x = d.iter().map(|b| b.x).fold(f64::INFINITY, f64::min);
+                let min_y = d.iter().map(|b| b.y).fold(f64::INFINITY, f64::min);
+                let max_x = d
+                    .iter()
+                    .map(|b| b.x + b.w)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let max_y = d
+                    .iter()
+                    .map(|b| b.y + b.h)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                (min_x, min_y, max_x - min_x, max_y - min_y)
+            }
+        }
     }
 
     fn source() -> Result<CGEventSource, InputError> {
@@ -158,6 +180,30 @@ mod macos {
             )
             .map_err(|()| make_err())?;
             event.post(CGEventTapLocation::HID);
+            Ok(())
+        }
+
+        fn pointer_move_relative(&self, dx: i16, dy: i16) -> Result<(), InputError> {
+            // Read the *live* cursor position (a null event reports it), so this composes with any local
+            // motion — not just our own last move. Add the delta, then clamp to the desktop so relative
+            // motion can never park the cursor off-screen (Inv 6 fail-safe).
+            let current = CGEvent::new(source()?).map_err(|()| make_err())?.location();
+            let (bx, by, bw, bh) = self.desktop_bounds();
+            let nx = (current.x + f64::from(dx)).clamp(bx, bx + (bw - 1.0).max(0.0));
+            let ny = (current.y + f64::from(dy)).clamp(by, by + (bh - 1.0).max(0.0));
+            let event = CGEvent::new_mouse_event(
+                source()?,
+                CGEventType::MouseMoved,
+                CGPoint::new(nx, ny),
+                CGMouseButton::Left,
+            )
+            .map_err(|()| make_err())?;
+            // Carry the relative delta too, so relative-aware apps (games, 3D viewers) see the motion,
+            // not just the absolute reposition.
+            event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, i64::from(dx));
+            event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, i64::from(dy));
+            event.post(CGEventTapLocation::HID);
+            *self.last_point.lock().unwrap_or_else(|e| e.into_inner()) = (nx, ny);
             Ok(())
         }
 
@@ -451,6 +497,20 @@ mod macos {
             let p = sink.to_point(0, f32::NAN, f32::INFINITY);
             assert!((p.x - 50.0).abs() < 0.001);
             assert!((p.y - 60.0).abs() < 0.001);
+        }
+
+        #[test]
+        fn desktop_bounds_is_the_union_of_registered_displays() {
+            // The relative-motion clamp uses the whole-desktop box (ADR-087). With a HiDPI secondary at
+            // a negative origin, the union spans both displays so relative moves reach either screen.
+            let sink = CgEventSink::new();
+            sink.set_display_bounds(0, 0.0, 0.0, 1920.0, 1080.0); // primary at origin
+            sink.set_display_bounds(1, -1280.0, 0.0, 1280.0, 720.0); // to the left, negative origin
+            let (x, y, w, h) = sink.desktop_bounds();
+            assert!((x - (-1280.0)).abs() < 0.001, "min x is the left display");
+            assert!((y - 0.0).abs() < 0.001);
+            assert!((w - (1920.0 + 1280.0)).abs() < 0.001, "spans both displays");
+            assert!((h - 1080.0).abs() < 0.001, "tallest display height");
         }
     }
 }
