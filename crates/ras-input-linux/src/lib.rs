@@ -165,6 +165,36 @@ mod linux {
             (xi, yi)
         }
 
+        /// The global bounding box `(x, y, w, h)` of the whole desktop — the union of registered display
+        /// bounds, or the default screen if none are registered. Keeps relative motion on-screen (Inv 6).
+        fn desktop_bounds(&self, st: &State) -> (f64, f64, f64, f64) {
+            if st.displays.is_empty() {
+                (0.0, 0.0, f64::from(self.screen_w), f64::from(self.screen_h))
+            } else {
+                let min_x = st
+                    .displays
+                    .iter()
+                    .map(|b| b.x)
+                    .fold(f64::INFINITY, f64::min);
+                let min_y = st
+                    .displays
+                    .iter()
+                    .map(|b| b.y)
+                    .fold(f64::INFINITY, f64::min);
+                let max_x = st
+                    .displays
+                    .iter()
+                    .map(|b| b.x + b.w)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let max_y = st
+                    .displays
+                    .iter()
+                    .map(|b| b.y + b.h)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                (min_x, min_y, max_x - min_x, max_y - min_y)
+            }
+        }
+
         /// Send one XTEST event and flush. Fire-and-forget (unchecked) to keep latency low.
         fn fake(&self, type_: u8, detail: u8, x: i16, y: i16) -> Result<(), InputError> {
             let conn = self.conn.as_ref().ok_or_else(|| {
@@ -208,6 +238,30 @@ mod linux {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let (x, y) = self.to_point(display, nx, ny, &mut st);
             self.fake(MOTION_NOTIFY_EVENT, 0, x, y)
+        }
+
+        fn pointer_move_relative(&self, dx: i16, dy: i16) -> Result<(), InputError> {
+            // Read the *live* pointer position (so this composes with any local motion, not just our
+            // own last move), add the delta, and clamp to the desktop so it can never park the cursor
+            // off-screen (Inv 6 fail-safe). XTEST relative motion (detail=1) is skipped in favour of a
+            // clamped absolute move, matching the macOS backend.
+            let conn = self.conn.as_ref().ok_or_else(|| {
+                RasError::recoverable(ErrorCode::InputFailed, "no X11 connection")
+            })?;
+            let ptr = conn
+                .query_pointer(self.root)
+                .map_err(|_| RasError::recoverable(ErrorCode::InputFailed, "QueryPointer failed"))?
+                .reply()
+                .map_err(|_| RasError::recoverable(ErrorCode::InputFailed, "QueryPointer reply"))?;
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let (bx, by, bw, bh) = self.desktop_bounds(&st);
+            let nx = (f64::from(ptr.root_x) + f64::from(dx)).clamp(bx, bx + (bw - 1.0).max(0.0));
+            let ny = (f64::from(ptr.root_y) + f64::from(dy)).clamp(by, by + (bh - 1.0).max(0.0));
+            // f64→i16 `as` saturates (Rust ≥1.45) — a defensive belt on top of the clamp above.
+            let (xi, yi) = (nx.round() as i16, ny.round() as i16);
+            st.last_point = (xi, yi);
+            drop(st);
+            self.fake(MOTION_NOTIFY_EVENT, 0, xi, yi)
         }
 
         fn pointer_button(
@@ -486,6 +540,21 @@ mod linux {
             let (x, y) = sink.to_point(0, f32::NAN, f32::INFINITY, &mut st);
             assert_eq!(x, 50);
             assert_eq!(y, 60);
+        }
+
+        #[test]
+        fn desktop_bounds_is_the_union_of_registered_displays() {
+            // Relative motion (ADR-087) clamps to the whole-desktop union so it reaches either screen —
+            // here a HiDPI secondary at a negative origin extends the box to the left.
+            let sink = X11InputSink::new();
+            sink.set_display_bounds(0, 0.0, 0.0, 1920.0, 1080.0); // primary at origin
+            sink.set_display_bounds(1, -1280.0, 0.0, 1280.0, 720.0); // to the left, negative origin
+            let st = sink.state.lock().unwrap();
+            let (x, y, w, h) = sink.desktop_bounds(&st);
+            assert!((x - (-1280.0)).abs() < 0.001, "min x is the left display");
+            assert!((y - 0.0).abs() < 0.001);
+            assert!((w - (1920.0 + 1280.0)).abs() < 0.001, "spans both displays");
+            assert!((h - 1080.0).abs() < 0.001, "tallest display height");
         }
     }
 }

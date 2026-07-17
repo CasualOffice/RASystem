@@ -994,10 +994,13 @@
     adds the delta, **clamps to the whole-desktop union** so it can never park off-screen (Inv 6
     fail-safe), and posts a `MouseMoved` that also carries `kCGMouseEventDeltaX/Y` so relative-aware apps
     (games) see the motion — compile+clippy-clean on macOS, the union math unit-tested; live injection is
-    the on-device row. The **Linux (XTEST) / Windows (`SendInput` `MOUSEEVENTF_MOVE`) overrides** and the
-    **client-side touch-gesture → closed-action translator** (so the host only ever sees
-    clicks/wheel/relative-moves — Inv 6) are the remaining follow-up; the mobile controller also depends
-    on `keyboard.text` (ADR-083, done).
+    the on-device row. The **Linux (XTEST) override has landed too** (`ras-input-linux`): same shape —
+    `QueryPointer` for the live position → add delta → clamp to the desktop union → absolute
+    `MotionNotify` (XTEST relative motion skipped in favour of the clamped absolute move); cross-compile +
+    clippy-clean for `x86_64-unknown-linux-gnu`, union math unit-tested, live XTEST run on-device. The
+    **Windows (`SendInput` `MOUSEEVENTF_MOVE`) override** and the **client-side touch-gesture →
+    closed-action translator** (so the host only ever sees clicks/wheel/relative-moves — Inv 6) are the
+    remaining follow-up; the mobile controller also depends on `keyboard.text` (ADR-083, done).
   - **Verify:** codec roundtrip + fuzz (ras-protocol) and the per-message gate test (`pointer.move`-less
     lease denies it; with it, authorized) in `ras-control` — green.
 

@@ -95,8 +95,10 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     `pointer.move`-less lease denies it — tested); `OsInputSink::pointer_move_relative` defaults no-op —
     the **macOS CGEvent override landed** (reads live cursor pos → adds delta → clamps to the desktop
     union so it never goes off-screen → posts `MouseMoved` + `kCGMouseEventDeltaX/Y` for games;
-    compile/clippy-clean on macOS, union math unit-tested, live injection on-device). Linux/Windows
-    overrides + the client touch-gesture translator remain;
+    compile/clippy-clean on macOS, union math unit-tested, live injection on-device). The **Linux XTEST
+    override landed too** (`QueryPointer` → add delta → clamp to desktop union → absolute `MotionNotify`;
+    cross-compile/clippy-clean for linux, union math unit-tested, live run on-device). Windows
+    (`SendInput`) override + the client touch-gesture translator remain;
   - `ras-control` **`LeaseManager`** + the **O(1) per-message gate** `authorize_input` (generation →
     lease → expiry → seq → layout → capability), host-authoritative (ADR-069, the RustDesk-CVE fix,
     Inv 15) — pure, `unsafe`-free, 16 tests covering the M4 matrix at the logic layer;
