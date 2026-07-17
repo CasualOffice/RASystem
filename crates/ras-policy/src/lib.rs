@@ -8,6 +8,9 @@
 
 use std::collections::BTreeSet;
 
+/// Signed-catalogue file push (ADR-086) — the only sanctioned file transfer (S7 / Inv 6).
+pub mod file;
+
 /// A set of capability identifiers (e.g. `"screen.view"`).
 ///
 /// Opaque strings; the catalogue below is the source of truth for which are *recognized*.

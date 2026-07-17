@@ -205,6 +205,18 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   *never* do unattended — tested) → paired (Inv 1, de-listing kills it) → authorization exists → not
   expired (Inv 3). All facts host-side, never the controller's claim. Follow-up: a signed/portable
   authorization (PASETO), connect/consent-flow wiring + grant/revoke UI, auto-renew loop.
+- **File transfer — signed-catalogue model landed (ADR-086, §3.3, the "danger channel").** We **reject**
+  browse-anywhere (Inv 6/S7) and build only the signed catalogue: `ras_policy::file` has
+  `DropCatalogue`/`DropTarget` (host-chosen sandbox dir + size cap + optional extension allow-list), a
+  `FilePushRequest` carrying **only** target-name + leaf-filename + size (**never a path** — the host
+  resolves the destination), and the fail-closed ordered `authorize_file_push` → a host-resolved child
+  path. `validate_filename` **structurally defends all three RustDesk CVE classes**: traversal/zip-slip
+  (rejects separators/`:`/`..`/control-chars/reserved-Windows-names → provably a direct-child leaf, a
+  **property test** asserts `dir.join(name).parent()==dir` over arbitrary input); capability-bleed
+  (per-target `file.push.<name>` is its own namespace; checks *only* that cap, never input/capture —
+  CVE-2026-58056/Inv 15); symlink-follow (the string is a safe leaf — the precondition for the deferred
+  `O_NOFOLLOW` write). Per-target caps deny-by-default. Pure (no I/O, no new crate/dep). Follow-up: wire
+  + chunked transfer protocol, per-transfer confirmation UI, `O_NOFOLLOW`/`openat` write backend.
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.
@@ -529,7 +541,7 @@ casual-ras/
     ras-protocol/         # protobuf messages, framing, versioning
     ras-identity/         # Ed25519 identities, key storage, paired-controller registry (ADR-084)
     ras-grant/            # access requests, session grants, issuer trait, unattended-access model (ADR-085)
-    ras-policy/           # capability intersection, local policy
+    ras-policy/           # capability intersection, local policy, signed-catalogue file push (ADR-086)
     ras-control/          # control leases, generations, input routing + OsInputSink/ClipboardSink seams
     ras-clipboard/        # cross-platform clipboard write backend (arboard; set-never-paste, ADR-079)
     ras-media/            # capture/encode/decode traits + pipeline (video + audio, ADR-077)

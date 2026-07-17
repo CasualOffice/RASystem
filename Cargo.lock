@@ -3659,6 +3659,9 @@ dependencies = [
 [[package]]
 name = "ras-policy"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "ras-protocol"

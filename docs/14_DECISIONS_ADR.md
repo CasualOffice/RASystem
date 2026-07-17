@@ -944,6 +944,39 @@
     Tier-0-is-capped-regardless; and not-paired / not-authorized / expired (with the `now == expiry`
     boundary + one-ms-before proceeds) — all green.
 
+- **ADR-086 · File transfer is a signed catalogue of host-resolved drop targets, never a browse-anywhere
+  path · Accepted** (`docs/20 §3.3`, strategy S7, Inv 6). File transfer is *the* danger channel — three
+  recent RustDesk CVE classes live on our threat model. So we **reject** the dual-pane browse-anywhere
+  file manager (a controller writing an arbitrary host path is exactly Inv 6) and build only the signed
+  catalogue.
+  - **The controller supplies a target name + a leaf filename + size — never a path.** The vendor
+    pre-declares a fixed `DropCatalogue` of named `DropTarget`s, each a **host-chosen** sandbox dir + a
+    size cap + an optional extension allow-list. The **host resolves** the destination
+    (`dest_dir.join(safe_leaf)`); the controller never chooses where bytes land.
+  - **Structurally defends the three CVE classes.** (1) *Path-traversal / zip-slip* (PR #14678):
+    `validate_filename` rejects a filename containing any separator (`/`,`\`), `:` (drive / ADS), `..`/`.`,
+    NUL/control chars, leading/trailing space or trailing dot, or a reserved Windows device name — so a
+    validated name is always a **direct child** leaf (a property test asserts `dir.join(name).parent() ==
+    dir` for *every* accepted input). (2) *Capability-bleed into input/capture* (CVE-2026-58056, Inv 15):
+    `file.push.<target>` is its own capability namespace; `authorize_file_push` checks **only** that cap —
+    never an input/capture cap — and the OS-input gate never maps a file action to a file cap. (3)
+    *Symlink-follow write* (CVE-2026-2490): path-string checks are necessary but TOCTOU-prone, so this
+    module makes the path **string** provably a safe child leaf, and the (deferred, on-device) write
+    backend MUST open with `O_NOFOLLOW`/`openat` — the string guarantee is that write's precondition.
+  - **Per-target capability, deny-by-default.** Each target contributes exactly one grantable
+    `file.push.<name>` (fine-grained, Inv 15 — never paywalled); nothing is default-on, and a push to one
+    target never authorizes another. Per-transfer local confirmation + the size cap round it out (the cap
+    is refused, never truncated).
+  - **Scope:** the pure catalogue + validator + authorization (in `ras-policy`, which owns capabilities —
+    no new crate/dep). Deferred: the wire messages + chunked transfer protocol, the local per-transfer
+    confirmation UI, and the `O_NOFOLLOW` write backend (on-device). Only ever in this shape; the
+    convenient browse-anywhere version stays rejected (`docs/20 §4`).
+  - **Verify:** `validate_filename` rejects every traversal/zip-slip/ADS/reserved-name/control-char case
+    and accepts safe leaves (incl. Unicode); `authorize_file_push` is fail-closed + ordered
+    (unknown-target / capability-denied / unsafe-filename / too-large / extension-denied) and returns a
+    host-resolved child path; the file cap satisfies no input cap; and a **property test** proves every
+    accepted name is a direct sandbox child — all green.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
