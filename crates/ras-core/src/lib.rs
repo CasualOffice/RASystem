@@ -39,9 +39,10 @@ pub use abr::LatencyFirstAbr;
 #[cfg(feature = "insecure-no-auth")]
 pub use deps::AllowAllValidator;
 pub use deps::{
-    AudioOutput, AudioSink, AudioSourceDyn, ControlChannelDyn, ControlConsent, CursorFrame,
-    CursorObserver, CursorShape, CursorSink, FrameSink, GrantDecision, GrantSessionValidator,
-    GrantValidator, PushResult, SessionAuthContext, SessionTransport, VideoSinkDyn, VideoSourceDyn,
+    AudioOutput, AudioSink, AudioSourceDyn, AuditSink, ControlChannelDyn, ControlConsent,
+    CursorFrame, CursorObserver, CursorShape, CursorSink, FrameSink, GrantDecision,
+    GrantSessionValidator, GrantValidator, PushResult, SessionAuthContext, SessionTransport,
+    VideoSinkDyn, VideoSourceDyn,
 };
 pub use event::{
     LifecycleEvent, LifecycleStream, QualitySample, SessionId, StopReason, StreamDescriptor,
@@ -1270,6 +1271,102 @@ mod e2e {
 
         controller.disconnect(StopReason::UserRequested).await;
         host.stop(StopReason::UserRequested).await;
+    }
+
+    // ── Audit journal wiring (ADR-088 / Inv 10) ──────────────────────────────────────────────────
+    /// An audit sink backed by a real hash-chained journal. Uses a monotonic counter for timestamps
+    /// (deterministic), so the recorded chain is reproducible and verifiable.
+    struct RecordingAudit {
+        journal: std::sync::Mutex<crate::audit::AuditJournal>,
+        clock: std::sync::atomic::AtomicU64,
+    }
+    impl RecordingAudit {
+        fn new(session_id: [u8; 16]) -> Self {
+            Self {
+                journal: std::sync::Mutex::new(crate::audit::AuditJournal::new(session_id)),
+                clock: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+        fn events(&self) -> Vec<crate::audit::AuditEvent> {
+            self.journal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entries()
+                .iter()
+                .map(|e| e.event)
+                .collect()
+        }
+        fn chain_ok(&self) -> bool {
+            self.journal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .verify()
+                .is_ok()
+        }
+    }
+    impl crate::AuditSink for RecordingAudit {
+        fn record(&self, event: crate::audit::AuditEvent) {
+            let t = self
+                .clock
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.journal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .append(event, t);
+        }
+    }
+
+    /// The host records content-free security events into a tamper-evident, hash-chained journal
+    /// (Inv 10): a `SessionStarted` at authorization, then `EmergencyStop` + `SessionEnded` on revoke,
+    /// and the chain verifies.
+    #[tokio::test]
+    async fn host_records_content_free_audit_events() {
+        use crate::audit::AuditEvent;
+        use ras_protocol::ErrorCode;
+        let audit = Arc::new(RecordingAudit::new([0x11; 16]));
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(&["screen.view"]))),
+        )
+        .with_audit_sink(audit.clone());
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+
+        // SessionStarted is recorded once the session is authorized + streaming.
+        assert!(
+            wait_until(|| audit.events().contains(&AuditEvent::SessionStarted), 200).await,
+            "SessionStarted must be recorded, got {:?}",
+            audit.events()
+        );
+
+        // Emergency stop → EmergencyStop + SessionEnded, both losslessly recorded.
+        host.emergency_stop(ErrorCode::SessionRevoked).await;
+        controller.disconnect(StopReason::UserRequested).await;
+
+        let events = audit.events();
+        assert_eq!(events.first(), Some(&AuditEvent::SessionStarted));
+        assert!(
+            events.contains(&AuditEvent::EmergencyStop {
+                code: ErrorCode::SessionRevoked
+            }),
+            "emergency stop must be audited, got {events:?}"
+        );
+        assert!(events.contains(&AuditEvent::SessionEnded {
+            code: ErrorCode::SessionRevoked
+        }));
+        assert!(
+            audit.chain_ok(),
+            "the recorded audit hash-chain must verify (tamper-evident)"
+        );
     }
 
     #[tokio::test]

@@ -231,9 +231,14 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   Domain-separated + session-genesis-bound (no cross-session splice); append-only (no edit/remove API).
   Pure (no clock/I/O); `sha2` (RustCrypto MIT/Apache) is the only new dep. Verified: chain links/verifies,
   determinism, content-tamper/reorder/middle-removal each caught at the right `seq`, signed-checkpoint
-  round-trip + rewrite/forged-key/tampered-head rejection, empty-journal. Follow-up: durable persistence
-  (append-only file / SQLite + periodic checkpoints), Merkle-batched forward-secure checkpoints, and
-  wiring the host loop to emit events (mirrors the existing content-free `LifecycleEvent`s).
+  round-trip + rewrite/forged-key/tampered-head rejection, empty-journal. **Host-loop wiring landed too:**
+  an `AuditSink` DI seam (`with_audit_sink`) receives events **synchronously + losslessly** (unlike the
+  advisory, drops-on-full `LifecycleEvent` stream — an audit that drops is worthless); `HostSession`
+  records `SessionStarted` / `ControlLeaseGranted`/`Revoked` / `InputRejected` / `ClipboardApplied`/
+  `Rejected` / `EmergencyStop` + `SessionEnded`, each before the equivalent lifecycle emit; the sink owns
+  clock + journal + persistence so `ras-core` stays clock/I/O-free. Loopback-tested (recorded chain
+  verifies). Follow-up: durable persistence (append-only file / SQLite + periodic checkpoints),
+  Merkle-batched forward-secure checkpoints, remaining source points (consent/audio/file-push).
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

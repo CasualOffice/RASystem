@@ -1016,11 +1016,21 @@
     ordering.
   - **Append-only.** `AuditJournal` exposes `append` + read accessors — no edit/remove API; `verify` /
     `verify_chain` recompute from genesis and report the first `ChainBroken { seq }`.
+  - **Host-loop wiring — NOW LANDED.** An `AuditSink` DI seam (`ras-core::deps`, `with_audit_sink`)
+    receives events **synchronously and losslessly** at each security point — deliberately unlike the
+    advisory, bounded, **drops-on-full** `LifecycleEvent` stream (an audit that could drop entries would
+    be worthless). The `HostSession` records `SessionStarted` at authorization, `ControlLeaseGranted` /
+    `ControlLeaseRevoked`, `InputRejected` (the per-message gate, Inv 15), `ClipboardApplied`/`Rejected`,
+    `EmergencyStop` + `SessionEnded` on revoke, and `SessionEnded` on graceful stop — each *before* the
+    equivalent lifecycle emit. The sink owns the clock + journal + persistence, so `ras-core` stays
+    clock- and I/O-free. Loopback-tested: a recording sink over a real journal captures the event
+    sequence and its **hash-chain verifies**.
   - **Scope:** the pure journal + chain + signed checkpoint (in the new-dep-light `ras-audit`: `sha2`
-    (RustCrypto, MIT/Apache) + the `ras-identity`/`ras-protocol` seams). Deferred: **durable persistence**
-    (append-only file / SQLite with periodic checkpoints), forward-secure key evolution + Merkle-batched
-    checkpoints (`docs/06 §12`), and wiring the orchestrator/host loop to emit events (it already emits
-    the parallel content-free `LifecycleEvent`s — the audit sink mirrors them).
+    (RustCrypto, MIT/Apache) + the `ras-identity`/`ras-protocol` seams), plus the host-loop `AuditSink`
+    wiring above. Deferred: **durable persistence** (append-only file / SQLite with periodic
+    checkpoints), forward-secure key evolution + Merkle-batched checkpoints (`docs/06 §12`), and a couple
+    of remaining source points (consent grant/deny, audio start/stop, file-push accept/reject) as those
+    subsystems reach the host loop.
   - **Verify:** chain links + verifies; append is deterministic + session-bound; content-tamper / reorder
     / middle-removal each break the chain at the right `seq`; a signed checkpoint round-trips and a
     rewritten journal (shorter "clean" history, tampered head, or an attacker-key signature) fails

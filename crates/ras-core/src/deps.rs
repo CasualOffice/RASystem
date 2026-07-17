@@ -14,6 +14,7 @@
 use async_trait::async_trait;
 
 use crate::CoreError;
+use ras_audit::AuditEvent;
 use ras_media::{EncodedAudio, EncodedFrame, StreamConfig};
 use ras_policy::CapabilitySet;
 use ras_protocol::{ControlMsg, ErrorCode};
@@ -187,6 +188,17 @@ pub trait CursorSink: Send + Sync {
     fn set_cached(&self, id: u32);
     /// The OS cursor is hidden — draw nothing.
     fn hide(&self);
+}
+
+/// The host-side audit sink (Inv 10, ADR-088): receives **content-free** security events as they happen
+/// and records them into the tamper-evident journal ([`ras_audit::AuditJournal`]) + durable store. Unlike
+/// the advisory, **lossy** `LifecycleEvent` stream (bounded, drops-on-full), this is **authoritative and
+/// must not drop** — so it is a synchronous, non-awaiting call the orchestrator makes at each security
+/// point, *before* the equivalent lifecycle event. The impl owns the journal, the clock (timestamps),
+/// and persistence. Default DI is a no-op, so a deployment opts into auditing by wiring one.
+pub trait AuditSink: Send + Sync {
+    /// Record one security event. Must return promptly and never drop it (append-only completeness).
+    fn record(&self, event: AuditEvent);
 }
 
 // ---------------------------------------------------------------------------------------------

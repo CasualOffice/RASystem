@@ -19,9 +19,9 @@ use tokio::sync::mpsc;
 
 use crate::abr::LatencyFirstAbr;
 use crate::deps::{
-    AudioOutput, ControlChannelDyn, ControlConsent, CursorFrame, CursorObserver, CursorShape,
-    CursorSink, DenyAllControl, DialTarget, FrameSink, GrantValidator, SessionAuthContext,
-    SessionTransport,
+    AudioOutput, AuditSink, ControlChannelDyn, ControlConsent, CursorFrame, CursorObserver,
+    CursorShape, CursorSink, DenyAllControl, DialTarget, FrameSink, GrantValidator,
+    SessionAuthContext, SessionTransport,
 };
 use crate::event::{
     LifecycleEvent, LifecycleSink, LifecycleStream, QualitySample, SessionId, StopReason,
@@ -254,6 +254,10 @@ struct HostInner<C, E> {
     cursor: Mutex<Option<Box<dyn CursorObserver>>>,
     /// The cursor task handle (a tokio task); aborted on teardown.
     cursor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Audit sink (Inv 10, ADR-088): records content-free security events into the tamper-evident
+    /// journal, losslessly (unlike the advisory lifecycle stream). `None` ⇒ no auditing. Injected via
+    /// [`HostSession::with_audit_sink`].
+    audit: Mutex<Option<Arc<dyn AuditSink>>>,
 }
 
 /// The host's audio capture + encoder, moved into the audio pump thread when it starts. The egress
@@ -313,6 +317,7 @@ where
                 audio_task: Mutex::new(None),
                 cursor: Mutex::new(None),
                 cursor_task: Mutex::new(None),
+                audit: Mutex::new(None),
             }),
         }
     }
@@ -371,6 +376,18 @@ where
             .cursor
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+        self
+    }
+
+    /// Inject the audit sink (Inv 10, ADR-088): the host records content-free security events into it
+    /// losslessly as they happen. Without one, no auditing. Additive; call before [`Self::start`].
+    #[must_use]
+    pub fn with_audit_sink(self, audit: Arc<dyn AuditSink>) -> Self {
+        *self
+            .inner
+            .audit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(audit);
         self
     }
 
@@ -533,6 +550,9 @@ where
             .await?;
 
         apply(&inner.state, SessionEvent::StreamConfigured);
+        // Authorized + streaming: the first audit event of the session (Inv 10). Recorded losslessly at
+        // the source, distinct from the advisory lifecycle stream.
+        record_audit(inner, ras_audit::AuditEvent::SessionStarted);
         sink.emit(LifecycleEvent::StreamConfigured {
             descriptor: StreamDescriptor::from_config(&config),
         });
@@ -655,6 +675,12 @@ where
         // Release any held keys/buttons and revoke the lease on a clean teardown too (Inv 4 cleanup).
         release_input(inner);
         apply(&inner.state, SessionEvent::LocalStop);
+        record_audit(
+            inner,
+            ras_audit::AuditEvent::SessionEnded {
+                code: ErrorCode::NormalClosure,
+            },
+        );
         if let Some(sink) = inner
             .lifecycle
             .lock()
@@ -720,6 +746,8 @@ where
         release_input(inner);
         // Audit-distinct terminal. Revoke overrides every non-terminal state.
         apply(&inner.state, SessionEvent::Revoke { code });
+        record_audit(inner, ras_audit::AuditEvent::EmergencyStop { code });
+        record_audit(inner, ras_audit::AuditEvent::SessionEnded { code });
         if let Some(sink) = inner
             .lifecycle
             .lock()
@@ -1222,6 +1250,12 @@ async fn host_control_loop<C, E>(
                                 signature: bytes::Bytes::new(),
                             })
                             .await;
+                        record_audit(
+                            inner,
+                            ras_audit::AuditEvent::ControlLeaseGranted {
+                                generation: lease.generation,
+                            },
+                        );
                         emit_lifecycle(
                             inner,
                             LifecycleEvent::ControlLeaseGranted {
@@ -1231,6 +1265,7 @@ async fn host_control_loop<C, E>(
                     }
                     Err(code) => {
                         let _ = control.send(ControlMsg::ControlRevoked { code }).await;
+                        record_audit(inner, ras_audit::AuditEvent::ControlLeaseRevoked { code });
                         emit_lifecycle(inner, LifecycleEvent::ControlLeaseEnded { code });
                     }
                 }
@@ -1240,6 +1275,7 @@ async fn host_control_loop<C, E>(
             // a content-free lifecycle event (never the coordinate/key/text — Inv 8).
             Ok(ControlMsg::Input(env)) => {
                 if let Err(code) = host_handle_input(inner, &env) {
+                    record_audit(inner, ras_audit::AuditEvent::InputRejected { code });
                     emit_lifecycle(inner, LifecycleEvent::InputRejected { code });
                 }
             }
@@ -1310,6 +1346,19 @@ fn emit_lifecycle<C, E>(inner: &HostInner<C, E>, ev: LifecycleEvent) {
         .clone()
     {
         sink.emit(ev);
+    }
+}
+
+/// Record a content-free security event to the audit journal (Inv 10, ADR-088), losslessly. No-op if
+/// no audit sink is wired. Synchronous — the sink must not drop (unlike the advisory lifecycle stream).
+fn record_audit<C, E>(inner: &HostInner<C, E>, event: ras_audit::AuditEvent) {
+    if let Some(sink) = inner
+        .audit
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        sink.record(event);
     }
 }
 
@@ -1441,7 +1490,26 @@ fn host_handle_clipboard<C, E>(inner: &HostInner<C, E>, text: &ras_protocol::Red
             code: ErrorCode::CapabilityDenied,
         },
     };
+    record_audit(
+        inner,
+        match &outcome {
+            LifecycleEvent::ClipboardApplied { len } => ras_audit::AuditEvent::ClipboardApplied {
+                len: u32::try_from(*len).unwrap_or(u32::MAX),
+            },
+            _ => ras_audit::AuditEvent::ClipboardRejected {
+                code: clipboard_reject_code(&outcome),
+            },
+        },
+    );
     emit_lifecycle(inner, outcome);
+}
+
+/// The reject code carried by a `ClipboardRejected` lifecycle event (defensive default otherwise).
+fn clipboard_reject_code(ev: &LifecycleEvent) -> ErrorCode {
+    match ev {
+        LifecycleEvent::ClipboardRejected { code } => *code,
+        _ => ErrorCode::Internal,
+    }
 }
 
 /// Revoke any active lease and flush the OS key-state (Invariant 4 key-state cleanup). Called on
