@@ -97,8 +97,11 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     union so it never goes off-screen → posts `MouseMoved` + `kCGMouseEventDeltaX/Y` for games;
     compile/clippy-clean on macOS, union math unit-tested, live injection on-device). The **Linux XTEST
     override landed too** (`QueryPointer` → add delta → clamp to desktop union → absolute `MotionNotify`;
-    cross-compile/clippy-clean for linux, union math unit-tested, live run on-device). Windows
-    (`SendInput`) override + the client touch-gesture translator remain;
+    cross-compile/clippy-clean for linux, union math unit-tested, live run on-device). The **Windows
+    `SendInput` override landed too** (`MOUSEEVENTF_MOVE` without `ABSOLUTE` = native relative motion,
+    Windows clamps to the virtual desktop itself — a one-line send; cross-compile/clippy-clean for
+    windows-msvc, needs Windows hardware to run). **All three OS backends now inject relative motion.**
+    The client touch-gesture translator remains;
   - `ras-control` **`LeaseManager`** + the **O(1) per-message gate** `authorize_input` (generation →
     lease → expiry → seq → layout → capability), host-authoritative (ADR-069, the RustDesk-CVE fix,
     Inv 15) — pure, `unsafe`-free, 16 tests covering the M4 matrix at the logic layer;

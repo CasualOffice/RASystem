@@ -169,6 +169,18 @@ mod win {
             )])
         }
 
+        fn pointer_move_relative(&self, dx: i16, dy: i16) -> Result<(), InputError> {
+            // `MOUSEEVENTF_MOVE` **without** `MOUSEEVENTF_ABSOLUTE` is relative motion — `dx`/`dy` are
+            // pixel deltas from the current cursor, which Windows clamps to the virtual desktop natively
+            // (no off-screen escape, Inv 6). Display-independent, so no geometry/`to_abs` (ADR-087).
+            self.send(&[mouse_input(
+                i32::from(dx),
+                i32::from(dy),
+                0,
+                MOUSEEVENTF_MOVE,
+            )])
+        }
+
         fn pointer_button(
             &self,
             display: u32,

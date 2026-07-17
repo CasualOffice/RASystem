@@ -998,9 +998,13 @@
     `QueryPointer` for the live position → add delta → clamp to the desktop union → absolute
     `MotionNotify` (XTEST relative motion skipped in favour of the clamped absolute move); cross-compile +
     clippy-clean for `x86_64-unknown-linux-gnu`, union math unit-tested, live XTEST run on-device. The
-    **Windows (`SendInput` `MOUSEEVENTF_MOVE`) override** and the **client-side touch-gesture →
-    closed-action translator** (so the host only ever sees clicks/wheel/relative-moves — Inv 6) are the
-    remaining follow-up; the mobile controller also depends on `keyboard.text` (ADR-083, done).
+    **Windows (`SendInput`) override has landed too** (`ras-input-windows`): the simplest of the three —
+    `MOUSEEVENTF_MOVE` **without** `ABSOLUTE` is native relative motion (Windows clamps to the virtual
+    desktop itself), so it is a one-line direct send; cross-compile + clippy-clean for
+    `x86_64-pc-windows-msvc`, live run needs Windows hardware the team lacks. All three OS backends now
+    inject relative motion. The **client-side touch-gesture → closed-action translator** (so the host
+    only ever sees clicks/wheel/relative-moves — Inv 6) is the remaining follow-up; the mobile controller
+    also depends on `keyboard.text` (ADR-083, done).
   - **Verify:** codec roundtrip + fuzz (ras-protocol) and the per-message gate test (`pointer.move`-less
     lease denies it; with it, authorized) in `ras-control` — green.
 
