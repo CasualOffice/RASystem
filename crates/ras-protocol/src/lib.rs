@@ -376,6 +376,17 @@ pub enum InputAction {
         /// Vertical notches (down positive).
         dy: i16,
     },
+    /// Move the OS pointer by a **relative** pixel delta from its current position (ADR-087, §3.6). For
+    /// trackpad/touch controllers where an absolute tap is unusable (a phone has no on-screen cursor to
+    /// place). No `display_id` / `layout_version`: relative motion is display-independent, so it needs no
+    /// capture geometry. Bounded `i16` px per event (a fast swipe is several events). Same `pointer.move`
+    /// capability as [`Self::PointerMove`] — it is still cursor movement, gated identically (Inv 15).
+    PointerMoveRelative {
+        /// Horizontal delta in pixels (right positive).
+        dx: i16,
+        /// Vertical delta in pixels (down positive).
+        dy: i16,
+    },
     /// Press or release a **physical** key by USB-HID usage (layout-independent), never a keysym.
     KeyEvent {
         /// USB-HID usage id (Keyboard/Keypad page).

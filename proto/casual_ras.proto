@@ -156,6 +156,13 @@ message PointerWheel {
   int32 dy = 2; // i16 range; down positive
 }
 
+// Relative pointer motion (pixel delta from the current position) for trackpad/touch controllers
+// (ADR-087). Display-independent — no display_id/layout_version. ras_protocol::InputAction::PointerMoveRelative.
+message PointerMoveRelative {
+  int32 dx = 1; // i16 range; right positive
+  int32 dy = 2; // i16 range; down positive
+}
+
 message KeyEvent {
   uint32 hid_usage = 1; // u16 USB-HID usage
   bool   down      = 2;
@@ -186,6 +193,7 @@ message InputAction {
     TextInput          text_input       = 5;
     ReleaseAllKeys     release_all_keys = 6;
     SetLockState       set_lock_state   = 7;
+    PointerMoveRelative pointer_move_relative = 8;
   }
 }
 

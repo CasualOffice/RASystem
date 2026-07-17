@@ -116,6 +116,8 @@ const DENY_UNKNOWN_ACTION: &str = "\u{0}deny-unknown-action";
 pub fn required_cap(action: &InputAction) -> Option<&'static str> {
     match action {
         InputAction::PointerMove { .. } => Some(ras_policy::POINTER_MOVE),
+        // Relative motion is still cursor movement — same capability as absolute move (ADR-087).
+        InputAction::PointerMoveRelative { .. } => Some(ras_policy::POINTER_MOVE),
         InputAction::PointerButton { .. } => Some(ras_policy::POINTER_CLICK),
         InputAction::PointerWheel { .. } => Some(ras_policy::POINTER_SCROLL),
         InputAction::KeyEvent { .. } => Some(ras_policy::KEYBOARD_KEY),
@@ -355,6 +357,16 @@ pub trait OsInputSink: Send + Sync {
     /// # Errors
     /// Backend/OS failure.
     fn pointer_wheel(&self, dx: i16, dy: i16) -> Result<(), InputError>;
+    /// Move the OS pointer by a relative pixel delta from its current position (ADR-087, §3.6 — the
+    /// trackpad/touch controller path). Default is a **no-op** so existing backends stay source-compatible;
+    /// a backend that supports relative motion (CGEvent / XTEST / `SendInput` with `MOUSEEVENTF_MOVE`)
+    /// overrides it. Gated identically to [`Self::pointer_move`] (the `pointer.move` capability).
+    ///
+    /// # Errors
+    /// Backend/OS failure.
+    fn pointer_move_relative(&self, _dx: i16, _dy: i16) -> Result<(), InputError> {
+        Ok(())
+    }
     /// Press or release a physical key by USB-HID usage + modifier bitset.
     ///
     /// # Errors
@@ -423,6 +435,7 @@ pub fn dispatch(sink: &dyn OsInputSink, action: &InputAction) -> Result<(), Inpu
             ..
         } => sink.pointer_button(*display_id, norm(*nx), norm(*ny), *button, *down),
         InputAction::PointerWheel { dx, dy } => sink.pointer_wheel(*dx, *dy),
+        InputAction::PointerMoveRelative { dx, dy } => sink.pointer_move_relative(*dx, *dy),
         InputAction::KeyEvent {
             hid_usage,
             down,
@@ -721,6 +734,51 @@ mod tests {
             .unwrap();
         let g2 = m2.generation();
         assert!(m2.authorize_input(&text(&lease2, g2, 1), 1001).is_ok());
+    }
+
+    #[test]
+    fn relative_pointer_move_is_gated_on_pointer_move() {
+        // Relative motion (ADR-087) is still cursor movement → same `pointer.move` cap as absolute move.
+        // A lease without `pointer.move` denies it; with it, it's authorized.
+        let rel = InputAction::PointerMoveRelative { dx: 3, dy: -4 };
+        assert_eq!(required_cap(&rel), Some(ras_policy::POINTER_MOVE));
+
+        let no_move = caps(&[ras_policy::CONTROL_REQUEST, ras_policy::POINTER_CLICK]);
+        let mut m = LeaseManager::new(no_move.clone(), 10_000_000, 1);
+        let lease = m
+            .issue([1u8; 32], &no_move, &no_move, 1000, LEASE_DEFAULT_TTL_MS)
+            .unwrap();
+        let g = m.generation();
+        let env = |gen, seq| InputEnvelope {
+            lease_id: lease.lease_id.0,
+            generation: gen,
+            seq,
+            action: rel.clone(),
+        };
+        assert_eq!(
+            m.authorize_input(&env(g, 1), 1001).unwrap_err(),
+            ControlError::CapabilityDenied
+        );
+
+        let with_move = caps(&[ras_policy::CONTROL_REQUEST, ras_policy::POINTER_MOVE]);
+        let mut m2 = LeaseManager::new(with_move.clone(), 10_000_000, 1);
+        let lease2 = m2
+            .issue(
+                [1u8; 32],
+                &with_move,
+                &with_move,
+                1000,
+                LEASE_DEFAULT_TTL_MS,
+            )
+            .unwrap();
+        let g2 = m2.generation();
+        let ok_env = InputEnvelope {
+            lease_id: lease2.lease_id.0,
+            generation: g2,
+            seq: 1,
+            action: rel,
+        };
+        assert!(m2.authorize_input(&ok_env, 1001).is_ok());
     }
 
     #[test]

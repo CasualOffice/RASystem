@@ -89,7 +89,11 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     clipboard/file/recording still withheld);
   - `ras-protocol` **OS-input wire** (ADR-067): `InputEnvelope{lease_id, generation, seq, action}` +
     the closed `InputAction` set + `ControlRequest/Granted/Revoked/Input` `ControlMsg` variants
-    (proto oneof 8–11, fail-closed codec + fuzz);
+    (proto oneof 8–11, fail-closed codec + fuzz); the closed action set later gained
+    `InputAction::PointerMoveRelative { dx, dy }` (**ADR-087**, §3.6 mobile) — a bounded `i16` pixel
+    delta, display-independent, gated on the **same `pointer.move`** cap at the per-message gate (a
+    `pointer.move`-less lease denies it — tested); `OsInputSink::pointer_move_relative` defaults no-op,
+    backends override on-device;
   - `ras-control` **`LeaseManager`** + the **O(1) per-message gate** `authorize_input` (generation →
     lease → expiry → seq → layout → capability), host-authoritative (ADR-069, the RustDesk-CVE fix,
     Inv 15) — pure, `unsafe`-free, 16 tests covering the M4 matrix at the logic layer;

@@ -977,6 +977,25 @@
     host-resolved child path; the file cap satisfies no input cap; and a **property test** proves every
     accepted name is a direct sandbox child — all green.
 
+- **ADR-087 · Relative-pointer input for trackpad/touch controllers · Accepted** (`docs/20 §3.6`, mobile
+  research). A phone has no on-screen cursor to place, so the absolute normalized `PointerMove` is
+  unusable there; the mobile-research finding is that a touch controller needs a **relative** pointer
+  primitive (a trackpad delta).
+  - **`InputAction::PointerMoveRelative { dx, dy }`** — a bounded `i16` pixel delta from the pointer's
+    current position, display-independent (no `display_id` / `layout_version`; relative motion needs no
+    capture geometry). Closed variant like every other input action (Inv 6 — never a keysym/path). Wire
+    oneof 8; fail-closed codec + fuzz.
+  - **Same `pointer.move` capability, gated identically (Inv 15).** Relative motion is still cursor
+    movement, so `required_cap` maps it to `pointer.move` — a lease without it denies a relative move at
+    the per-message gate (tested); no new capability (it is not a broader authority than absolute move).
+  - **`OsInputSink::pointer_move_relative` has a default no-op** so the three existing backends stay
+    source-compatible; a backend that supports it overrides (CGEvent / XTEST / `SendInput`
+    `MOUSEEVENTF_MOVE`). The **client-side touch-gesture → closed-action translator** (so the host only
+    ever sees clicks/wheel/relative-moves — preserving Inv 6) and the real backend overrides are the
+    on-device/app follow-up; the mobile controller also depends on `keyboard.text` (ADR-083, done).
+  - **Verify:** codec roundtrip + fuzz (ras-protocol) and the per-message gate test (`pointer.move`-less
+    lease denies it; with it, authorized) in `ras-control` — green.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

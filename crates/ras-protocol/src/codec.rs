@@ -497,6 +497,12 @@ fn input_action_to_pb(a: InputAction) -> pb::InputAction {
             dx: i32::from(dx),
             dy: i32::from(dy),
         }),
+        InputAction::PointerMoveRelative { dx, dy } => {
+            Action::PointerMoveRelative(pb::PointerMoveRelative {
+                dx: i32::from(dx),
+                dy: i32::from(dy),
+            })
+        }
         InputAction::KeyEvent {
             hid_usage,
             down,
@@ -548,6 +554,14 @@ fn input_action_from_pb(a: pb::InputAction) -> Result<InputAction, RasError> {
                 .map_err(|_| RasError::fatal(ErrorCode::InvalidMessage, "wheel dx out of range"))?,
             dy: i16::try_from(w.dy)
                 .map_err(|_| RasError::fatal(ErrorCode::InvalidMessage, "wheel dy out of range"))?,
+        }),
+        Some(Action::PointerMoveRelative(m)) => Ok(InputAction::PointerMoveRelative {
+            dx: i16::try_from(m.dx).map_err(|_| {
+                RasError::fatal(ErrorCode::InvalidMessage, "relative dx out of range")
+            })?,
+            dy: i16::try_from(m.dy).map_err(|_| {
+                RasError::fatal(ErrorCode::InvalidMessage, "relative dy out of range")
+            })?,
         }),
         Some(Action::KeyEvent(k)) => Ok(InputAction::KeyEvent {
             hid_usage: u16::try_from(k.hid_usage).map_err(|_| {
@@ -1252,6 +1266,7 @@ mod tests {
                 down: true,
             },
             InputAction::PointerWheel { dx: -120, dy: 240 },
+            InputAction::PointerMoveRelative { dx: -5, dy: 12 },
             InputAction::KeyEvent {
                 hid_usage: 0x04, // 'a'
                 down: true,
@@ -1867,6 +1882,8 @@ mod proptests {
                     }
                 }),
             (any::<i16>(), any::<i16>()).prop_map(|(dx, dy)| InputAction::PointerWheel { dx, dy }),
+            (any::<i16>(), any::<i16>())
+                .prop_map(|(dx, dy)| InputAction::PointerMoveRelative { dx, dy }),
             (any::<u16>(), any::<bool>(), any::<u8>()).prop_map(|(hid_usage, down, modifiers)| {
                 InputAction::KeyEvent {
                     hid_usage,

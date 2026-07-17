@@ -124,6 +124,7 @@ Not a full gap: the app **already** has viewer-side annotation + an overlay **re
 
 ### 3.6 Mobile controller — P3, medium friction
 From the mobile research: needs a **relative-pointer `InputAction`** (absolute-tap is unusable on a phone), the **`keyboard.text` Unicode/IME cap** (soft keyboards emit composed CJK/emoji that can't be HID scancodes — becomes *essential* here), a **client-side touch-gesture→closed-action translator** (host only ever sees clicks/wheel/moves — preserves Inv 6), a virtual-key toolbar with sticky modifiers, and **client-side-only zoom/pan**. Must be a **native app** (iOS WebKit has no Keyboard/Pointer Lock — why CRD ships native, not a PWA). The WebRTC/PWA path stays the deferred ADR-057 track. **P3.**
+- **Status: two prerequisite primitives LANDED.** (1) **`keyboard.text` Unicode/IME** is a real gated mode (ADR-083 — `Redacted` end-to-end, control-char-rejected, own lease bit). (2) **Relative-pointer input** landed (ADR-087): `InputAction::PointerMoveRelative { dx, dy }` — a bounded `i16` pixel delta, display-independent (no layout/geometry), gated on the same `pointer.move` capability at the per-message gate (a `pointer.move`-less lease denies it — tested), fail-closed codec + fuzz. `OsInputSink::pointer_move_relative` defaults to a no-op (backends override). **Follow-up:** the client touch-gesture→closed-action translator, the real backend overrides (CGEvent/XTEST/`SendInput`), the virtual-key toolbar + client-side zoom/pan — all in the (deferred) native mobile app.
 
 ---
 
