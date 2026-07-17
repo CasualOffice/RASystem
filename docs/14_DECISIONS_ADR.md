@@ -996,6 +996,36 @@
   - **Verify:** codec roundtrip + fuzz (ras-protocol) and the per-message gate test (`pointer.move`-less
     lease denies it; with it, authorized) in `ras-control` — green.
 
+- **ADR-088 · Audit journal: a per-session SHA-256 hash chain of content-free events, made unforgeable by
+  a host-signed head checkpoint · Accepted** (Invariant 10, `docs/06 §12`). `ras-audit` was a stub; this
+  implements it as pure data-structure + crypto (no clock, no I/O — persistence is the durable-store
+  follow-up).
+  - **Two guarantees, together.** (1) *Hash chain → tamper-evidence:* every `AuditEntry` commits to the
+    previous entry's hash (`SHA-256(domain ‖ seq ‖ prev_hash ‖ timestamp ‖ event)`), so altering,
+    reordering, or removing any **middle** entry breaks `verify()`. The chain **alone** is not unforgeable
+    (anyone can recompute a fresh valid chain, or truncate the tail) — so it is paired with (2) *host
+    signature → authenticity:* the host signs a `Checkpoint` over the current head with its identity key
+    (the `ras-identity` `KeyStore` seam). A verifier pinning the host public key then detects **any**
+    rewrite — a forged chain has a different head, so the old signed checkpoint no longer matches and no
+    valid new one can be produced without the host key. Domain-separated hashes/signatures + a
+    session-id-bound genesis (a chain from another session can't be spliced in).
+  - **Content-free by construction (Inv 8/11).** `AuditEvent` carries only enum tags + counters
+    (generation, a clipboard **byte length**, an `ErrorCode`) — never a pixel, keystroke, clipboard byte,
+    typed text, filename/path, or secret. There is *nowhere* to put content; a `content` field is absent
+    by design. `ErrorCode` is encoded by its stable `as_str` form, so the chain never depends on enum
+    ordering.
+  - **Append-only.** `AuditJournal` exposes `append` + read accessors — no edit/remove API; `verify` /
+    `verify_chain` recompute from genesis and report the first `ChainBroken { seq }`.
+  - **Scope:** the pure journal + chain + signed checkpoint (in the new-dep-light `ras-audit`: `sha2`
+    (RustCrypto, MIT/Apache) + the `ras-identity`/`ras-protocol` seams). Deferred: **durable persistence**
+    (append-only file / SQLite with periodic checkpoints), forward-secure key evolution + Merkle-batched
+    checkpoints (`docs/06 §12`), and wiring the orchestrator/host loop to emit events (it already emits
+    the parallel content-free `LifecycleEvent`s — the audit sink mirrors them).
+  - **Verify:** chain links + verifies; append is deterministic + session-bound; content-tamper / reorder
+    / middle-removal each break the chain at the right `seq`; a signed checkpoint round-trips and a
+    rewritten journal (shorter "clean" history, tampered head, or an attacker-key signature) fails
+    against a host-key-pinning verifier; empty journal verifies + checkpoints — all green.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

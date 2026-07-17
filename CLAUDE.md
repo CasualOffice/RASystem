@@ -221,6 +221,19 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   CVE-2026-58056/Inv 15); symlink-follow (the string is a safe leaf — the precondition for the deferred
   `O_NOFOLLOW` write). Per-target caps deny-by-default. Pure (no I/O, no new crate/dep). Follow-up: wire
   + chunked transfer protocol, per-transfer confirmation UI, `O_NOFOLLOW`/`openat` write backend.
+- **Audit journal — Inv 10 implemented (ADR-088).** `ras-audit` (was a stub) is now a per-session
+  **SHA-256 hash chain** of **content-free** `AuditEvent`s (enum tags + counters only — never a pixel,
+  keystroke, clipboard byte, typed text, path, or secret; a `content` field is absent by construction,
+  Inv 8/11), made unforgeable by a **host-signed `Checkpoint`** over the chain head (the `ras-identity`
+  `KeyStore` seam). The chain gives tamper-**evidence** (altering/reordering/removing a middle entry
+  breaks `verify()`); the signature gives **authenticity** (a rewritten journal has a different head, so
+  the old signed checkpoint no longer matches and no valid new one is forgeable without the host key).
+  Domain-separated + session-genesis-bound (no cross-session splice); append-only (no edit/remove API).
+  Pure (no clock/I/O); `sha2` (RustCrypto MIT/Apache) is the only new dep. Verified: chain links/verifies,
+  determinism, content-tamper/reorder/middle-removal each caught at the right `seq`, signed-checkpoint
+  round-trip + rewrite/forged-key/tampered-head rejection, empty-journal. Follow-up: durable persistence
+  (append-only file / SQLite + periodic checkpoints), Merkle-batched forward-secure checkpoints, and
+  wiring the host loop to emit events (mirrors the existing content-free `LifecycleEvent`s).
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.
