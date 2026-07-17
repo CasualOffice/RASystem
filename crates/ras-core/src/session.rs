@@ -926,6 +926,8 @@ fn maybe_start_audio<C, E>(inner: &HostInner<C, E>, sink: Box<dyn crate::deps::A
             );
         });
     if let Ok(h) = handle {
+        // The output-audio stream is now live (`audio.listen` was granted + gated) — audit it (Inv 10).
+        record_audit(inner, ras_audit::AuditEvent::AudioStarted);
         *inner
             .audio_task
             .lock()
@@ -987,6 +989,8 @@ fn join_audio<C, E>(inner: &HostInner<C, E>) {
         .take()
     {
         let _ = h.join();
+        // The pump was running and is now stopped — audit the end of the audio stream (Inv 10).
+        record_audit(inner, ras_audit::AuditEvent::AudioStopped);
     }
 }
 

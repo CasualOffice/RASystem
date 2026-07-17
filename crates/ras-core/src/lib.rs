@@ -1030,6 +1030,54 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
+    /// The output-audio stream's start + stop are audited (Inv 10, ADR-088) — only when it actually runs
+    /// (`audio.listen` granted). The recorded chain verifies.
+    #[tokio::test]
+    async fn audio_start_stop_is_audited() {
+        let audit = Arc::new(RecordingAudit::new([0x33; 16]));
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(&["screen.view", ras_policy::AUDIO_LISTEN]))),
+        )
+        .with_audio(
+            Box::new(SyntheticAudioCapture::new()),
+            Box::new(SyntheticAudioEncoder::new()),
+        )
+        .with_audit_sink(audit.clone());
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+
+        assert!(
+            wait_until(
+                || audit
+                    .events()
+                    .contains(&crate::audit::AuditEvent::AudioStarted),
+                200
+            )
+            .await,
+            "AudioStarted must be audited when audio.listen is granted, got {:?}",
+            audit.events()
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+        let events = audit.events();
+        assert!(
+            events.contains(&crate::audit::AuditEvent::AudioStopped),
+            "AudioStopped must be audited on teardown, got {events:?}"
+        );
+        assert!(audit.chain_ok(), "the recorded audit chain must verify");
+    }
+
     /// Without `audio.listen`, the pump never starts (Inv 15) — the controller receives nothing even
     /// though the audio backends and transport plane are both wired.
     #[tokio::test]
