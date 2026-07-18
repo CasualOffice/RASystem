@@ -743,6 +743,13 @@ where
         let ctrl_inner = inner.clone();
         let task = tokio::spawn(async move {
             host_control_loop(&mut control, &ctrl_inner, bye_rx, outbound_rx).await;
+            // Invariant 4 key-state cleanup on EVERY control-loop exit. Whatever ended the loop — a peer
+            // `Bye`, terminal transport loss, a stop, or a failed reconnect — flush any OS keys the
+            // controller left held. `stop()`/`emergency_stop()` cannot guarantee this: the Bye and
+            // transport-loss handlers set `inner.stop` *inside* the loop, so a later `stop()` early-returns
+            // on the `swap(true)` first-caller-wins guard before it reaches `release_input`. Flushing here
+            // covers every exit path by construction; it is idempotent with the flush those paths run.
+            flush_input_sink(&ctrl_inner);
         });
         *inner
             .control_task
@@ -2147,6 +2154,13 @@ fn flush_input_sink<C, E>(inner: &HostInner<C, E>) {
 /// more: the per-message gate refuses input under an expired lease, so the matching key-**up** can never
 /// arrive, and a held Ctrl/Shift/button would otherwise stick until teardown. Fires once — `revoke_all`
 /// (inside `revoke_if_expired`) clears the lease, so the next tick is a no-op.
+///
+/// Known residual (extremely narrow, benign): a key-down authorized at the sub-tick instant `now ==
+/// expires_at` but not yet dispatched can be injected *after* this sweep's flush (they serialize on the
+/// input-sink lock, but `host_handle_input` re-checks only `stop`, not lease liveness, before its post),
+/// re-sticking that one key until the session ends. Tightening it would put a lease-lock read on the hot
+/// input path (a latency cost) or risk a lock inversion; instead the control-loop-exit finalizer flush
+/// (see the spawn site) guarantees any such key is released at teardown, bounding the harm to the session.
 fn sweep_expired_lease<C, E>(inner: &HostInner<C, E>) {
     let expired = {
         let now = now_ms();

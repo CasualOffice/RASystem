@@ -315,9 +315,13 @@ impl NonceCache {
         }
     }
 
-    /// Drop every nonce whose expiry has passed.
+    /// Drop every nonce whose expiry has passed. The boundary is **inclusive** (`>= now` retains): a
+    /// nonce stored until `remember_until == req.expires_at` must still be remembered at the instant
+    /// `now == expires_at`, because the request is *still fresh* there (`validate_access_request` rejects
+    /// only when `now > expires_at`). An exclusive `> now` sweep would drop the nonce one instant before
+    /// freshness stops accepting it, reopening a 1 ms replay window at exactly `now == expires_at`.
     fn sweep(&mut self, now: UnixMillis) {
-        self.seen.retain(|_, expiry| *expiry > now);
+        self.seen.retain(|_, expiry| *expiry >= now);
     }
 
     /// Number of live (unexpired-as-of-last-sweep) nonces. Test/metrics aid.
@@ -526,7 +530,13 @@ mod tests {
             c.check_and_insert_until(n, 2_500, 5_000),
             Err(ErrorCode::ReplayDetected)
         );
-        // Only after the true horizon does a fresh reuse readmit.
+        // Inclusive boundary: at exactly `now == stored expiry` the nonce is STILL remembered (a request
+        // is still fresh at `now == expires_at`), so a replay there is caught — not swept one tick early.
+        assert_eq!(
+            c.check_and_insert_until(n, 5_000, 5_000),
+            Err(ErrorCode::ReplayDetected)
+        );
+        // Only strictly past the horizon does a fresh reuse readmit.
         assert!(c.check_and_insert_until(n, 5_001, 6_000).is_ok());
         // `remember_until` below the floor still holds for at least `now + ttl`.
         let mut c2 = NonceCache::new(1_000, 1024);
