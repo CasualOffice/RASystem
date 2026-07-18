@@ -653,6 +653,11 @@
     `ClipboardApplied{len}`/`ClipboardRejected{code}`. Audited too. A loopback test proves both: granted →
     the controller's sink receives the host text + a `ClipboardApplied`; withheld → the host gate drops it
     so **nothing crosses the wire** (Inv 15). Clipboard is now symmetric behind its two direction caps.
+  - **Emergency stop overrides an in-flight push (Inv 4).** Unlike OS input — whose in-flight events a
+    stop neutralizes via the lease **generation bump** — a clipboard push is gated only on the *static*
+    granted caps, which a stop doesn't change. So `host_handle_clipboard` re-checks `stop` before setting
+    the OS clipboard (mirroring the input path's authorize→dispatch re-check), closing the window between a
+    stop and the control loop breaking. A push can never apply on a revoked session.
   - **Deferred to follow-up (GUI/on-device):** the app "Send clipboard" button + a "clipboard shared"
     indicator (Inv 7), echo-suppression ownership tag, and the rule that a **pre-connection** clipboard is
     never auto-synced. (The per-OS `ClipboardSink` impl landed as `ras-clipboard`, ADR-079.)

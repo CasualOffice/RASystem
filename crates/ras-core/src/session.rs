@@ -1764,6 +1764,20 @@ fn host_handle_file_complete<C, E>(inner: &HostInner<C, E>) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
+    // Invariant 4: a stop landing before finalize must abort, never persist a file on a revoked session.
+    // (Clear the transfer and abort here — if we let `finish` run, teardown's `abort_file_transfer` would
+    // find nothing left to clean and the file would survive the stop.)
+    if inner.stop.load(Ordering::SeqCst) {
+        inner
+            .active_transfer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(s) = &sink {
+            s.abort();
+        }
+        return;
+    }
     let Some(t) = inner
         .active_transfer
         .lock()
@@ -1809,6 +1823,12 @@ fn abort_file_transfer<C, E>(inner: &HostInner<C, E>) {
 /// content-free lifecycle outcome (never the clipboard text — Inv 8). Fail-closed: capability withheld
 /// or no backend wired ⇒ `CapabilityDenied`.
 fn host_handle_clipboard<C, E>(inner: &HostInner<C, E>, text: &ras_protocol::Redacted) {
+    // Invariant 4: once a stop lands, never set the host's OS clipboard. Unlike OS input (whose stale
+    // events the generation bump rejects), a clipboard push is gated only on the static granted caps, so
+    // without this it could still apply in the window between `stop` and the control loop breaking.
+    if inner.stop.load(Ordering::SeqCst) {
+        return;
+    }
     let granted = inner
         .granted_caps
         .lock()
