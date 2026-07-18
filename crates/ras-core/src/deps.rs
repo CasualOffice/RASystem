@@ -30,6 +30,20 @@ pub use ras_transport_iroh::{EndpointAddr as DialTarget, EndpointId as PeerIdent
 pub trait SessionTransport: Send + Sync {
     /// Establish the session (dial for controller, accept for host) on the session ALPN.
     async fn establish(&self, target: &DialTarget) -> Result<PeerIdentity, CoreError>;
+    /// Re-establish a dropped connection to the **same peer** for reconnection (ADR-091). After this
+    /// returns `Ok`, `control_channel()` / `video_source()` / `audio_source()` yield **fresh** channels
+    /// for the new connection. The caller then re-runs the session handshake — which re-presents the
+    /// existing grant and re-validates it host-side (no new authorization path). **Default: unsupported**
+    /// — a transport that cannot re-dial (the iroh concrete re-dial is an on-device follow-up) reports
+    /// this, and the controller terminates on transport loss instead of resuming. Overridden by the
+    /// loopback for tests.
+    async fn reconnect(&self, target: &DialTarget) -> Result<PeerIdentity, CoreError> {
+        let _ = target;
+        Err(CoreError::fatal(
+            ErrorCode::Internal,
+            "reconnect not supported",
+        ))
+    }
     /// Reliable, ordered control/lifecycle channel.
     async fn control_channel(&self) -> Result<Box<dyn ControlChannelDyn>, CoreError>;
     /// Droppable video egress (host role only).

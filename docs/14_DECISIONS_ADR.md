@@ -1156,6 +1156,53 @@
     (`InvalidMessage`) without re-opening or aborting the in-flight transfer, which still completes intact
     — all green.
 
+- **ADR-091 · Session reconnection: controller-driven re-dial that re-proves the endpoint-bound grant,
+  never a new authorization path · Accepted** (backlog X1 — the top production ship-blocker; `docs/21`).
+  The session state machine already has `Suspended → TransportRestored → Active`, but nothing fired
+  `TransportRestored`: on transport loss the controller went `Active → Suspended`, slept the reconnect
+  window, then `ReconnectWindowExpired → Terminated`. A remote-access tool that dies on every Wi-Fi
+  blip / NAT rebind is not shippable; every incumbent auto-restores. This adds the missing **re-dial
+  driver** — under the strict constraint that reconnection introduces **no new trust**.
+  - **The load-bearing security rule: a re-dial is the *existing* handshake over a fresh transport, not
+    a resume shortcut.** On reconnect the controller re-establishes the connection to the **same peer**
+    and **re-presents its existing `SessionGrant`**; the host runs its **normal, unchanged
+    `validate_grant`** (signature under the host key, **sender-constraint against the freshly
+    transport-authenticated endpoint**, `not_before ≤ now ≤ expires_at`, version) — identical to a first
+    connect. There is **no "resume" code path that trusts the prior session**: authority comes only from
+    a grant that still validates *now*. (Inv 3/9/15 hold by construction — we reuse the validator, we do
+    not fork it.)
+  - **Consequences that fall out of that rule (all fail-closed):**
+    - **Grants are short-lived, so the reconnect window is implicitly TTL-bounded.** If the grant expired
+      during the outage, the re-dial's `validate_grant` fails `expires_at` → resume is **refused**, and
+      the session terminates. You cannot reconnect on a dead grant. (The configured `reconnect_window`
+      must be ≤ the grant TTL to be meaningful; a longer window just terminates at TTL.)
+    - **No new consent on resume, by design and safely.** The still-valid grant *is* the recorded consent
+      (Inv 1 was satisfied when it was issued); re-prompting would be security-theater. An **expired**
+      grant, by contrast, gets **no silent renewal** — it requires a fresh `AccessRequest` + consent (a
+      new connect), never a resume.
+    - **Emergency stop / revoke during suspension wins.** Revocation lives in host-side grant/lease state
+      (`revoke_all` bumps the generation; a stop marks the session terminal); a re-dial presenting a
+      grant for a revoked session still re-validates the *grant*, but the host's lease generation has
+      moved on, so no OS input authorizes (Inv 15/4) — and a host that chose to end the session simply
+      is not accepting. The controller cannot re-animate a session the owner killed.
+    - **The replay nonce is not re-spent.** Re-dial presents the *grant* (session ALPN, `.with_grant`),
+      not a fresh signed `AccessRequest`, so the single-use `AccessRequest` nonce cache is untouched;
+      the grant's own `not_before/expires_at` is the freshness bound.
+  - **No black screen on resume (ties ADR-060 / backlog X2).** A successful re-dial re-runs the handshake
+    (grant → `StreamConfig`), fires `TransportRestored → Active`, re-establishes the video/audio ingest,
+    and **forces an IDR** so the controller's decoder resumes on a keyframe — the re-gate mechanism the
+    renderer-attach path already uses.
+  - **Mechanism.** A `SessionTransport::reconnect()` seam (default *unsupported* so the iroh backend is
+    unchanged until its on-device re-dial lands; the loopback implements it for tests). The controller
+    control loop, on a transport-loss error, drives the re-dial inside the window: re-establish → re-fetch
+    the control channel → re-handshake (which re-validates the grant host-side) → `TransportRestored` +
+    forced keyframe → notify the ingest loops to re-fetch their sources → continue. On window expiry →
+    `Terminated` (unchanged).
+  - **Scope / deferred.** This lands the **driver + seam + coordination + loopback re-dial test** (cut
+    mid-stream → `Suspended` → re-dial → `Active` → fresh IDR flows). The concrete **iroh re-dial**
+    (`Endpoint::connect` again + real network re-handshake, verified over an actually-impaired link with
+    NAT rebind) stays the on-device follow-up, like every other iroh-specific step.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
