@@ -978,6 +978,24 @@ mod e2e {
         }
     }
 
+    /// A validator that authorizes but **counts** every call — to prove reconnection does (or does not)
+    /// re-run authorization/consent (ADR-091).
+    struct CountingValidator {
+        caps: ras_policy::CapabilitySet,
+        calls: Arc<std::sync::atomic::AtomicU64>,
+    }
+    #[async_trait::async_trait]
+    impl crate::deps::GrantValidator for CountingValidator {
+        async fn authorize(
+            &self,
+            _ctx: &crate::deps::SessionAuthContext,
+        ) -> Result<crate::deps::GrantDecision, crate::CoreError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(crate::deps::GrantDecision::Authorized(self.caps.clone()))
+        }
+    }
+
     async fn drain_for_clipboard_outcome(events: &mut LifecycleStream) -> Option<LifecycleEvent> {
         for _ in 0..50 {
             while let Ok(ev) = events.try_recv() {
@@ -2313,6 +2331,56 @@ mod e2e {
 
         controller.disconnect(StopReason::UserRequested).await;
         host_task.abort();
+    }
+
+    /// Reconnection is not a new authorization (ADR-091): a re-dial from the **same** transport-
+    /// authenticated endpoint must NOT re-run the validator (no fresh consent prompt on a network blip).
+    /// The original consent stands and the granted caps persist; only a *different* endpoint re-authorizes.
+    #[tokio::test]
+    async fn reconnect_does_not_re_authorize_the_same_endpoint() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(CountingValidator {
+                caps: caps(&["screen.view"]),
+                calls: calls.clone(),
+            }),
+        );
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32])));
+        cfg.reconnect_window = Duration::from_secs(3);
+        cfg.grant = bytes::Bytes::from_static(&[0xA1, 0xB2, 0xC3]);
+        let controller = ControllerSession::new(cfg, ctrl_tp);
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+        assert_eq!(
+            calls.load(Relaxed),
+            1,
+            "authorized exactly once on the initial connect"
+        );
+
+        faults.cut();
+        assert!(wait_until(|| controller.state() == SessionState::Suspended, 500).await);
+        faults.heal();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Active, 2500).await,
+            "the session must resume to Active"
+        );
+        // The re-dial re-authenticated the SAME endpoint (Inv 9) → no second authorize/consent.
+        assert_eq!(
+            calls.load(Relaxed),
+            1,
+            "a reconnect from the same endpoint must NOT re-prompt consent"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
     }
 
     /// The **full** reconnection path with two real sessions (ADR-091): a real `HostSession` re-serves

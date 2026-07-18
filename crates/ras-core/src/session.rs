@@ -1590,17 +1590,28 @@ async fn host_reserve<C, E>(inner: &HostInner<C, E>) -> Option<Box<dyn ControlCh
         ControlMsg::AuthEnvelope { payload } => payload,
         _ => return None,
     };
-    let ctx = SessionAuthContext {
-        peer_identity,
-        access_request,
-        host_id: inner.config.host_id,
-        now: now_ms(),
-    };
-    // Re-validate. The existing granted caps / lease persist (same grant); we only confirm it still
-    // authorizes. A denial (expired/revoked, or a re-prompt the user declined) → refuse the resume.
-    match inner.validator.authorize(&ctx).await {
-        Ok(GrantDecision::Authorized(_)) => {}
-        _ => return None,
+    // Reconnection is NOT a new authorization (ADR-091): if the re-dialed peer is the **same
+    // transport-authenticated endpoint** the session already consented to (Inv 9), resume without
+    // re-running the validator — re-prompting the local user on every network blip would be wrong (the
+    // original consent stands, and the granted caps/lease persist). Only a *different*/unknown endpoint
+    // re-runs the full validator, fail-closed. The endpoint comes from the transport, never a claim.
+    let original_endpoint = *inner
+        .peer_endpoint
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let same_endpoint = original_endpoint != [0u8; 32] && peer_identity.0 == original_endpoint;
+    if !same_endpoint {
+        let ctx = SessionAuthContext {
+            peer_identity,
+            access_request,
+            host_id: inner.config.host_id,
+            now: now_ms(),
+        };
+        // A denial (expired/revoked, or a re-prompt the user declined) → refuse the resume.
+        match inner.validator.authorize(&ctx).await {
+            Ok(GrantDecision::Authorized(_)) => {}
+            _ => return None,
+        }
     }
     // Re-attach egress: a fresh sink into the shared slot the media pump reads, and re-announce config.
     let sink = inner.transport.video_sink().await.ok()?;
