@@ -157,7 +157,12 @@ pub struct HostSessionConfig {
     pub monitor: MonitorId,
     /// Negotiated ceiling; the encoder is capped to the measured path at runtime.
     pub max_bitrate_bps: u32,
-    /// Reconnect window before `Suspended → Terminated`.
+    /// Reconnect window before `Suspended → Terminated`. The host and controller each enforce their
+    /// own window independently, so the **effective** window is `min(host, controller)`: if the host's
+    /// is shorter it gives up first and the controller then re-dials a host that is already gone (still
+    /// fail-closed — the session terminates — but the controller wastes the difference believing a
+    /// resume is possible). Keep the controller's window `≤` the host's (default: both 10s, matched).
+    /// ADR-091 additionally constrains this `≤` the grant TTL (no resume past grant expiry).
     pub reconnect_window: Duration,
     /// The host's own windows (overlay / consent / indicator) to exclude from capture, by platform
     /// window id, so they never re-enter the shared feed (privacy + no capture-feedback loop). The
@@ -801,7 +806,14 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(t) = control_task {
-            let _ = tokio::time::timeout(BYE_FLUSH_GRACE, t).await;
+            // Grace to flush the Bye, then abort so a control task still parked in `host_reserve`
+            // (now window-bounded, but possibly mid-reconnect) is reclaimed rather than left to linger
+            // — matching how `stats_task`/cursor/file tasks are aborted. Dropping the JoinHandle alone
+            // does NOT cancel the task.
+            let abort = t.abort_handle();
+            if tokio::time::timeout(BYE_FLUSH_GRACE, t).await.is_err() {
+                abort.abort();
+            }
         }
         if let Some(t) = inner
             .stats_task
@@ -873,8 +885,14 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(t) = control_task {
-            // A timeout simply drops the join future; the stop already stands.
-            let _ = tokio::time::timeout(BYE_FLUSH_GRACE, t).await;
+            // Grace to flush the Bye, then abort. Dropping the join future on timeout does NOT cancel
+            // the task, so a control task wedged/parked in `host_reserve` would otherwise outlive the
+            // emergency stop (Inv 4 — the stop must reclaim it). Abort brings it in line with the
+            // stats/cursor/file tasks.
+            let abort = t.abort_handle();
+            if tokio::time::timeout(BYE_FLUSH_GRACE, t).await.is_err() {
+                abort.abort();
+            }
         }
         if let Some(t) = inner
             .stats_task
@@ -1592,82 +1610,95 @@ async fn host_reserve<C, E>(inner: &HostInner<C, E>) -> Option<Box<dyn ControlCh
     if inner.stop.load(Ordering::SeqCst) {
         return None;
     }
+    // One deadline covers the whole reconnect: the dial AND every handshake read after it (symmetric
+    // with `controller_redial`). ADR-091 constrains `reconnect_window ≤ grant TTL`.
+    let deadline = tokio::time::Instant::now() + inner.config.reconnect_window;
     let target: DialTarget = EndpointAddr::new(EndpointId([0u8; 32]));
-    let peer_identity = match tokio::time::timeout(
-        inner.config.reconnect_window,
-        inner.transport.reconnect(&target),
-    )
-    .await
-    {
-        Ok(Ok(pid)) => pid,
-        _ => return None,
-    };
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let peer_identity =
+        match tokio::time::timeout(remaining, inner.transport.reconnect(&target)).await {
+            Ok(Ok(pid)) => pid,
+            _ => return None,
+        };
     if inner.stop.load(Ordering::SeqCst) {
         return None;
     }
-    let mut control = inner.transport.control_channel().await.ok()?;
-    // Host speaks first (ADR-059), then re-reads + re-validates the controller's grant.
-    control
-        .send(ControlMsg::Hello {
-            protocol_version: 1,
-        })
-        .await
-        .ok()?;
-    let access_request = match control.recv().await.ok()? {
-        ControlMsg::AuthEnvelope { payload } => payload,
-        _ => return None,
-    };
-    // ALWAYS re-validate — reconnection re-runs the ordinary handshake (ADR-091). The validator
-    // re-checks the grant's signature, sender-constraint against the freshly transport-authenticated
-    // endpoint, and **`not_before ≤ now ≤ expires_at`**, identical to a first connect — the ONLY place
-    // grant expiry is enforced (there is no mid-session expiry check). Skipping it on a "same endpoint"
-    // would let a grant that expired during the outage resume (Inv 3). For the production signed-grant
-    // validator this is silent (no human prompt, just re-validation); for the MVP LocalConsent validator
-    // it re-prompts, which is the documented fail-closed behavior.
-    let ctx = SessionAuthContext {
-        peer_identity,
-        access_request,
-        host_id: inner.config.host_id,
-        now: now_ms(),
-    };
-    match inner.validator.authorize(&ctx).await {
-        Ok(GrantDecision::Authorized(_)) => {}
-        _ => return None,
-    }
-    // The validator can await for a while (a consent prompt); a stop landing during it must still win.
-    if inner.stop.load(Ordering::SeqCst) {
-        return None;
-    }
-    // Re-attach egress: a fresh sink into the shared slot the media pump reads, and re-announce config.
-    let sink = inner.transport.video_sink().await.ok()?;
-    *inner
-        .video_sink_slot
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
-    // If the audio pump is running (audio.listen was granted at start), re-attach a fresh audio sink
-    // too so output audio resumes with the video (ADR-077). Best-effort: no audio plane ⇒ stays silent.
-    let audio_active = inner
-        .audio_task
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_some();
-    if audio_active {
-        if let Ok(audio_sink) = inner.transport.audio_sink().await {
-            *inner
-                .audio_sink_slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(audio_sink);
+    // The post-reconnect handshake reads are window-bounded too (symmetric with `controller_redial`):
+    // a re-dialer that re-establishes the transport but then never sends its grant — or whose consent
+    // prompt never resolves — must NOT hang the host control task past the reconnect window. This task
+    // runs OUTSIDE the outer `select!` and only outlives `emergency_stop`'s best-effort join, so an
+    // *unbounded* read here would leak it (and its `Arc<HostInner>`) and defeat Inv 4's fail-closed
+    // teardown. On expiry the whole reserve yields `None` → the caller terminates (fail-closed).
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let reserved = tokio::time::timeout(remaining, async {
+        let mut control = inner.transport.control_channel().await.ok()?;
+        // Host speaks first (ADR-059), then re-reads + re-validates the controller's grant.
+        control
+            .send(ControlMsg::Hello {
+                protocol_version: 1,
+            })
+            .await
+            .ok()?;
+        let access_request = match control.recv().await.ok()? {
+            ControlMsg::AuthEnvelope { payload } => payload,
+            _ => return None,
+        };
+        // ALWAYS re-validate — reconnection re-runs the ordinary handshake (ADR-091). The validator
+        // re-checks the grant's signature, sender-constraint against the freshly transport-authenticated
+        // endpoint, and **`not_before ≤ now ≤ expires_at`**, identical to a first connect — the ONLY place
+        // grant expiry is enforced (there is no mid-session expiry check). Skipping it on a "same endpoint"
+        // would let a grant that expired during the outage resume (Inv 3). For the production signed-grant
+        // validator this is silent (no human prompt, just re-validation); for the MVP LocalConsent validator
+        // it re-prompts, which is the documented fail-closed behavior.
+        let ctx = SessionAuthContext {
+            peer_identity,
+            access_request,
+            host_id: inner.config.host_id,
+            now: now_ms(),
+        };
+        match inner.validator.authorize(&ctx).await {
+            Ok(GrantDecision::Authorized(_)) => {}
+            _ => return None,
         }
-    }
-    let config = (*inner
-        .current_config
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner))?;
-    control
-        .send(ControlMsg::StreamConfig(config_to_wire(&config)))
-        .await
-        .ok()?;
-    Some(control)
+        // The validator can await for a while (a consent prompt); a stop landing during it must still win.
+        if inner.stop.load(Ordering::SeqCst) {
+            return None;
+        }
+        // Re-attach egress: a fresh sink into the shared slot the media pump reads, and re-announce config.
+        let sink = inner.transport.video_sink().await.ok()?;
+        *inner
+            .video_sink_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+        // If the audio pump is running (audio.listen was granted at start), re-attach a fresh audio sink
+        // too so output audio resumes with the video (ADR-077). Best-effort: no audio plane ⇒ stays silent.
+        let audio_active = inner
+            .audio_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        if audio_active {
+            if let Ok(audio_sink) = inner.transport.audio_sink().await {
+                *inner
+                    .audio_sink_slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(audio_sink);
+            }
+        }
+        let config = (*inner
+            .current_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))?;
+        control
+            .send(ControlMsg::StreamConfig(config_to_wire(&config)))
+            .await
+            .ok()?;
+        Some(control)
+    })
+    .await;
+    // `Err(_)` = the reconnect window elapsed mid-handshake; `Ok(None)` = the handshake failed/was
+    // refused. Both terminate the session (fail-closed) — a silent re-dialer can never wedge the host.
+    reserved.ok().flatten()
 }
 
 /// Emit a lifecycle event if a sink is attached (advisory — never backpressures the control loop).
@@ -2111,7 +2142,9 @@ pub struct ControllerSessionConfig {
     /// Local decode/render buffer target (~10–50 ms; WebCodecs has no jitter buffer).
     pub target_buffer: Duration,
     /// How long to stay `Suspended` after a transport loss before giving up (→ `Terminated`). While
-    /// suspended the controller freezes/blanks video but keeps its cursor + controls live.
+    /// suspended the controller freezes/blanks video but keeps its cursor + controls live. The host
+    /// enforces its own window too; the effective window is `min(host, controller)`, so keep this `≤`
+    /// the host's `reconnect_window` (default: both 10s, matched) — see [`HostSessionConfig`].
     pub reconnect_window: Duration,
     /// The PASETO session grant (obtained out-of-band in the bootstrap phase) to present to the host
     /// in `ControlMsg::AuthEnvelope`. Empty on the `insecure-no-auth` path (the host's no-op validator

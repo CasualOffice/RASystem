@@ -2517,6 +2517,58 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
+    /// A re-dialer that re-establishes the transport but then never sends its grant — a *silent*
+    /// re-dialer — must NOT be able to wedge the host. `host_reserve`'s post-reconnect handshake reads
+    /// are window-bounded (symmetric with `controller_redial`), so the host gives up within its reconnect
+    /// window and terminates (ADR-091 fail-closed; Inv 4). Without the bound the host control task hangs
+    /// on `recv()` forever and this test's terminal-state wait never succeeds.
+    #[tokio::test]
+    async fn a_silent_re_dialer_cannot_wedge_the_host() {
+        let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
+        let mut host_cfg = HostSessionConfig::new(MonitorId(0));
+        host_cfg.reconnect_window = Duration::from_millis(300); // short: the host must give up quickly
+        let host = HostSession::new(
+            host_cfg,
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32])));
+        cfg.grant = bytes::Bytes::from_static(&[0xA1, 0xB2, 0xC3]);
+        let controller = ControllerSession::new(cfg, ctrl_tp);
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        // Cut the link; wait for the controller to observe it (proves the cut propagated to both recv
+        // loops — the host is now committed to its `host_reserve` reconnect path, blocked on the cut).
+        faults.cut();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Suspended, 500).await,
+            "controller should suspend on transport loss, got {:?}",
+            controller.state()
+        );
+
+        // Re-establish the transport for the HOST only and never send the grant. The host reconnects,
+        // sends Hello, and blocks reading the AuthEnvelope that never comes. Keep the held channel ends
+        // alive so the read genuinely *hangs* (rather than erroring) — only the timeout can save the host.
+        let _held = faults.heal_host_only();
+
+        // With the fix the host gives up within its 300 ms window and terminates; without it the host
+        // control task hangs forever and this wait (up to 3 s) fails.
+        assert!(
+            wait_until(|| host.state().is_terminal(), 300).await,
+            "host must terminate within its reconnect window when the re-dialer stays silent, got {:?}",
+            host.state()
+        );
+
+        drop(_held);
+        host.stop(StopReason::UserRequested).await;
+    }
+
     #[tokio::test]
     async fn controller_suspends_then_terminates_when_transport_drops() {
         let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();

@@ -401,6 +401,49 @@ impl LoopbackFaults {
         let _ = self.cut_tx.send(false);
     }
 
+    /// **Heal the host side only** — models a *silent re-dialer*: the transport re-establishes (so the
+    /// host's [`reconnect`](SessionTransport::reconnect) wakes and its `control_channel()` yields a fresh
+    /// channel, and its `Hello` send succeeds) but the peer never sends its grant. The host's
+    /// post-reconnect handshake `recv()` must be window-bounded, or the host control task hangs forever
+    /// (ADR-091 fail-closed). The controller's slots are left empty, so a controller re-dial fails and it
+    /// terminates without ever writing.
+    ///
+    /// Returns `(controller→host sender, host→controller receiver)` — the caller **must keep both alive**
+    /// for the duration of the test: dropping the sender would close the channel and turn the intended
+    /// *hang* into an immediate error (masking the defect), and dropping the receiver would fail the
+    /// host's `Hello` send before it ever reaches the read under test.
+    #[must_use]
+    pub fn heal_host_only(&self) -> (mpsc::Sender<ControlMsg>, mpsc::Receiver<ControlMsg>) {
+        let (h2c_tx, h2c_rx) = mpsc::channel(64); // host → controller (kept open so `Hello` buffers)
+        let (c2h_tx, c2h_rx) = mpsc::channel(64); // controller → host (kept open, never written)
+        let (vid_tx, _vid_rx) = mpsc::channel(8);
+        let (aud_tx, _aud_rx) = mpsc::channel(16);
+        let cut_rx = self.cut_tx.subscribe();
+        *self
+            .host
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(LoopbackControl {
+            tx: h2c_tx,
+            rx: c2h_rx,
+            cut: cut_rx,
+        });
+        *self
+            .host
+            .video_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(vid_tx);
+        *self
+            .host
+            .audio_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(aud_tx);
+        // Controller slots deliberately left empty. Clear the cut LAST so a woken host `reconnect()`
+        // finds its armed slot.
+        let _ = self.cut_tx.send(false);
+        (c2h_tx, h2c_rx)
+    }
+
     /// Inject a video event into the controller's source (e.g. a transport-generated `FrameDropped`).
     pub async fn inject_video(&self, ev: VideoEvent) {
         let _ = self.video_tx.send(ev).await;

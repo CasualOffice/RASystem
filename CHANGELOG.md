@@ -48,6 +48,11 @@ capabilities implemented at the code level; on-device runtime verification statu
 - Fixed several **Invariant-4** gaps: emergency stop now overrides an in-flight file offer, a clipboard
   push, and a file finalize; input dispatch, clipboard, and file writes all re-check `stop` before any
   OS-visible effect.
+- Hardened **session reconnection** (ADR-091) against a silent re-dialer: the host's post-reconnect
+  handshake reads are now window-bounded (symmetric with the controller), so a peer that re-establishes
+  the transport but never presents its grant can no longer wedge or leak the host control task; teardown
+  now aborts a parked control task so an emergency stop always reclaims it (Inv 4). Found and verified by
+  an adversarial multi-agent review of the reconnection path.
 - **Never-panic fuzz on every untrusted-input decoder** — control framing, the video/audio wire
   headers, PASETO grants + access requests, the audit log file, and pasted connection tickets.
 
