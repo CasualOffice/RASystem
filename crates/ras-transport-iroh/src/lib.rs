@@ -2057,6 +2057,21 @@ mod framed_control_tests {
         }
     }
 
+    /// Both wire header parsers read untrusted network bytes **directly** — the per-frame video header
+    /// off a QUIC uni-stream and the audio header off a datagram — so neither may panic on arbitrary
+    /// input, only fail closed (`None`). (The control framing is covered by
+    /// `adversarial_byte_streams_never_panic`; this closes the two header decoders.) Deterministic
+    /// dep-free fuzz via the test `Rng`.
+    #[test]
+    fn wire_header_decoders_never_panic_on_arbitrary_bytes() {
+        let mut rng = Rng::new(0x00C0_FFEE);
+        for len in 0..600usize {
+            let buf: Vec<u8> = (0..len).map(|_| rng.byte()).collect();
+            let _ = super::VideoFrameHeader::decode(&buf); // must not panic
+            let _ = super::AudioPacketHeader::decode(&buf); // must not panic
+        }
+    }
+
     /// A stream of valid frames reassembles correctly no matter how the bytes are chunked — down to
     /// one byte at a time and up to several frames per write.
     #[tokio::test]
