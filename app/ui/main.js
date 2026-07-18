@@ -208,12 +208,21 @@ const macMod = document.getElementById("macmod");
 const macModCb = document.getElementById("macmod-cb");
 const banner = document.getElementById("banner");
 const reconnectBanner = document.getElementById("reconnect-banner");
+const connStats = document.getElementById("conn-stats");
 
 // Reconnection state from the Rust lifecycle drain (task #22 / ADR-091): show a "reconnecting…" banner
 // while the controller re-dials a dropped transport; hide it once resumed (or the session ends). The
 // video itself keeps its last frame until fresh frames + an IDR arrive on resume (no black screen).
 listen("conn-status", (e) => {
   reconnectBanner.hidden = e.payload !== "reconnecting";
+});
+
+// Connection-quality readout (path · RTT · loss · fps · bandwidth), updated each host stats tick.
+listen("conn-quality", (e) => {
+  const q = e.payload;
+  connStats.hidden = false;
+  const mbps = (q.kbps / 1000).toFixed(1);
+  connStats.textContent = `${q.path} · ${q.rtt_ms} ms · ${q.loss_pct.toFixed(1)}% loss · ${q.fps} fps · ${mbps} Mbps`;
 });
 
 // Cmd↔Ctrl primary-modifier remap (ADR-075). Explicit, user-visible, default OFF. When on, the
@@ -245,7 +254,10 @@ function resetState() {
 function setLive(isLive) {
   active = isLive;
   banner.hidden = !isLive;
-  if (!isLive) reconnectBanner.hidden = true; // clear any reconnecting banner when the session ends
+  if (!isLive) {
+    reconnectBanner.hidden = true; // clear the reconnecting banner when the session ends
+    connStats.hidden = true; // and the connection-stats readout
+  }
   connectBtn.disabled = isLive;
   ticketInput.disabled = isLive;
   stopBtn.disabled = !isLive;

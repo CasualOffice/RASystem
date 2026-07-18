@@ -68,6 +68,18 @@ async fn drain_viewer_lifecycle(mut events: LifecycleStream, app: tauri::AppHand
             LifecycleEvent::Resumed => {
                 let _ = app.emit("conn-status", "connected");
             }
+            LifecycleEvent::ConnectionQuality { sample } => {
+                let _ = app.emit(
+                    "conn-quality",
+                    ConnQualityPayload {
+                        path: format!("{:?}", sample.path),
+                        rtt_ms: sample.rtt_ms,
+                        loss_pct: sample.loss_pct,
+                        fps: sample.delivered_fps,
+                        kbps: sample.bandwidth_kbps,
+                    },
+                );
+            }
             LifecycleEvent::SessionEnded { .. }
             | LifecycleEvent::Disconnected { .. }
             | LifecycleEvent::Revoked { .. } => {
@@ -517,6 +529,17 @@ struct PointerPayload {
     x: u16,
     y: u16,
     visible: bool,
+}
+
+/// Connection-quality readout for the viewer HUD (task #22). Projects `ras_core::QualitySample` for the
+/// JS side; `path` is stringified because the transport's `PathKind` enum isn't `Serialize`.
+#[derive(Clone, serde::Serialize)]
+struct ConnQualityPayload {
+    path: String,
+    rtt_ms: u32,
+    loss_pct: f32,
+    fps: u16,
+    kbps: u32,
 }
 
 /// A short, log-safe rendering of a peer identity (first 8 hex of the public key). A public identity,
