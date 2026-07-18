@@ -24,8 +24,8 @@ use crate::{
     AccessOutcome, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode, InputAction,
     InputEnvelope, KeyframeReason, KeyframeRequest, PointerButton, PointerUpdate, RasError,
     Redacted, StreamConfigWire, MAX_CAPABILITIES, MAX_CAPABILITY_LEN, MAX_CHAT_BYTES,
-    MAX_CLIPBOARD_BYTES, MAX_CONTROL_FRAME, MAX_CURSOR_DIM, MAX_DISPLAY_NAME, MAX_FILE_NAME,
-    MAX_FILE_TARGET, MAX_TEXT_INPUT,
+    MAX_CLIPBOARD_BYTES, MAX_CONTROL_FRAME, MAX_CURSOR_DIM, MAX_DISPLAY_NAME, MAX_FILE_CHUNK,
+    MAX_FILE_NAME, MAX_FILE_TARGET, MAX_TEXT_INPUT,
 };
 
 /// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
@@ -291,6 +291,8 @@ fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
         ControlMsg::FileReject { code } => Kind::FileReject(pb::FileReject {
             code: i32::from(errorcode_to_pb(code)),
         }),
+        ControlMsg::FileChunk { data } => Kind::FileChunk(pb::FileChunk { data }),
+        ControlMsg::FileComplete => Kind::FileComplete(pb::FileComplete {}),
     };
     pb::ControlMsg { kind: Some(kind) }
 }
@@ -424,6 +426,16 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
         Some(Kind::FileReject(r)) => Ok(ControlMsg::FileReject {
             code: errorcode_from_pb(r.code)?,
         }),
+        Some(Kind::FileChunk(c)) => {
+            if c.data.len() > MAX_FILE_CHUNK {
+                return Err(RasError::fatal(
+                    ErrorCode::InvalidMessage,
+                    "file chunk too large",
+                ));
+            }
+            Ok(ControlMsg::FileChunk { data: c.data })
+        }
+        Some(Kind::FileComplete(_)) => Ok(ControlMsg::FileComplete),
         // No valid empty control message: unset oneof (empty bytes, or a future variant an old
         // build doesn't recognize) is rejected, never silently defaulted.
         None => Err(RasError::fatal(
@@ -1294,6 +1306,23 @@ mod tests {
         assert_roundtrip(&ControlMsg::FileReject {
             code: ErrorCode::CapabilityDenied,
         });
+        assert_roundtrip(&ControlMsg::FileChunk {
+            data: Bytes::from_static(b"\x00\x01\x02file-bytes"),
+        });
+        assert_roundtrip(&ControlMsg::FileComplete);
+    }
+
+    #[test]
+    fn file_chunk_refused_when_oversized() {
+        let m = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::FileChunk(pb::FileChunk {
+                data: Bytes::from(vec![0u8; MAX_FILE_CHUNK + 1]),
+            })),
+        };
+        assert_eq!(
+            control_from_pb(m).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
     }
 
     #[test]
@@ -2093,6 +2122,10 @@ mod proptests {
             ),
             Just(ControlMsg::FileAccept),
             arb_code().prop_map(|code| ControlMsg::FileReject { code }),
+            proptest::collection::vec(any::<u8>(), 0..256).prop_map(|d| ControlMsg::FileChunk {
+                data: Bytes::from(d)
+            }),
+            Just(ControlMsg::FileComplete),
         ]
     }
 

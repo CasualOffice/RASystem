@@ -40,9 +40,9 @@ pub use abr::LatencyFirstAbr;
 pub use deps::AllowAllValidator;
 pub use deps::{
     AudioOutput, AudioSink, AudioSourceDyn, AuditSink, ControlChannelDyn, ControlConsent,
-    CursorFrame, CursorObserver, CursorShape, CursorSink, FileConsent, FrameSink, GrantDecision,
-    GrantSessionValidator, GrantValidator, PushResult, SessionAuthContext, SessionTransport,
-    VideoSinkDyn, VideoSourceDyn,
+    CursorFrame, CursorObserver, CursorShape, CursorSink, FileConsent, FileWriteSink, FrameSink,
+    GrantDecision, GrantSessionValidator, GrantValidator, PushResult, SessionAuthContext,
+    SessionTransport, VideoSinkDyn, VideoSourceDyn,
 };
 pub use event::{
     LifecycleEvent, LifecycleStream, QualitySample, SessionId, StopReason, StreamDescriptor,
@@ -1079,6 +1079,7 @@ mod e2e {
             )
             .with_file_catalogue(file_catalogue())
             .with_file_consent(Arc::new(FixedFileConsent(consent)))
+            .with_file_write_sink(Arc::new(RecordingFileSink::default()))
             .with_audit_sink(audit.clone());
             let controller = ControllerSession::new(
                 ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
@@ -1180,6 +1181,169 @@ mod e2e {
             ),
             "got {ev:?}"
         );
+    }
+
+    /// A recording file write sink: tracks open(dest,size), the concatenated bytes, finish, and abort.
+    #[derive(Default)]
+    struct RecordingFileSink {
+        opened: std::sync::Mutex<Option<(std::path::PathBuf, u64)>>,
+        bytes: std::sync::Mutex<Vec<u8>>,
+        finished: std::sync::atomic::AtomicBool,
+        aborted: std::sync::atomic::AtomicBool,
+    }
+    impl crate::FileWriteSink for RecordingFileSink {
+        fn open(&self, dest: &std::path::Path, size: u64) -> Result<(), crate::CoreError> {
+            *self
+                .opened
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some((dest.to_path_buf(), size));
+            Ok(())
+        }
+        fn write(&self, data: &[u8]) -> Result<(), crate::CoreError> {
+            self.bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(data);
+            Ok(())
+        }
+        fn finish(&self) -> Result<(), crate::CoreError> {
+            self.finished
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn abort(&self) {
+            self.aborted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn file_host(
+        caps_set: &[&str],
+        sink: Arc<RecordingFileSink>,
+    ) -> (
+        HostSession<SyntheticCaptureBackend, SyntheticEncoder>,
+        ControllerSession,
+    ) {
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(caps_set))),
+        )
+        .with_file_catalogue(file_catalogue())
+        .with_file_consent(Arc::new(FixedFileConsent(true)))
+        .with_file_write_sink(sink);
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        (host, controller)
+    }
+
+    /// The full data path (ADR-090): an accepted transfer streams chunks to the host-resolved destination
+    /// and finalizes iff the received total matches the offered size — bytes intact, `finish` called.
+    #[tokio::test]
+    async fn file_transfer_streams_chunks_and_finalizes() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let sink = Arc::new(RecordingFileSink::default());
+        let (host, controller) = file_host(&["screen.view", "file.push.logs"], sink.clone());
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+
+        let payload = b"hello world"; // 11 bytes
+        controller.send_file_offer(
+            "logs".to_string(),
+            "app.log".to_string(),
+            payload.len() as u64,
+        );
+        assert!(
+            wait_until(
+                || sink
+                    .opened
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some(),
+                200
+            )
+            .await,
+            "the host opens the resolved destination on accept"
+        );
+        controller.send_file_chunk(bytes::Bytes::from_static(b"hello "));
+        controller.send_file_chunk(bytes::Bytes::from_static(b"world"));
+        controller.send_file_complete();
+
+        assert!(
+            wait_until(|| sink.finished.load(Relaxed), 200).await,
+            "the transfer finalizes"
+        );
+        assert!(
+            !sink.aborted.load(Relaxed),
+            "a matching transfer is not aborted"
+        );
+        assert_eq!(
+            &*sink
+                .bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            payload,
+            "the bytes arrive intact, in order"
+        );
+        let (dest, size) = sink
+            .opened
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap();
+        assert_eq!(
+            dest,
+            std::path::PathBuf::from("/var/lib/app/incoming/app.log")
+        );
+        assert_eq!(size, 11);
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
+    /// A transfer that streams **more** than the offered size is aborted (no oversized/partial file),
+    /// never finalized (ADR-090 — the size-cap DoS defense on the byte path).
+    #[tokio::test]
+    async fn file_transfer_over_run_is_aborted() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let sink = Arc::new(RecordingFileSink::default());
+        let (host, controller) = file_host(&["screen.view", "file.push.logs"], sink.clone());
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+
+        controller.send_file_offer("logs".to_string(), "small.bin".to_string(), 5);
+        assert!(
+            wait_until(
+                || sink
+                    .opened
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some(),
+                200
+            )
+            .await
+        );
+        // A chunk larger than the offered 5 bytes → over-run → abort.
+        controller.send_file_chunk(bytes::Bytes::from_static(b"way too many bytes"));
+        assert!(
+            wait_until(|| sink.aborted.load(Relaxed), 200).await,
+            "an over-run must abort the transfer"
+        );
+        assert!(
+            !sink.finished.load(Relaxed),
+            "an aborted transfer never finalizes"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
     }
 
     // ── Audio plane, host→controller (ADR-077) ──────────────────────────────────────────────────

@@ -1093,6 +1093,26 @@
     over all five paths — authorized+consented → accept + audited; consent-denied, capability-withheld,
     a **traversal filename**, and an unknown target → the right reject code + audited — all green.
 
+- **ADR-090 · File-transfer byte streaming: chunk → host-resolved `O_NOFOLLOW` write → complete, size-
+  capped · Accepted** (completes ADR-089; `docs/20 §3.3`). ADR-089 landed the offer/authorize/consent
+  *decision*; this lands the data path (only the OS write backend stays on-device).
+  - **Wire:** `ControlMsg::FileChunk { data }` (sequential; bounded [`MAX_FILE_CHUNK`] = 256 KiB, refused
+    at decode) + `FileComplete` (proto oneof 20–21).
+  - **Host transfer machine.** On accept, `host_handle_file_offer` opens the **host-resolved** destination
+    on an injected `FileWriteSink` (`with_file_write_sink`) and arms one `ActiveTransfer{received,
+    declared_size}` (no backend ⇒ the offer is refused — a host that can't write can't receive). Each
+    `FileChunk` is written and the running total tracked; a chunk that would **exceed the offered size**,
+    or a write error, **aborts** (discard the partial file) — the size-cap DoS defense on the byte path.
+    `FileComplete` finalizes **iff** `received == declared_size`, else aborts (no truncated file). A stray
+    chunk with no active transfer is ignored; teardown aborts any in-progress transfer.
+  - **The `FileWriteSink` seam** carries the ADR-086 **symlink-follow (TOCTOU) defense**: the impl MUST
+    `open` with `O_NOFOLLOW`/`openat` and refuse a symlink/existing entry — the safe-leaf path string
+    (ADR-086) is the *precondition* that makes that write sound. That OS backend is the on-device row.
+  - **Verify:** wire round-trip + oversize-chunk-refused + fuzz (ras-protocol); a `ras-core` loopback test
+    with a recording `FileWriteSink` — a full offer→accept→chunks→complete lands the **bytes intact, in
+    order**, at the resolved path with `finish` called; and an **over-run** (chunk larger than the offered
+    size) **aborts** and never finalizes — both green.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

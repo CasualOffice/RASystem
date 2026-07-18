@@ -237,9 +237,14 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   `host_handle_file_offer` runs `authorize_file_push` + a **per-transfer `FileConsent`** prompt (default
   `DenyAllFileConsent`, Inv 1) → `FileAccept`/`FileReject{code}`, audited (`FilePushAccepted`/`Rejected`)
   + surfaced as `FileTransfer{Accepted,Rejected}` lifecycle events both sides. Loopback-tested over all
-  five paths (accept, consent-denied, capability-withheld, traversal-filename, unknown-target). Follow-up:
-  the `FileChunk`/`FileComplete` streaming + a `FileWriteSink` with `O_NOFOLLOW`/`openat` write, and the
-  confirmation UI.
+  five paths (accept, consent-denied, capability-withheld, traversal-filename, unknown-target). **Byte
+  streaming landed too (ADR-090):** `ControlMsg::FileChunk`/`FileComplete` (chunk bounded
+  `MAX_FILE_CHUNK`) → the host writes each chunk to the resolved dest via an injected `FileWriteSink`
+  (`with_file_write_sink`), tracking the total; an **over-run** past the offered size (or a short
+  transfer) **aborts** — no oversized/partial file — and `FileComplete` finalizes iff `received == size`.
+  Loopback-tested (offer→accept→chunks→complete lands the bytes intact; over-run aborts). Only follow-up:
+  the `O_NOFOLLOW`/`openat` OS write backend (the symlink-follow TOCTOU defense the `FileWriteSink` docs
+  mandate) + the confirmation UI.
 - **Audit journal — Inv 10 implemented (ADR-088).** `ras-audit` (was a stub) is now a per-session
   **SHA-256 hash chain** of **content-free** `AuditEvent`s (enum tags + counters only — never a pixel,
   keystroke, clipboard byte, typed text, path, or secret; a `content` field is absent by construction,

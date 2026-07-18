@@ -21,7 +21,7 @@ use crate::abr::LatencyFirstAbr;
 use crate::deps::{
     AudioOutput, AuditSink, ControlChannelDyn, ControlConsent, CursorFrame, CursorObserver,
     CursorShape, CursorSink, DenyAllControl, DenyAllFileConsent, DialTarget, FileConsent,
-    FrameSink, GrantValidator, SessionAuthContext, SessionTransport,
+    FileWriteSink, FrameSink, GrantValidator, SessionAuthContext, SessionTransport,
 };
 use crate::event::{
     LifecycleEvent, LifecycleSink, LifecycleStream, QualitySample, SessionId, StopReason,
@@ -265,6 +265,19 @@ struct HostInner<C, E> {
     /// Per-transfer local consent for a file push (Inv 1). Defaults to [`DenyAllFileConsent`] (fail-closed
     /// — no transfer without a real local Allow). Injected via [`HostSession::with_file_consent`].
     file_consent: Mutex<Arc<dyn FileConsent>>,
+    /// Where accepted file bytes are written (ADR-090). `None` ⇒ this host cannot receive files, so an
+    /// offer is refused. Injected via [`HostSession::with_file_write_sink`]. `O_NOFOLLOW` is the impl's.
+    file_write_sink: Mutex<Option<Arc<dyn FileWriteSink>>>,
+    /// The in-progress accepted transfer (one at a time), or `None`. Tracks bytes received vs the offered
+    /// size so an over-run is aborted (no oversized/partial file).
+    active_transfer: Mutex<Option<ActiveTransfer>>,
+}
+
+/// State of the one in-progress file transfer (ADR-090). The destination is already open on the
+/// injected [`FileWriteSink`]; this only tracks progress against the offered size.
+struct ActiveTransfer {
+    received: u64,
+    declared_size: u64,
 }
 
 /// The host's audio capture + encoder, moved into the audio pump thread when it starts. The egress
@@ -327,6 +340,8 @@ where
                 audit: Mutex::new(None),
                 file_catalogue: Mutex::new(None),
                 file_consent: Mutex::new(Arc::new(DenyAllFileConsent)),
+                file_write_sink: Mutex::new(None),
+                active_transfer: Mutex::new(None),
             }),
         }
     }
@@ -421,6 +436,19 @@ where
             .file_consent
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = consent;
+        self
+    }
+
+    /// Inject the file write backend (ADR-090): where an accepted transfer's bytes land (`O_NOFOLLOW`).
+    /// Without one, every offer is refused (the host cannot receive). Additive; call before
+    /// [`Self::start`].
+    #[must_use]
+    pub fn with_file_write_sink(self, sink: Arc<dyn FileWriteSink>) -> Self {
+        *self
+            .inner
+            .file_write_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
         self
     }
 
@@ -764,6 +792,7 @@ where
         }
         join_audio(inner);
         abort_cursor(inner);
+        abort_file_transfer(inner);
     }
 
     /// Emergency stop / mid-session revoke (Invariant 4). Overrides everything — grant, lease,
@@ -836,6 +865,7 @@ where
         }
         join_audio(inner);
         abort_cursor(inner);
+        abort_file_transfer(inner);
     }
 
     /// Send an in-session chat message to the connected controller (ADR-082). Base session comms (no
@@ -1394,6 +1424,11 @@ async fn host_control_loop<C, E>(
                     break;
                 }
             }
+            // A chunk / completion of an accepted transfer (ADR-090). Written to the host-resolved dest
+            // via the O_NOFOLLOW sink; an over-run or short transfer is aborted (no oversized/partial
+            // file). A stray chunk with no active transfer is ignored.
+            Ok(ControlMsg::FileChunk { data }) => host_handle_file_chunk(inner, &data),
+            Ok(ControlMsg::FileComplete) => host_handle_file_complete(inner),
             // Any Bye from the controller is a clean peer close — deliberately code-agnostic. A
             // controller cannot revoke the host, so a controller-claimed `SessionRevoked` is treated
             // as an ordinary close, never a privileged action (Invariants 1/15: never trust the
@@ -1569,20 +1604,28 @@ fn file_error_code(e: FilePushError) -> ErrorCode {
     }
 }
 
-/// Handle a controller `FileOffer` (ADR-086, the danger channel). Authorizes host-side against the
+/// Audit + surface a file-push refusal and return the reply. Content-free.
+fn file_reject<C, E>(inner: &HostInner<C, E>, code: ErrorCode) -> ControlMsg {
+    record_audit(inner, ras_audit::AuditEvent::FilePushRejected { code });
+    emit_lifecycle(inner, LifecycleEvent::FileTransferRejected { code });
+    ControlMsg::FileReject { code }
+}
+
+/// Handle a controller `FileOffer` (ADR-086/090, the danger channel). Authorizes host-side against the
 /// vendor catalogue + the session grant (`file.push.<target>`, Inv 15 — never the peer's claim) + the
 /// safe-leaf filename validator (defeats the traversal/zip-slip CVE class) + the size cap; then gets
-/// **per-transfer local consent** (Inv 1). Returns the reply to send (`FileAccept`/`FileReject`) and
-/// records the content-free audit outcome. The filename/path never leave this function; the byte
-/// streaming + `O_NOFOLLOW` write are a follow-up. Consent is awaited **outside** any lock.
+/// **per-transfer local consent** (Inv 1); then opens the **host-resolved** destination on the write sink
+/// (`O_NOFOLLOW`, the symlink-follow defense) and arms the transfer. Returns the reply (`FileAccept` /
+/// `FileReject`), audited content-free. The filename/path never leave the host. Consent is awaited
+/// **outside** any lock.
 async fn host_handle_file_offer<C, E>(
     inner: &HostInner<C, E>,
     target: String,
     filename: String,
     size: u64,
 ) -> ControlMsg {
-    // ① authorize (catalogue + capability + safe leaf + size). No catalogue ⇒ no target exists.
-    let auth_err = {
+    // ① authorize → the host-resolved destination path, or a reject code. No catalogue ⇒ no target.
+    let resolved = {
         let cat = inner
             .file_catalogue
             .lock()
@@ -1602,31 +1645,132 @@ async fn host_handle_file_offer<C, E>(
                     size,
                 },
             )
-            .err(),
-            None => Some(FilePushError::UnknownTarget),
+            .map_err(file_error_code),
+            None => Err(ErrorCode::InvalidMessage),
         }
     };
-    if let Some(e) = auth_err {
-        let code = file_error_code(e);
-        record_audit(inner, ras_audit::AuditEvent::FilePushRejected { code });
-        emit_lifecycle(inner, LifecycleEvent::FileTransferRejected { code });
-        return ControlMsg::FileReject { code };
-    }
+    let dest = match resolved {
+        Ok(d) => d,
+        Err(code) => return file_reject(inner, code),
+    };
     // ② per-transfer local consent (Inv 1) — awaited outside any lock.
     let consent = inner
         .file_consent
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    if consent.consent_to_file(&target, &filename, size).await {
-        record_audit(inner, ras_audit::AuditEvent::FilePushAccepted);
-        emit_lifecycle(inner, LifecycleEvent::FileTransferAccepted);
-        ControlMsg::FileAccept
-    } else {
-        let code = ErrorCode::ConsentDenied;
-        record_audit(inner, ras_audit::AuditEvent::FilePushRejected { code });
-        emit_lifecycle(inner, LifecycleEvent::FileTransferRejected { code });
-        ControlMsg::FileReject { code }
+    if !consent.consent_to_file(&target, &filename, size).await {
+        return file_reject(inner, ErrorCode::ConsentDenied);
+    }
+    // ③ open the host-resolved destination on the write backend (O_NOFOLLOW). No backend ⇒ can't receive.
+    let Some(sink) = inner
+        .file_write_sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    else {
+        return file_reject(inner, ErrorCode::InputFailed);
+    };
+    if sink.open(&dest, size).is_err() {
+        return file_reject(inner, ErrorCode::InputFailed);
+    }
+    // Armed: record the active transfer, audit the authorization, accept.
+    *inner
+        .active_transfer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ActiveTransfer {
+        received: 0,
+        declared_size: size,
+    });
+    record_audit(inner, ras_audit::AuditEvent::FilePushAccepted);
+    emit_lifecycle(inner, LifecycleEvent::FileTransferAccepted);
+    ControlMsg::FileAccept
+}
+
+/// Handle one `FileChunk` of an accepted transfer (ADR-090). Writes it to the open sink and tracks the
+/// running total; a chunk that would exceed the offered size (or a write failure) **aborts** the
+/// transfer (no oversized/partial file). A chunk with no active transfer is ignored (a stray/late chunk).
+fn host_handle_file_chunk<C, E>(inner: &HostInner<C, E>, data: &[u8]) {
+    // Clone the sink Arc first (consistent lock order: write_sink → active_transfer), then work state.
+    let sink = inner
+        .file_write_sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let mut guard = inner
+        .active_transfer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(t) = guard.as_mut() else {
+        return; // no active transfer — ignore a stray chunk
+    };
+    let new_total = t.received.saturating_add(data.len() as u64);
+    if new_total > t.declared_size {
+        *guard = None;
+        drop(guard);
+        if let Some(s) = &sink {
+            s.abort();
+        }
+        let _ = file_reject(inner, ErrorCode::InvalidMessage);
+        return;
+    }
+    match &sink {
+        Some(s) if s.write(data).is_ok() => t.received = new_total,
+        _ => {
+            *guard = None;
+            drop(guard);
+            if let Some(s) = &sink {
+                s.abort();
+            }
+            let _ = file_reject(inner, ErrorCode::InputFailed);
+        }
+    }
+}
+
+/// Handle `FileComplete` (ADR-090): finalize the write iff the received total equals the offered size,
+/// else abort (no truncated file). A complete with no active transfer is ignored.
+fn host_handle_file_complete<C, E>(inner: &HostInner<C, E>) {
+    let sink = inner
+        .file_write_sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(t) = inner
+        .active_transfer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
+        return;
+    };
+    if t.received == t.declared_size {
+        if let Some(s) = &sink {
+            let _ = s.finish();
+        }
+    } else if let Some(s) = &sink {
+        // Short transfer (fewer bytes than offered): discard rather than keep a truncated file.
+        s.abort();
+        let _ = file_reject(inner, ErrorCode::InvalidMessage);
+    }
+}
+
+/// Abort any in-progress file transfer on teardown (ADR-090) — discard the partial file. Idempotent.
+fn abort_file_transfer<C, E>(inner: &HostInner<C, E>) {
+    let had = inner
+        .active_transfer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .is_some();
+    if had {
+        if let Some(s) = inner
+            .file_write_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            s.abort();
+        }
     }
 }
 
@@ -1771,6 +1915,10 @@ enum ControlCommand {
     Chat(String),
     /// Offer a file push to a catalogued drop target (ADR-086): `(target, filename, size)`.
     FileOffer(String, String, u64),
+    /// One chunk of an accepted file transfer's bytes (ADR-090).
+    FileChunk(bytes::Bytes),
+    /// The accepted file transfer's bytes are all sent (ADR-090).
+    FileComplete,
     Bye,
 }
 
@@ -2146,6 +2294,38 @@ impl ControllerSession {
         }
     }
 
+    /// Send one chunk of an **accepted** file transfer (ADR-090) — call only after a
+    /// `FileTransferAccepted` lifecycle event. Bytes over [`ras_protocol::MAX_FILE_CHUNK`] are dropped
+    /// (split them). Best-effort; the host aborts the transfer if the total exceeds the offered size.
+    pub fn send_file_chunk(&self, data: bytes::Bytes) {
+        if data.len() > ras_protocol::MAX_FILE_CHUNK {
+            return;
+        }
+        if let Some(tx) = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            let _ = tx.try_send(ControlCommand::FileChunk(data));
+        }
+    }
+
+    /// Signal that all chunks of the accepted transfer have been sent (ADR-090); the host finalizes the
+    /// write iff the received total equals the offered size.
+    pub fn send_file_complete(&self) {
+        if let Some(tx) = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            let _ = tx.try_send(ControlCommand::FileComplete);
+        }
+    }
+
     /// The OS-input lease the host has granted this controller, if any: `(lease_id, generation)`.
     #[must_use]
     pub fn current_lease(&self) -> Option<([u8; 16], u32)> {
@@ -2230,6 +2410,12 @@ async fn controller_control_loop(
                 Some(ControlCommand::FileOffer(target, filename, size)) => {
                     let msg = ControlMsg::FileOffer { target, filename, size };
                     if control.send(msg).await.is_err() { break; }
+                }
+                Some(ControlCommand::FileChunk(data)) => {
+                    if control.send(ControlMsg::FileChunk { data }).await.is_err() { break; }
+                }
+                Some(ControlCommand::FileComplete) => {
+                    if control.send(ControlMsg::FileComplete).await.is_err() { break; }
                 }
                 Some(ControlCommand::Bye) => {
                     // A controller leaving is a clean peer close, never a revoke — a controller

@@ -276,6 +276,11 @@ message FileAccept {}
 message FileReject {
   ErrorCodeProto code = 1;
 }
+// One chunk of an accepted transfer's bytes (ADR-090). ras_protocol::ControlMsg::FileChunk.
+message FileChunk {
+  bytes data = 1; // bounded by MAX_FILE_CHUNK
+}
+message FileComplete {}
 
 // ---------------------------------------------------------------------------
 // Top-level control-channel message
@@ -305,6 +310,8 @@ message ControlMsg {
     FileOffer       file_offer       = 17;
     FileAccept      file_accept      = 18;
     FileReject      file_reject      = 19;
+    FileChunk       file_chunk       = 20;
+    FileComplete    file_complete    = 21;
   }
 }
 

@@ -299,6 +299,32 @@ impl FileConsent for DenyAllFileConsent {
     }
 }
 
+/// Where an accepted file transfer's bytes are written (ADR-090). Implemented by the OS backend and a
+/// recorder in tests. The `dest` is **host-resolved** (a validated child of the target's sandbox, never
+/// a controller path); the impl **MUST** open it with `O_NOFOLLOW` / `openat` and refuse a symlink — the
+/// ADR-086 symlink-follow (TOCTOU) defense that the safe-leaf path string is the precondition for. Sync
+/// (a chunk write is fast); one transfer at a time.
+pub trait FileWriteSink: Send + Sync {
+    /// Open `dest` for a new transfer of `size` bytes. `O_NOFOLLOW` + create-new (never follow/overwrite
+    /// a symlink or existing file).
+    ///
+    /// # Errors
+    /// Filesystem/permission failure, or the path resolves to a symlink/existing entry.
+    fn open(&self, dest: &std::path::Path, size: u64) -> Result<(), CoreError>;
+    /// Append one chunk to the open destination.
+    ///
+    /// # Errors
+    /// Write failure.
+    fn write(&self, data: &[u8]) -> Result<(), CoreError>;
+    /// Finalize the completed file (fsync + close).
+    ///
+    /// # Errors
+    /// Flush/close failure.
+    fn finish(&self) -> Result<(), CoreError>;
+    /// Abort and discard the partial file (error / oversize / teardown). Idempotent, never fails.
+    fn abort(&self);
+}
+
 /// The **real** session-phase authorization gate (Phase 2). Parses `access_request` as the PASETO
 /// v4.public session grant and calls [`ras_grant::validate_grant`] against the endpoint the transport
 /// just authenticated — enforcing the sender-constraint (ADR-040) at the exact moment the endpoint is

@@ -347,6 +347,18 @@ pub enum ControlMsg {
         /// Why the push was refused.
         code: ErrorCode,
     },
+    /// Controller → host: one sequential chunk of an **accepted** file transfer's bytes (ADR-090). Only
+    /// valid after a [`Self::FileAccept`]; the host writes it (via `O_NOFOLLOW`) to the resolved
+    /// destination and rejects the transfer if the running total exceeds the offered `size`. Bounded by
+    /// [`MAX_FILE_CHUNK`]. Not a secret in the Inv-8 sense (a file the local user agreed to receive), but
+    /// bounded to cap the per-message DoS surface.
+    FileChunk {
+        /// The chunk bytes (`≤ MAX_FILE_CHUNK`).
+        data: Bytes,
+    },
+    /// Controller → host: the accepted file transfer's bytes are all sent. The host finalizes the write
+    /// iff the received total equals the offered `size`, else aborts (Inv: no partial/oversized file).
+    FileComplete,
 }
 
 /// A UTF-8 secret whose `Debug` prints only its byte length, never its content — so it physically
@@ -386,6 +398,9 @@ pub const MAX_CHAT_BYTES: usize = 4 * 1024;
 pub const MAX_FILE_NAME: usize = 255;
 /// Maximum length (bytes) of a file drop-target name.
 pub const MAX_FILE_TARGET: usize = 128;
+/// Maximum size (bytes) of one [`ControlMsg::FileChunk`]. Sits under [`MAX_CONTROL_FRAME`] with headroom;
+/// larger files are sent as many chunks. An oversized chunk is a malformed message.
+pub const MAX_FILE_CHUNK: usize = 256 * 1024;
 
 /// Maximum cursor image dimension (pixels) on either axis — a DoS guard. Real cursors are ≤ 32×32,
 /// up to ~128 on HiDPI; 256 is generous headroom. A larger dimension is a malformed message.
