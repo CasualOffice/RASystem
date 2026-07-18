@@ -232,8 +232,14 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   **property test** asserts `dir.join(name).parent()==dir` over arbitrary input); capability-bleed
   (per-target `file.push.<name>` is its own namespace; checks *only* that cap, never input/capture —
   CVE-2026-58056/Inv 15); symlink-follow (the string is a safe leaf — the precondition for the deferred
-  `O_NOFOLLOW` write). Per-target caps deny-by-default. Pure (no I/O, no new crate/dep). Follow-up: wire
-  + chunked transfer protocol, per-transfer confirmation UI, `O_NOFOLLOW`/`openat` write backend.
+  `O_NOFOLLOW` write). Per-target caps deny-by-default. Pure (no I/O, no new crate/dep). **Authorization
+  wire landed too (ADR-089):** `ControlMsg::FileOffer{target,filename,size}` (leaf name, never a path) →
+  `host_handle_file_offer` runs `authorize_file_push` + a **per-transfer `FileConsent`** prompt (default
+  `DenyAllFileConsent`, Inv 1) → `FileAccept`/`FileReject{code}`, audited (`FilePushAccepted`/`Rejected`)
+  + surfaced as `FileTransfer{Accepted,Rejected}` lifecycle events both sides. Loopback-tested over all
+  five paths (accept, consent-denied, capability-withheld, traversal-filename, unknown-target). Follow-up:
+  the `FileChunk`/`FileComplete` streaming + a `FileWriteSink` with `O_NOFOLLOW`/`openat` write, and the
+  confirmation UI.
 - **Audit journal — Inv 10 implemented (ADR-088).** `ras-audit` (was a stub) is now a per-session
   **SHA-256 hash chain** of **content-free** `AuditEvent`s (enum tags + counters only — never a pixel,
   keystroke, clipboard byte, typed text, path, or secret; a `content` field is absent by construction,

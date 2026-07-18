@@ -40,7 +40,7 @@ pub use abr::LatencyFirstAbr;
 pub use deps::AllowAllValidator;
 pub use deps::{
     AudioOutput, AudioSink, AudioSourceDyn, AuditSink, ControlChannelDyn, ControlConsent,
-    CursorFrame, CursorObserver, CursorShape, CursorSink, FrameSink, GrantDecision,
+    CursorFrame, CursorObserver, CursorShape, CursorSink, FileConsent, FrameSink, GrantDecision,
     GrantSessionValidator, GrantValidator, PushResult, SessionAuthContext, SessionTransport,
     VideoSinkDyn, VideoSourceDyn,
 };
@@ -1015,6 +1015,170 @@ mod e2e {
         assert!(
             clip.seen().is_empty(),
             "without clipboard.read the host must not send its clipboard (Inv 15)"
+        );
+    }
+
+    // ── File push: offer → authorize → consent → accept/reject (ADR-086) ─────────────────────────
+    struct FixedFileConsent(bool);
+    #[async_trait::async_trait]
+    impl crate::FileConsent for FixedFileConsent {
+        async fn consent_to_file(&self, _t: &str, _f: &str, _s: u64) -> bool {
+            self.0
+        }
+    }
+
+    fn file_catalogue() -> ras_policy::file::DropCatalogue {
+        use ras_policy::file::{DropCatalogue, DropTarget};
+        DropCatalogue::new(vec![DropTarget {
+            name: "logs".into(),
+            description: "Upload logs".into(),
+            dest_dir: std::path::PathBuf::from("/var/lib/app/incoming"),
+            max_bytes: 10_000,
+            allowed_extensions: None,
+        }])
+    }
+
+    /// The file-offer authorization/consent flow: a valid catalogued target with the per-target
+    /// capability + local consent is accepted (audited `FilePushAccepted`); every refusal path — consent
+    /// denied, capability withheld, an unsafe (traversal) filename, and an unknown target — is rejected
+    /// with the right code, host-authoritative and content-free (Inv 6/15).
+    #[tokio::test]
+    async fn file_offer_authorize_consent_and_reject_paths() {
+        use crate::audit::AuditEvent;
+        use ras_protocol::ErrorCode;
+
+        async fn drain_for_file(events: &mut LifecycleStream) -> Option<LifecycleEvent> {
+            for _ in 0..50 {
+                match tokio::time::timeout(Duration::from_millis(50), events.recv()).await {
+                    Ok(Some(
+                        e @ (LifecycleEvent::FileTransferAccepted
+                        | LifecycleEvent::FileTransferRejected { .. }),
+                    )) => return Some(e),
+                    Ok(Some(_)) => continue,
+                    _ => return None,
+                }
+            }
+            None
+        }
+
+        async fn run(
+            caps_set: &[&str],
+            consent: bool,
+            target: &str,
+            filename: &str,
+            size: u64,
+        ) -> (Vec<AuditEvent>, Option<LifecycleEvent>) {
+            let audit = Arc::new(RecordingAudit::new([0x66; 16]));
+            let (host_tp, ctrl_tp) = loopback_pair();
+            let host = HostSession::new(
+                HostSessionConfig::new(MonitorId(0)),
+                host_tp,
+                SyntheticCaptureBackend::new(320, 240),
+                SyntheticEncoder::new(),
+                Arc::new(FixedCaps(caps(caps_set))),
+            )
+            .with_file_catalogue(file_catalogue())
+            .with_file_consent(Arc::new(FixedFileConsent(consent)))
+            .with_audit_sink(audit.clone());
+            let controller = ControllerSession::new(
+                ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+                ctrl_tp,
+            );
+            let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+            host_r.unwrap();
+            let mut ctrl_events = ctrl_r.unwrap();
+            controller.send_file_offer(target.to_string(), filename.to_string(), size);
+            let ev = drain_for_file(&mut ctrl_events).await;
+            controller.disconnect(StopReason::UserRequested).await;
+            host.stop(StopReason::UserRequested).await;
+            (audit.events(), ev)
+        }
+
+        // Authorized + consented → accepted + audited.
+        let (events, ev) = run(
+            &["screen.view", "file.push.logs"],
+            true,
+            "logs",
+            "app.log",
+            100,
+        )
+        .await;
+        assert!(
+            matches!(ev, Some(LifecycleEvent::FileTransferAccepted)),
+            "got {ev:?}"
+        );
+        assert!(events.contains(&AuditEvent::FilePushAccepted));
+
+        // Consent denied → rejected(ConsentDenied) + audited FilePushRejected.
+        let (events, ev) = run(
+            &["screen.view", "file.push.logs"],
+            false,
+            "logs",
+            "app.log",
+            100,
+        )
+        .await;
+        assert!(
+            matches!(
+                ev,
+                Some(LifecycleEvent::FileTransferRejected {
+                    code: ErrorCode::ConsentDenied
+                })
+            ),
+            "got {ev:?}"
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AuditEvent::FilePushRejected { .. })));
+
+        // Capability withheld → rejected(CapabilityDenied), even with a valid target + consent (Inv 15).
+        let (_e, ev) = run(&["screen.view"], true, "logs", "app.log", 100).await;
+        assert!(
+            matches!(
+                ev,
+                Some(LifecycleEvent::FileTransferRejected {
+                    code: ErrorCode::CapabilityDenied
+                })
+            ),
+            "got {ev:?}"
+        );
+
+        // Traversal filename → rejected(InvalidMessage) — the CVE-class defense over the wire.
+        let (_e, ev) = run(
+            &["screen.view", "file.push.logs"],
+            true,
+            "logs",
+            "../../etc/passwd",
+            100,
+        )
+        .await;
+        assert!(
+            matches!(
+                ev,
+                Some(LifecycleEvent::FileTransferRejected {
+                    code: ErrorCode::InvalidMessage
+                })
+            ),
+            "got {ev:?}"
+        );
+
+        // Unknown target → rejected(InvalidMessage) — a controller can't invent a destination.
+        let (_e, ev) = run(
+            &["screen.view", "file.push.nope"],
+            true,
+            "nope",
+            "app.log",
+            100,
+        )
+        .await;
+        assert!(
+            matches!(
+                ev,
+                Some(LifecycleEvent::FileTransferRejected {
+                    code: ErrorCode::InvalidMessage
+                })
+            ),
+            "got {ev:?}"
         );
     }
 

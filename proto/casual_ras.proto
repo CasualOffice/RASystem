@@ -264,6 +264,19 @@ message ChatMessage {
   string text = 1; // UTF-8; bounded by MAX_CHAT_BYTES
 }
 
+// File push to a catalogued drop target (ADR-086/087). Controller sends target + leaf filename + size
+// (NEVER a path); the host authorizes (ras_policy::authorize_file_push) + gets consent, then replies
+// FileAccept or FileReject. ras_protocol::ControlMsg::FileOffer.
+message FileOffer {
+  string target   = 1; // catalogued target name, bounded by MAX_FILE_TARGET
+  string filename = 2; // bare leaf filename, bounded by MAX_FILE_NAME
+  uint64 size     = 3;
+}
+message FileAccept {}
+message FileReject {
+  ErrorCodeProto code = 1;
+}
+
 // ---------------------------------------------------------------------------
 // Top-level control-channel message
 // ---------------------------------------------------------------------------
@@ -289,6 +302,9 @@ message ControlMsg {
     CursorHidden    cursor_hidden    = 14;
     ClipboardText   clipboard_text   = 15;
     ChatMessage     chat_message     = 16;
+    FileOffer       file_offer       = 17;
+    FileAccept      file_accept      = 18;
+    FileReject      file_reject      = 19;
   }
 }
 

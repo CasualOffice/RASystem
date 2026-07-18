@@ -278,6 +278,27 @@ impl ControlConsent for DenyAllControl {
     }
 }
 
+/// The local-user consent hook for a **file push** (ADR-086, per-transfer confirmation, Inv 1). Even a
+/// controller holding the `file.push.<target>` capability still needs a live local Allow — file transfer
+/// is the danger channel. Given the (already catalogue+capability-authorized) target, leaf filename, and
+/// size, return whether the local user permits *this* transfer. Fail-closed: a timeout/dismissal ⇒ false.
+#[async_trait]
+pub trait FileConsent: Send + Sync {
+    /// Prompt the local user for this specific push; `true` ⇒ allowed.
+    async fn consent_to_file(&self, target: &str, filename: &str, size: u64) -> bool;
+}
+
+/// Fail-closed default: with no seam wired, **no** file push is ever accepted (even a catalogued,
+/// capability-granted one). A host that wants file transfer injects a real [`FileConsent`].
+pub struct DenyAllFileConsent;
+
+#[async_trait]
+impl FileConsent for DenyAllFileConsent {
+    async fn consent_to_file(&self, _target: &str, _filename: &str, _size: u64) -> bool {
+        false
+    }
+}
+
 /// The **real** session-phase authorization gate (Phase 2). Parses `access_request` as the PASETO
 /// v4.public session grant and calls [`ras_grant::validate_grant`] against the endpoint the transport
 /// just authenticated — enforcing the sender-constraint (ADR-040) at the exact moment the endpoint is

@@ -323,6 +323,30 @@ pub enum ControlMsg {
         /// The UTF-8 chat text. Redacted in `Debug`; bounded by [`MAX_CHAT_BYTES`].
         text: Redacted,
     },
+    /// Controller → host: a request to push a file to a **catalogued** drop target (ADR-086/087 file
+    /// transfer). Carries **no path** — only the target name, a leaf `filename`, and the `size`. The host
+    /// runs `ras_policy::authorize_file_push` (target-in-catalogue + `file.push.<target>` capability +
+    /// safe-leaf filename + size cap) and gets per-transfer local consent, replying [`Self::FileAccept`]
+    /// or [`Self::FileReject`]. The filename is **not** a secret (it is a chosen name, not content), but
+    /// it is bounded ([`MAX_FILE_NAME`]) and only ever used after `validate_filename` proves it a safe
+    /// leaf. (The chunk-streaming + `O_NOFOLLOW` write are a follow-up.)
+    FileOffer {
+        /// The catalogued drop-target name (bounded by [`MAX_FILE_TARGET`]).
+        target: String,
+        /// The bare leaf filename the host will validate + resolve (bounded by [`MAX_FILE_NAME`]).
+        filename: String,
+        /// Declared file size in bytes (checked against the target's cap).
+        size: u64,
+    },
+    /// Host → controller: the file offer was authorized **and** locally consented — the host is ready to
+    /// receive (Inv 1). (Byte streaming is a follow-up.)
+    FileAccept,
+    /// Host → controller: the file offer was refused, with a stable reason code (unknown target,
+    /// capability denied, unsafe filename, too large, extension denied, or consent denied). Content-free.
+    FileReject {
+        /// Why the push was refused.
+        code: ErrorCode,
+    },
 }
 
 /// A UTF-8 secret whose `Debug` prints only its byte length, never its content — so it physically
@@ -356,6 +380,12 @@ pub const MAX_CLIPBOARD_BYTES: usize = 768 * 1024;
 /// [`MAX_CONTROL_FRAME`] and caps the per-message DoS surface. Oversized messages are **refused**,
 /// never truncated.
 pub const MAX_CHAT_BYTES: usize = 4 * 1024;
+
+/// Maximum length (bytes) of a [`ControlMsg::FileOffer`] leaf filename. Matches the OS `NAME_MAX`-class
+/// bound the host's `validate_filename` enforces; an over-long name is a malformed offer.
+pub const MAX_FILE_NAME: usize = 255;
+/// Maximum length (bytes) of a file drop-target name.
+pub const MAX_FILE_TARGET: usize = 128;
 
 /// Maximum cursor image dimension (pixels) on either axis — a DoS guard. Real cursors are ≤ 32×32,
 /// up to ~128 on HiDPI; 256 is generous headroom. A larger dimension is a malformed message.

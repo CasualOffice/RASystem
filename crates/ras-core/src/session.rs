@@ -20,8 +20,8 @@ use tokio::sync::mpsc;
 use crate::abr::LatencyFirstAbr;
 use crate::deps::{
     AudioOutput, AuditSink, ControlChannelDyn, ControlConsent, CursorFrame, CursorObserver,
-    CursorShape, CursorSink, DenyAllControl, DialTarget, FrameSink, GrantValidator,
-    SessionAuthContext, SessionTransport,
+    CursorShape, CursorSink, DenyAllControl, DenyAllFileConsent, DialTarget, FileConsent,
+    FrameSink, GrantValidator, SessionAuthContext, SessionTransport,
 };
 use crate::event::{
     LifecycleEvent, LifecycleSink, LifecycleStream, QualitySample, SessionId, StopReason,
@@ -37,6 +37,7 @@ use ras_media::{
     MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec, VideoEncoderBackend,
     VideoTransportKind, WindowId,
 };
+use ras_policy::file::{authorize_file_push, DropCatalogue, FilePushError, FilePushRequest};
 use ras_policy::{clipboard_push_allowed, CapabilitySet, ClipboardDirection, AUDIO_LISTEN};
 use ras_protocol::{
     ControlMsg, DecoderFeedback, ErrorCode, InputEnvelope, KeyframeReason, StreamConfigWire,
@@ -258,6 +259,12 @@ struct HostInner<C, E> {
     /// journal, losslessly (unlike the advisory lifecycle stream). `None` ⇒ no auditing. Injected via
     /// [`HostSession::with_audit_sink`].
     audit: Mutex<Option<Arc<dyn AuditSink>>>,
+    /// The vendor's file drop-target catalogue (ADR-086). `None` ⇒ no target exists, so every file offer
+    /// is refused. Injected via [`HostSession::with_file_catalogue`].
+    file_catalogue: Mutex<Option<DropCatalogue>>,
+    /// Per-transfer local consent for a file push (Inv 1). Defaults to [`DenyAllFileConsent`] (fail-closed
+    /// — no transfer without a real local Allow). Injected via [`HostSession::with_file_consent`].
+    file_consent: Mutex<Arc<dyn FileConsent>>,
 }
 
 /// The host's audio capture + encoder, moved into the audio pump thread when it starts. The egress
@@ -318,6 +325,8 @@ where
                 cursor: Mutex::new(None),
                 cursor_task: Mutex::new(None),
                 audit: Mutex::new(None),
+                file_catalogue: Mutex::new(None),
+                file_consent: Mutex::new(Arc::new(DenyAllFileConsent)),
             }),
         }
     }
@@ -388,6 +397,30 @@ where
             .audit
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(audit);
+        self
+    }
+
+    /// Inject the file drop-target catalogue (ADR-086). Without one, every file offer is refused (no
+    /// target exists). Additive; call before [`Self::start`].
+    #[must_use]
+    pub fn with_file_catalogue(self, catalogue: DropCatalogue) -> Self {
+        *self
+            .inner
+            .file_catalogue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(catalogue);
+        self
+    }
+
+    /// Inject the per-transfer file-push consent prompt (Inv 1). Without one, the fail-closed
+    /// [`DenyAllFileConsent`] refuses every push. Additive; call before [`Self::start`].
+    #[must_use]
+    pub fn with_file_consent(self, consent: Arc<dyn FileConsent>) -> Self {
+        *self
+            .inner
+            .file_consent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = consent;
         self
     }
 
@@ -1348,6 +1381,19 @@ async fn host_control_loop<C, E>(
             Ok(ControlMsg::ChatMessage { text }) => {
                 emit_lifecycle(inner, LifecycleEvent::ChatMessage { text });
             }
+            // File push to a catalogued drop target (ADR-086, the danger channel). Authorize
+            // (catalogue + `file.push.<target>` cap + safe-leaf filename + size cap) then get per-transfer
+            // local consent (Inv 1); reply FileAccept or FileReject, audited. Never a controller path.
+            Ok(ControlMsg::FileOffer {
+                target,
+                filename,
+                size,
+            }) => {
+                let reply = host_handle_file_offer(inner, target, filename, size).await;
+                if control.send(reply).await.is_err() {
+                    break;
+                }
+            }
             // Any Bye from the controller is a clean peer close — deliberately code-agnostic. A
             // controller cannot revoke the host, so a controller-claimed `SessionRevoked` is treated
             // as an ordinary close, never a privileged action (Invariants 1/15: never trust the
@@ -1511,6 +1557,79 @@ fn host_handle_input<C, E>(inner: &HostInner<C, E>, env: &InputEnvelope) -> Resu
     }
 }
 
+/// Map a file-push authorization failure to a stable wire reason code. Content-free.
+fn file_error_code(e: FilePushError) -> ErrorCode {
+    match e {
+        // A withheld per-target capability or a disallowed extension is a capability/policy refusal.
+        FilePushError::CapabilityDenied | FilePushError::ExtensionDenied => {
+            ErrorCode::CapabilityDenied
+        }
+        // Unknown target / unsafe filename / oversized are malformed-request refusals.
+        _ => ErrorCode::InvalidMessage,
+    }
+}
+
+/// Handle a controller `FileOffer` (ADR-086, the danger channel). Authorizes host-side against the
+/// vendor catalogue + the session grant (`file.push.<target>`, Inv 15 — never the peer's claim) + the
+/// safe-leaf filename validator (defeats the traversal/zip-slip CVE class) + the size cap; then gets
+/// **per-transfer local consent** (Inv 1). Returns the reply to send (`FileAccept`/`FileReject`) and
+/// records the content-free audit outcome. The filename/path never leave this function; the byte
+/// streaming + `O_NOFOLLOW` write are a follow-up. Consent is awaited **outside** any lock.
+async fn host_handle_file_offer<C, E>(
+    inner: &HostInner<C, E>,
+    target: String,
+    filename: String,
+    size: u64,
+) -> ControlMsg {
+    // ① authorize (catalogue + capability + safe leaf + size). No catalogue ⇒ no target exists.
+    let auth_err = {
+        let cat = inner
+            .file_catalogue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let granted = inner
+            .granted_caps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match cat.as_ref() {
+            Some(catalogue) => authorize_file_push(
+                catalogue,
+                &granted,
+                &FilePushRequest {
+                    target: target.clone(),
+                    filename: filename.clone(),
+                    size,
+                },
+            )
+            .err(),
+            None => Some(FilePushError::UnknownTarget),
+        }
+    };
+    if let Some(e) = auth_err {
+        let code = file_error_code(e);
+        record_audit(inner, ras_audit::AuditEvent::FilePushRejected { code });
+        emit_lifecycle(inner, LifecycleEvent::FileTransferRejected { code });
+        return ControlMsg::FileReject { code };
+    }
+    // ② per-transfer local consent (Inv 1) — awaited outside any lock.
+    let consent = inner
+        .file_consent
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if consent.consent_to_file(&target, &filename, size).await {
+        record_audit(inner, ras_audit::AuditEvent::FilePushAccepted);
+        emit_lifecycle(inner, LifecycleEvent::FileTransferAccepted);
+        ControlMsg::FileAccept
+    } else {
+        let code = ErrorCode::ConsentDenied;
+        record_audit(inner, ras_audit::AuditEvent::FilePushRejected { code });
+        emit_lifecycle(inner, LifecycleEvent::FileTransferRejected { code });
+        ControlMsg::FileReject { code }
+    }
+}
+
 /// Apply a controller→host clipboard-text push (ADR-076). Authorizes host-side against the session
 /// grant (`clipboard.write`, Inv 15 — never the peer's claim); on success sets the OS clipboard via the
 /// injected [`ClipboardSink`], which **sets, never pastes** (the no-auto-paste rule). Emits a
@@ -1650,6 +1769,8 @@ enum ControlCommand {
     ClipboardText(String),
     /// Send an in-session chat message to the host (ADR-082). Base session comms; never logged (Inv 8).
     Chat(String),
+    /// Offer a file push to a catalogued drop target (ADR-086): `(target, filename, size)`.
+    FileOffer(String, String, u64),
     Bye,
 }
 
@@ -2004,6 +2125,27 @@ impl ControllerSession {
         }
     }
 
+    /// Offer a file push to a catalogued host drop target (ADR-086). Sends only the target name, a leaf
+    /// `filename`, and the `size` — **never a path**; the host authorizes + gets consent and replies with
+    /// a `FileTransferAccepted`/`Rejected` lifecycle event. Oversized names are dropped, not sent (the
+    /// host would refuse them). Best-effort. (Byte streaming after an accept is a follow-up.)
+    pub fn send_file_offer(&self, target: String, filename: String, size: u64) {
+        if target.len() > ras_protocol::MAX_FILE_TARGET
+            || filename.len() > ras_protocol::MAX_FILE_NAME
+        {
+            return;
+        }
+        let tx = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(ControlCommand::FileOffer(target, filename, size));
+        }
+    }
+
     /// The OS-input lease the host has granted this controller, if any: `(lease_id, generation)`.
     #[must_use]
     pub fn current_lease(&self) -> Option<([u8; 16], u32)> {
@@ -2085,6 +2227,10 @@ async fn controller_control_loop(
                     let msg = ControlMsg::ChatMessage { text: ras_protocol::Redacted(text) };
                     if control.send(msg).await.is_err() { break; }
                 }
+                Some(ControlCommand::FileOffer(target, filename, size)) => {
+                    let msg = ControlMsg::FileOffer { target, filename, size };
+                    if control.send(msg).await.is_err() { break; }
+                }
                 Some(ControlCommand::Bye) => {
                     // A controller leaving is a clean peer close, never a revoke — a controller
                     // cannot revoke the host (Invariants 1/13). Use the benign closure code.
@@ -2127,6 +2273,27 @@ async fn controller_control_loop(
                         .lease
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                }
+                // Host's verdict on a file offer (ADR-086): surface it for the controller UI. Content-free.
+                Ok(ControlMsg::FileAccept) => {
+                    if let Some(sink) = inner
+                        .lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.emit(LifecycleEvent::FileTransferAccepted);
+                    }
+                }
+                Ok(ControlMsg::FileReject { code }) => {
+                    if let Some(sink) = inner
+                        .lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.emit(LifecycleEvent::FileTransferRejected { code });
+                    }
                 }
                 // Host cursor-shape updates (ADR-073): forward to the attached cursor sink (the pointer
                 // overlay). Display data, not input. The `id`-cached form reuses a previously-drawn

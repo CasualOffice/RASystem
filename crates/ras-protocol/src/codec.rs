@@ -24,7 +24,8 @@ use crate::{
     AccessOutcome, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode, InputAction,
     InputEnvelope, KeyframeReason, KeyframeRequest, PointerButton, PointerUpdate, RasError,
     Redacted, StreamConfigWire, MAX_CAPABILITIES, MAX_CAPABILITY_LEN, MAX_CHAT_BYTES,
-    MAX_CLIPBOARD_BYTES, MAX_CONTROL_FRAME, MAX_CURSOR_DIM, MAX_DISPLAY_NAME, MAX_TEXT_INPUT,
+    MAX_CLIPBOARD_BYTES, MAX_CONTROL_FRAME, MAX_CURSOR_DIM, MAX_DISPLAY_NAME, MAX_FILE_NAME,
+    MAX_FILE_TARGET, MAX_TEXT_INPUT,
 };
 
 /// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
@@ -277,6 +278,19 @@ fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
             Kind::ClipboardText(pb::ClipboardText { text: text.0 })
         }
         ControlMsg::ChatMessage { text } => Kind::ChatMessage(pb::ChatMessage { text: text.0 }),
+        ControlMsg::FileOffer {
+            target,
+            filename,
+            size,
+        } => Kind::FileOffer(pb::FileOffer {
+            target,
+            filename,
+            size,
+        }),
+        ControlMsg::FileAccept => Kind::FileAccept(pb::FileAccept {}),
+        ControlMsg::FileReject { code } => Kind::FileReject(pb::FileReject {
+            code: i32::from(errorcode_to_pb(code)),
+        }),
     };
     pb::ControlMsg { kind: Some(kind) }
 }
@@ -344,6 +358,23 @@ fn chat_message_from_pb(c: pb::ChatMessage) -> Result<ControlMsg, RasError> {
     })
 }
 
+/// Wire → Rust file offer, fail-closed. Bounds the `target` + `filename` lengths (prost guarantees
+/// UTF-8); authorization + safe-leaf validation happen host-side (`ras_policy::authorize_file_push`),
+/// never here — a malformed *length* is rejected at decode, an unsafe *filename* is rejected at the gate.
+fn file_offer_from_pb(o: pb::FileOffer) -> Result<ControlMsg, RasError> {
+    if o.target.len() > MAX_FILE_TARGET || o.filename.len() > MAX_FILE_NAME {
+        return Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "file offer name too long",
+        ));
+    }
+    Ok(ControlMsg::FileOffer {
+        target: o.target,
+        filename: o.filename,
+        size: o.size,
+    })
+}
+
 /// Wire → Rust [`ControlMsg`]. Partial: an unset oneof or any invalid enum/range is a typed
 /// [`RasError`] with [`ErrorCode::InvalidMessage`].
 fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
@@ -388,6 +419,11 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
         Some(Kind::CursorHidden(_)) => Ok(ControlMsg::CursorHidden),
         Some(Kind::ClipboardText(c)) => clipboard_text_from_pb(c),
         Some(Kind::ChatMessage(c)) => chat_message_from_pb(c),
+        Some(Kind::FileOffer(o)) => file_offer_from_pb(o),
+        Some(Kind::FileAccept(_)) => Ok(ControlMsg::FileAccept),
+        Some(Kind::FileReject(r)) => Ok(ControlMsg::FileReject {
+            code: errorcode_from_pb(r.code)?,
+        }),
         // No valid empty control message: unset oneof (empty bytes, or a future variant an old
         // build doesn't recognize) is rejected, never silently defaulted.
         None => Err(RasError::fatal(
@@ -1248,6 +1284,47 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_file_messages() {
+        assert_roundtrip(&ControlMsg::FileOffer {
+            target: "config_bundle".to_string(),
+            filename: "report.pdf".to_string(),
+            size: 4096,
+        });
+        assert_roundtrip(&ControlMsg::FileAccept);
+        assert_roundtrip(&ControlMsg::FileReject {
+            code: ErrorCode::CapabilityDenied,
+        });
+    }
+
+    #[test]
+    fn file_offer_refused_when_names_oversized() {
+        let ok = pb::FileOffer {
+            target: "t".repeat(MAX_FILE_TARGET),
+            filename: "f".repeat(MAX_FILE_NAME),
+            size: 1,
+        };
+        assert!(file_offer_from_pb(ok).is_ok());
+        let long_target = pb::FileOffer {
+            target: "t".repeat(MAX_FILE_TARGET + 1),
+            filename: "f".to_string(),
+            size: 1,
+        };
+        assert_eq!(
+            file_offer_from_pb(long_target).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+        let long_name = pb::FileOffer {
+            target: "t".to_string(),
+            filename: "f".repeat(MAX_FILE_NAME + 1),
+            size: 1,
+        };
+        assert_eq!(
+            file_offer_from_pb(long_name).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+    }
+
+    #[test]
     fn roundtrip_all_input_actions() {
         use crate::InputEnvelope;
         let actions = [
@@ -2006,6 +2083,16 @@ mod proptests {
             any::<String>().prop_map(|s| ControlMsg::ClipboardText { text: Redacted(s) }),
             // Chat text: same shape (default sizing is far below MAX_CHAT_BYTES).
             any::<String>().prop_map(|s| ControlMsg::ChatMessage { text: Redacted(s) }),
+            // File offer: short names (well within bounds) + any size.
+            ("[a-z_]{0,32}", "[a-zA-Z0-9._-]{0,64}", any::<u64>(),).prop_map(
+                |(target, filename, size)| ControlMsg::FileOffer {
+                    target,
+                    filename,
+                    size,
+                }
+            ),
+            Just(ControlMsg::FileAccept),
+            arb_code().prop_map(|code| ControlMsg::FileReject { code }),
         ]
     }
 

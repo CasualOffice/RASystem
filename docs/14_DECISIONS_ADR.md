@@ -1067,6 +1067,32 @@
     rewritten journal (shorter "clean" history, tampered head, or an attacker-key signature) fails
     against a host-key-pinning verifier; empty journal verifies + checkpoints — all green.
 
+- **ADR-089 · File-transfer authorization wire: an offer → authorize → per-transfer consent → accept/reject
+  decision, over the control channel · Accepted** (wires ADR-086's catalogue/validator; `docs/20 §3.3`).
+  ADR-086 landed the signed-catalogue *validator* but nothing invoked it over the wire; this lands the
+  **security decision half** of file transfer (the dangerous part) and defers the byte streaming.
+  - **Wire:** `ControlMsg::FileOffer { target, filename, size }` (controller→host — a target name + a
+    **leaf filename** + size, **never a path**), answered by `FileAccept` or `FileReject { code }`
+    (proto oneof 17–19; the offer's `target`/`filename` lengths are bounded + fail-closed at decode).
+  - **Host flow (`host_handle_file_offer`).** ① `ras_policy::authorize_file_push` against the vendor
+    `DropCatalogue` (injected via `with_file_catalogue`; **absent ⇒ no target ⇒ refuse**) + the session
+    grant's `file.push.<target>` capability (Inv 15 — never the controller's claim) + the safe-leaf
+    `validate_filename` (the traversal/zip-slip CVE-class defense) + the size cap. ② **per-transfer local
+    consent** — a new `FileConsent` seam (`with_file_consent`), default `DenyAllFileConsent` (fail-closed:
+    no transfer without a live local Allow, Inv 1), awaited outside any lock. The host resolves the
+    destination; the controller never chooses where bytes land. Every outcome is **audited** content-free
+    (`FilePushAccepted` / `FilePushRejected{code}`, ADR-088) and surfaced as a `FileTransferAccepted` /
+    `FileTransferRejected` lifecycle event on both sides. `FilePushError` maps to a stable wire code
+    (capability/extension → `CapabilityDenied`; unknown-target/unsafe-filename/too-large →
+    `InvalidMessage`).
+  - **Scope:** the offer/authorize/consent/accept-reject **decision** + audit (verifiable off-device).
+    Deferred: the `FileChunk`/`FileComplete` streaming, a `FileWriteSink` seam, and the `O_NOFOLLOW`/
+    `openat` on-device write (ADR-086's third CVE-class defense). Only ever the signed-catalogue shape;
+    browse-anywhere stays rejected.
+  - **Verify:** wire round-trip + oversize-name-refused + fuzz (ras-protocol); a `ras-core` loopback test
+    over all five paths — authorized+consented → accept + audited; consent-denied, capability-withheld,
+    a **traversal filename**, and an unknown target → the right reject code + audited — all green.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

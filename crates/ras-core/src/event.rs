@@ -227,6 +227,15 @@ pub enum LifecycleEvent {
         /// The received chat text (redacted in `Debug`).
         text: Redacted,
     },
+    /// A file push to a catalogued drop target was **authorized + locally consented** (ADR-086). Emitted
+    /// host-side when the host accepts, and controller-side when it receives the accept. Content-free.
+    FileTransferAccepted,
+    /// A file push was **refused**, with a stable reason code (unknown target / capability denied /
+    /// unsafe filename / too large / extension denied / consent denied). Content-free.
+    FileTransferRejected {
+        /// Why it was refused.
+        code: ErrorCode,
+    },
 }
 
 /// The lifecycle event stream handed to the embedding app. A bounded receiver: latest-wins-ish, so
