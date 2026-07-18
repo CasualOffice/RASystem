@@ -292,8 +292,14 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     so the controller ends `Revoked` — verified ≤250 ms local, idempotent, non-downgradable. Teardown
     now has **three separable paths (ADR-056)** via the new `ErrorCode::NormalClosure` wire code:
     clean `Bye{NormalClosure}` → `Terminated` (prompt), `Bye{SessionRevoked}` → `Revoked` (host only),
-    and a missing `Bye` → `Suspended` (transport loss). The testkit gained a `LoopbackCut` fault
-    handle to exercise the last path honestly.
+    and a missing `Bye` → `Suspended` (transport loss). **Reconnection now drives the `Suspended` path
+    (ADR-091):** within the reconnect window the controller re-dials (on a lost recv *or* a failed
+    send) and re-presents its grant; the host re-serves and re-validates it (no new authorization path;
+    a re-dial from the *same* transport-authenticated endpoint skips re-consent, Inv 9); the session
+    resumes to `Active` with a forced IDR across **all three planes** (video/control/audio), or
+    `Terminated` if the window elapses (fail-closed). The testkit's `LoopbackCut` fault handle gained a
+    `heal()` that re-arms the link, so the full cut→re-dial→resume path is exercised with two real
+    sessions. The **iroh concrete re-dial** (`Endpoint` accept/connect) stays the on-device follow-up.
   - **Real macOS media backend (`ras-media-macos`), on-device verified.** Implements the `ras-media`
     traits: `ScreenCaptureBackend` (ScreenCaptureKit push-delegate → latest-frame pull adapter) and
     `VideoEncoderBackend` (VideoToolbox H.264 — realtime, no B-frames, Baseline, ∞-GOP with
