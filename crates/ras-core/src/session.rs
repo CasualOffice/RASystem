@@ -1241,6 +1241,10 @@ async fn host_stats_loop<C, E>(inner: &HostInner<C, E>, config: StreamConfig) {
             break;
         }
         let health = inner.transport.health();
+        // Inv 4 key-state cleanup: if the input lease has expired (including an idle controller that
+        // stopped sending), drop it and release any keys it left held — the gate refuses the key-up, so
+        // a stuck modifier can never self-clear otherwise.
+        sweep_expired_lease(inner);
         // Consume the latest controller feedback (drops + last-decoded + any keyframe request) so
         // the ABR reacts to what the decoder actually sees, not just transport stats.
         let feedback = inner
@@ -1761,6 +1765,20 @@ async fn host_handle_control_request<C, E>(
     if inner.stop.load(Ordering::SeqCst) {
         return Err(ErrorCode::SessionRevoked);
     }
+    // Inv 4 key-state cleanup: if a lease is already active (a re-request, or a transfer to a new
+    // holder), flush the prior holder's held OS keys BEFORE minting the replacement, so no key/modifier
+    // crosses the lease boundary. The generation bump only stales the old holder's *wire* input at the
+    // gate; it does nothing about a key already physically down. `release_input` revokes + flushes;
+    // `issue` below re-installs a fresh lease. (Same control-loop task as input dispatch, so race-free.)
+    let replacing = inner
+        .lease
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|lm| lm.active_lease().is_some());
+    if replacing {
+        release_input(inner);
+    }
     let holder = *inner
         .peer_endpoint
         .lock()
@@ -1799,19 +1817,22 @@ fn host_handle_input<C, E>(inner: &HostInner<C, E>, env: &InputEnvelope) -> Resu
         }
     };
     verdict?;
-    // Invariant 4 closes the authorize→dispatch gap: an emergency stop that lands *after* this event
-    // was authorized (advancing the gate's `last_seq`) but *before* it is injected must still override
-    // it. `emergency_stop`/`stop` set `stop` before `release_input` runs, so re-checking it here drops
-    // the already-authorized in-flight event rather than injecting one frame past the stop.
+    // Invariant 4 closes the authorize→dispatch gap: an emergency stop that lands *after* this event was
+    // authorized (advancing the gate's `last_seq`) but *before* it is injected must still override it.
+    // The stop re-check + the OS injection are held **under the input-sink lock**, and the flush paths
+    // (`release_input`/`flush_input_sink`) take the SAME lock around `release_all`, so a flush can never
+    // interleave *between* the check and the post: either we observe `stop` here (set before the flush
+    // runs) and skip, or we finish injecting — tracking the key — and the waiting flush then releases it.
+    // Without this lock, a concurrent flush on another worker could drain the still-empty pressed set and
+    // then this dispatch would post a key-down that no later sweep ever releases (a stuck modifier).
+    let guard = inner
+        .input_sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if inner.stop.load(Ordering::SeqCst) {
         return Ok(());
     }
-    let sink = inner
-        .input_sink
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    match sink {
+    match guard.as_ref() {
         Some(s) => ras_control::dispatch(s.as_ref(), &env.action).map_err(|e| e.code),
         None => Err(ErrorCode::InputFailed),
     }
@@ -2106,6 +2127,41 @@ fn clipboard_reject_code(ev: &LifecycleEvent) -> ErrorCode {
     }
 }
 
+/// Flush the OS sink's held keys/buttons **under the input-sink lock**. Holding the lock here is what
+/// serializes the flush against [`host_handle_input`]'s dispatch (which holds the SAME lock across its
+/// stop-recheck + OS post): a key posted concurrently is therefore always tracked *before* — never
+/// *after* — this flush drains it, closing the emergency-stop race (Inv 4). Best-effort; never fails.
+fn flush_input_sink<C, E>(inner: &HostInner<C, E>) {
+    if let Some(sink) = inner
+        .input_sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+    {
+        let _ = sink.release_all();
+    }
+}
+
+/// If the active input lease has **expired**, drop it and flush the OS sink's held keys (Inv 4 key-state
+/// cleanup). Called from the stats tick, so it also covers a controller that goes idle and sends nothing
+/// more: the per-message gate refuses input under an expired lease, so the matching key-**up** can never
+/// arrive, and a held Ctrl/Shift/button would otherwise stick until teardown. Fires once — `revoke_all`
+/// (inside `revoke_if_expired`) clears the lease, so the next tick is a no-op.
+fn sweep_expired_lease<C, E>(inner: &HostInner<C, E>) {
+    let expired = {
+        let now = now_ms();
+        inner
+            .lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .is_some_and(|lm| lm.revoke_if_expired(now))
+    };
+    if expired {
+        flush_input_sink(inner);
+    }
+}
+
 /// Revoke any active lease and flush the OS key-state (Invariant 4 key-state cleanup). Called on
 /// emergency stop and graceful teardown, before the media halt is reported to the peer. Idempotent,
 /// never blocks, never fails.
@@ -2118,14 +2174,7 @@ fn release_input<C, E>(inner: &HostInner<C, E>) {
     {
         lm.revoke_all();
     }
-    if let Some(sink) = inner
-        .input_sink
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-    {
-        let _ = sink.release_all();
-    }
+    flush_input_sink(inner);
 }
 
 // =============================================================================================

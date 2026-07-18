@@ -939,6 +939,126 @@ mod e2e {
         controller.disconnect(StopReason::UserRequested).await;
     }
 
+    /// Re-issuing the OS-input lease while one is already active (a re-request or a transfer) must flush
+    /// the prior holder's held keys FIRST, so no key/modifier crosses the lease boundary (Inv 4). The
+    /// generation bump alone only stales the old holder's *wire* input — it cannot lift a key already
+    /// physically down. Regression for the input-path adversarial review (finding 3).
+    #[tokio::test]
+    async fn re_issuing_a_lease_flushes_the_prior_holders_held_keys() {
+        use crate::deps::{ControlConsent, GrantDecision, GrantValidator, SessionAuthContext};
+        use ras_control::OsInputSink;
+        use ras_policy::CapabilitySet;
+        use ras_protocol::PointerButton;
+        use std::sync::atomic::{AtomicU32, Ordering as O};
+
+        #[derive(Default)]
+        struct CountingInputSink {
+            released: AtomicU32,
+        }
+        impl OsInputSink for CountingInputSink {
+            fn pointer_move(&self, _d: u32, _x: f32, _y: f32) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn pointer_button(
+                &self,
+                _d: u32,
+                _x: f32,
+                _y: f32,
+                _b: PointerButton,
+                _down: bool,
+            ) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn pointer_wheel(&self, _dx: i16, _dy: i16) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn key(&self, _u: u16, _down: bool, _m: u8) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn text(&self, _s: &str) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn release_all(&self) -> Result<(), crate::CoreError> {
+                self.released.fetch_add(1, O::Relaxed);
+                Ok(())
+            }
+            fn input_permitted(&self) -> bool {
+                true
+            }
+        }
+        struct AllowControl;
+        #[async_trait::async_trait]
+        impl ControlConsent for AllowControl {
+            async fn consent_to_control(&self, requested: &CapabilitySet) -> CapabilitySet {
+                requested.clone()
+            }
+        }
+        struct Phase3Validator;
+        #[async_trait::async_trait]
+        impl GrantValidator for Phase3Validator {
+            async fn authorize(
+                &self,
+                _ctx: &SessionAuthContext,
+            ) -> Result<GrantDecision, crate::CoreError> {
+                Ok(GrantDecision::Authorized(
+                    ras_policy::phase3_default_policy(),
+                ))
+            }
+        }
+
+        let sink = Arc::new(CountingInputSink::default());
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(Phase3Validator),
+        )
+        .with_input_sink(sink.clone())
+        .with_control_consent(Arc::new(AllowControl));
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        // First lease.
+        controller.request_control(vec!["pointer.move".into(), "keyboard.key".into()]);
+        assert!(
+            wait_until(|| controller.current_lease().is_some(), 500).await,
+            "first control request should yield a lease"
+        );
+        let first = controller.current_lease().unwrap();
+        let released_before = sink.released.load(O::Relaxed);
+
+        // Second control request while the first lease is still active → the host must flush held keys
+        // (release_all) before minting the replacement lease.
+        controller.request_control(vec!["pointer.move".into(), "keyboard.key".into()]);
+        assert!(
+            wait_until(
+                || controller
+                    .current_lease()
+                    .map(|l| l != first)
+                    .unwrap_or(false),
+                500
+            )
+            .await,
+            "a second control request should mint a fresh lease"
+        );
+        assert!(
+            sink.released.load(O::Relaxed) > released_before,
+            "re-issuing an active lease must flush the prior holder's held keys (Inv 4), before={released_before} after={}",
+            sink.released.load(O::Relaxed)
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     // ── Clipboard push (ADR-076) ────────────────────────────────────────────────────────────────
     // A test double for the OS clipboard: it records what was *set*. (Holding the content is exactly
     // what the real OS clipboard does — Inv 8 is about production logs, not this simulated sink.)

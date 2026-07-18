@@ -292,6 +292,22 @@ impl LeaseManager {
         self.generation
     }
 
+    /// If an active lease exists **and** has expired (`now > expires_at`), drop it (via [`revoke_all`])
+    /// and return `true`; otherwise return `false`. This is the trigger for OS key-state cleanup on
+    /// expiry: the per-message gate already refuses input under an expired lease, but that also means the
+    /// matching key-**up** can never be delivered, so the caller must flush the OS sink's held keys when
+    /// this returns `true` (Inv 4 — a stuck Ctrl/Shift after an idle controller). Fires once: after it
+    /// clears the lease, a subsequent call returns `false`. Pure; the caller supplies `now`.
+    ///
+    /// [`revoke_all`]: Self::revoke_all
+    pub fn revoke_if_expired(&mut self, now: UnixMillis) -> bool {
+        let expired = self.active.as_ref().is_some_and(|l| now > l.expires_at);
+        if expired {
+            self.revoke_all();
+        }
+        expired
+    }
+
     /// **The per-message enforcement gate** (Inv 15, ADR-041). O(1): integer compares + one set lookup,
     /// no allocation, no I/O, no crypto. Returns the normalized action to inject **only** if the
     /// generation, lease, expiry, sequence, layout, and capability checks all pass — in that order,
@@ -855,6 +871,37 @@ mod tests {
         assert!(m.active_lease().is_none());
         assert_eq!(
             m.authorize_input(&move_env(&lease, g, 1), 1001)
+                .unwrap_err(),
+            ControlError::StaleGeneration
+        );
+    }
+
+    #[test]
+    fn revoke_if_expired_fires_once_on_an_expired_lease() {
+        // The OS key-state-cleanup trigger (Inv 4): an expired lease is swept exactly once so the caller
+        // can flush held keys — the gate already refuses input, so the matching key-up never arrives.
+        let grant = full_grant();
+        let mut m = LeaseManager::new(grant.clone(), 10_000_000, 1);
+        let lease = m
+            .issue([1u8; 32], &grant, &grant, 1000, LEASE_DEFAULT_TTL_MS)
+            .unwrap();
+        // expires_at = min(1000 + 60_000, grant_expiry) = 61_000.
+        assert!(
+            !m.revoke_if_expired(61_000),
+            "not expired at the boundary (matches gate ③: now > expires_at)"
+        );
+        assert!(m.active_lease().is_some());
+        // Past expiry → swept, returns true (the flush trigger).
+        assert!(m.revoke_if_expired(61_001), "expired lease must be swept");
+        assert!(m.active_lease().is_none());
+        // Fires once — a cleared lease is not re-swept (so the flush happens exactly once).
+        assert!(
+            !m.revoke_if_expired(70_000),
+            "a cleared lease is not re-swept"
+        );
+        // Input under the swept lease is stale at the gate (defense in depth).
+        assert_eq!(
+            m.authorize_input(&move_env(&lease, lease.generation, 1), 61_002)
                 .unwrap_err(),
             ControlError::StaleGeneration
         );

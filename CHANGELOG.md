@@ -48,6 +48,15 @@ capabilities implemented at the code level; on-device runtime verification statu
 - Fixed several **Invariant-4** gaps: emergency stop now overrides an in-flight file offer, a clipboard
   push, and a file finalize; input dispatch, clipboard, and file writes all re-check `stop` before any
   OS-visible effect.
+- Fixed three **stuck-key hazards** on the input path (Inv 4/5), all one root cause — the OS sink's held
+  keys were only flushed on explicit stop/teardown, not on the other lease-death paths: (1) an
+  emergency-stop `release_all` could race an in-flight key-down and leave it physically held — the
+  stop-recheck and OS injection are now serialized under the input-sink lock so a concurrent flush can't
+  interleave; (2) an expired lease never flushed held keys (and the gate refuses the key-up), so a held
+  modifier stuck until teardown — the stats tick now sweeps an expired lease and releases its keys, even
+  for an idle controller; (3) re-issuing/transferring the lease didn't release the prior holder's keys —
+  it now flushes before minting the replacement. Found and verified by an adversarial multi-agent review
+  of the input/OS-injection path (the other two lenses — FFI safety and secret hygiene — passed clean).
 - Hardened **session reconnection** (ADR-091) against a silent re-dialer: the host's post-reconnect
   handshake reads are now window-bounded (symmetric with the controller), so a peer that re-establishes
   the transport but never presents its grant can no longer wedge or leak the host control task; teardown
