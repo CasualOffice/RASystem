@@ -1684,6 +1684,64 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
+    /// Audio resumes across a reconnect too (ADR-077 + ADR-091): after a transport cut, the host re-serve
+    /// re-attaches a fresh audio egress sink and the controller audio loop re-fetches its source, so
+    /// output audio flows again once the link heals — completing reconnection across all three planes
+    /// (video, control, audio).
+    #[tokio::test]
+    async fn audio_resumes_after_a_reconnect() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let rec = Arc::new(RecordingAudio {
+            count: std::sync::atomic::AtomicU64::new(0),
+        });
+        let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(&["screen.view", ras_policy::AUDIO_LISTEN]))),
+        )
+        .with_audio(
+            Box::new(SyntheticAudioCapture::new()),
+            Box::new(SyntheticAudioEncoder::new()),
+        );
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32])));
+        cfg.reconnect_window = Duration::from_secs(3);
+        cfg.grant = bytes::Bytes::from_static(&[0xA1, 0xB2, 0xC3]);
+        let controller = ControllerSession::new(cfg, ctrl_tp);
+        controller.attach_audio_output(rec.clone());
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+        assert!(
+            wait_until(|| rec.count.load(Relaxed) > 0, 800).await,
+            "audio should flow initially"
+        );
+        let before = rec.count.load(Relaxed);
+
+        faults.cut();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Suspended, 500).await,
+            "controller suspends on loss"
+        );
+
+        faults.heal();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Active, 2500).await,
+            "controller resumes to Active"
+        );
+        assert!(
+            wait_until(|| rec.count.load(Relaxed) > before + 2, 2500).await,
+            "audio must resume after the reconnect (before={before}, now={})",
+            rec.count.load(Relaxed)
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     /// The output-audio stream's start + stop are audited (Inv 10, ADR-088) — only when it actually runs
     /// (`audio.listen` granted). The recorded chain verifies.
     #[tokio::test]

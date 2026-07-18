@@ -213,6 +213,10 @@ struct HostInner<C, E> {
     /// The negotiated stream config, stored so a re-serve can re-announce it to the re-dialed controller
     /// without re-negotiating capture (capture/encoder are consumed once and survive the reconnect).
     current_config: Mutex<Option<StreamConfig>>,
+    /// The live audio egress sink, shared with the audio pump thread (mirrors `video_sink_slot`), so a
+    /// re-serve can re-attach a fresh audio sink after a reconnect. `None` when no audio is active, or
+    /// between a loss and the re-serve.
+    audio_sink_slot: Arc<Mutex<Option<Box<dyn crate::deps::AudioSink>>>>,
     /// ABR target the media thread applies via `set_bitrate` when it changes (lock-free hot path).
     target_bitrate: Arc<AtomicU32>,
     /// Frames actually handed to the transport since the last stats tick (delivered-fps signal).
@@ -327,6 +331,7 @@ where
                 keyframe: Arc::new(AtomicBool::new(false)),
                 video_sink_slot: Arc::new(Mutex::new(None)),
                 current_config: Mutex::new(None),
+                audio_sink_slot: Arc::new(Mutex::new(None)),
                 target_bitrate: Arc::new(AtomicU32::new(0)),
                 frames_sent: Arc::new(AtomicU32::new(0)),
                 last_feedback: Mutex::new(None),
@@ -1083,13 +1088,19 @@ fn maybe_start_audio<C, E>(inner: &HostInner<C, E>, sink: Box<dyn crate::deps::A
     };
     let stop = inner.stop.clone();
     let requested = default_audio_config();
+    // Put the sink in the shared slot the pump reads (swapped by a re-serve on reconnect, ADR-091).
+    *inner
+        .audio_sink_slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+    let sink_slot = inner.audio_sink_slot.clone();
     let handle = std::thread::Builder::new()
         .name("ras-host-audio".into())
         .spawn(move || {
             audio_pump(
                 capture.as_mut(),
                 encoder.as_mut(),
-                sink.as_ref(),
+                &sink_slot,
                 &stop,
                 &requested,
             );
@@ -1110,7 +1121,7 @@ fn maybe_start_audio<C, E>(inner: &HostInner<C, E>, sink: Box<dyn crate::deps::A
 fn audio_pump(
     capture: &mut dyn AudioCaptureBackend,
     encoder: &mut dyn AudioEncoderBackend,
-    sink: &dyn crate::deps::AudioSink,
+    sink_slot: &Arc<Mutex<Option<Box<dyn crate::deps::AudioSink>>>>,
     stop: &AtomicBool,
     requested: &AudioConfig,
 ) {
@@ -1131,7 +1142,15 @@ fn audio_pump(
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    sink.send_audio(pkt);
+                    // Send via the shared slot (swapped by a re-serve). No sink armed (between a loss
+                    // and the re-dial) ⇒ drop the packet and keep pumping.
+                    if let Some(s) = sink_slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                    {
+                        s.send_audio(pkt);
+                    }
                 }
                 Ok(None) => {}
                 Err(e) if e.recoverable => {}
@@ -1589,6 +1608,21 @@ async fn host_reserve<C, E>(inner: &HostInner<C, E>) -> Option<Box<dyn ControlCh
         .video_sink_slot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+    // If the audio pump is running (audio.listen was granted at start), re-attach a fresh audio sink
+    // too so output audio resumes with the video (ADR-077). Best-effort: no audio plane ⇒ stays silent.
+    let audio_active = inner
+        .audio_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some();
+    if audio_active {
+        if let Ok(audio_sink) = inner.transport.audio_sink().await {
+            *inner
+                .audio_sink_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(audio_sink);
+        }
+    }
     let config = (*inner
         .current_config
         .lock()
@@ -2980,24 +3014,41 @@ async fn controller_video_loop(inner: &ControllerInner) {
 /// a terminal transport error ends the loop; an absent output drops the packet. Returns immediately on
 /// transports without an audio plane (`audio_source()` reports unsupported).
 async fn controller_audio_loop(inner: &ControllerInner) {
+    // First fetch: an error here means no audio plane on this transport ⇒ stay silent forever (never
+    // retry). If it succeeds, use it, and re-fetch a fresh source only after a loss (reconnect, ADR-091).
     let mut source = match inner.transport.audio_source().await {
         Ok(s) => s,
-        Err(_) => return, // no audio plane on this transport — silent, by design
+        Err(_) => return,
     };
-    while !inner.stop.load(Ordering::Relaxed) {
-        match source.next().await {
-            Ok(packet) => {
-                if let Some(out) = inner
-                    .audio_output
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-                {
-                    out.push(packet);
+    loop {
+        while !inner.stop.load(Ordering::Relaxed) {
+            match source.next().await {
+                Ok(packet) => {
+                    if let Some(out) = inner
+                        .audio_output
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        out.push(packet);
+                    }
                 }
+                Err(_) => break, // source died (transport loss) → re-fetch after the re-dial
             }
-            Err(_) => break,
         }
+        if inner.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        // Re-fetch the fresh source the re-dial armed (retry until available or stopped).
+        source = loop {
+            if inner.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match inner.transport.audio_source().await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        };
     }
 }
 
