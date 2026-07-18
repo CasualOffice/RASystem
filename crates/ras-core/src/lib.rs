@@ -565,6 +565,59 @@ mod e2e {
         assert_eq!(host.state(), SessionState::Terminated);
     }
 
+    /// A renderer attached **after** the stream has started (already past its first keyframe, P-frames
+    /// flowing) must still receive a keyframe as its first frame — its fresh decoder cannot decode a
+    /// P-frame (the [`FrameSink::configure`] contract). The video loop must re-gate on attach (backlog
+    /// X2 / no-black-screen on renderer attach).
+    #[tokio::test]
+    async fn fresh_renderer_attach_starts_on_a_keyframe() {
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(1280, 720),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+
+        // First renderer: let the stream get well past its initial keyframe (P-frames now flowing).
+        let sink1 = CountingFrameSink::new();
+        controller
+            .attach_renderer(Arc::new(sink1.clone()))
+            .await
+            .unwrap();
+        assert!(
+            wait_until(|| sink1.pushed() >= 6, 500).await,
+            "stream should be flowing (P-frames) before the second attach, got {}",
+            sink1.pushed()
+        );
+
+        // Attach a FRESH renderer mid-stream — its decoder has no keyframe yet.
+        let sink2 = CountingFrameSink::new();
+        controller
+            .attach_renderer(Arc::new(sink2.clone()))
+            .await
+            .unwrap();
+        assert!(
+            wait_until(|| sink2.pushed() >= 1, 500).await,
+            "the freshly-attached renderer received no frames"
+        );
+        assert!(
+            sink2.first_frame_was_keyframe(),
+            "a renderer attached mid-stream must start on an IDR, never a P-frame (no black screen)"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     /// A mid-stream resolution change (monitor/DPI/resolution) must reconfigure the encoder and reach
     /// the controller **atomically with a fresh keyframe** — never a P-frame at the new dimensions,
     /// which would decode to a black/torn frame (backlog X6 / the no-black-screen guarantee).

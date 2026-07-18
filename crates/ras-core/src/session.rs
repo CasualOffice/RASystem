@@ -2017,6 +2017,10 @@ struct ControllerInner {
     last_decoded_frame: AtomicU64,
     /// Frames dropped since the last feedback report (reset each report).
     frames_dropped: AtomicU32,
+    /// Set when a freshly-attached renderer needs the stream re-gated to the next IDR (so the video
+    /// loop drops P-frames until a keyframe — honoring [`FrameSink::configure`]'s "first frame must be
+    /// an IDR" contract, i.e. no black/garbage frame on a fresh decoder).
+    regate: AtomicBool,
     session_id: SessionId,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// The OS-input control lease the host granted us, if any: `(lease_id, generation)`. Set on
@@ -2050,6 +2054,7 @@ impl ControllerSession {
                 command_tx: Mutex::new(None),
                 last_decoded_frame: AtomicU64::new(0),
                 frames_dropped: AtomicU32::new(0),
+                regate: AtomicBool::new(false),
                 session_id: next_session_id(),
                 tasks: Mutex::new(Vec::new()),
                 lease: Mutex::new(None),
@@ -2180,7 +2185,10 @@ impl ControllerSession {
             .renderer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(renderer);
-        // A freshly configured sink needs an IDR: ask the host.
+        // A freshly configured sink needs an IDR: re-gate the video loop so it drops P-frames until the
+        // next keyframe (honoring the configure contract — no P-frame reaches the new decoder first),
+        // then ask the host for one.
+        inner.regate.store(true, Ordering::Relaxed);
         self.request_keyframe(KeyframeReason::DecoderReset).await
     }
 
@@ -2703,6 +2711,11 @@ async fn controller_video_loop(inner: &ControllerInner) {
     while !inner.stop.load(Ordering::Relaxed) {
         match source.next().await {
             Ok(VideoEvent::Frame(ef)) => {
+                // A freshly-attached renderer asked to re-gate: drop P-frames until the next IDR so its
+                // decoder never sees a frame it can't decode (no black screen on renderer attach).
+                if inner.regate.swap(false, Ordering::Relaxed) {
+                    seen_keyframe = false;
+                }
                 if !seen_keyframe {
                     if !ef.is_keyframe {
                         continue; // wait for the first IDR before feeding the sink

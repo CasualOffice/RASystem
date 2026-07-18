@@ -423,6 +423,9 @@ struct CountingState {
     /// **not** a keyframe — i.e. a resolution change reached the decoder without an accompanying IDR
     /// (a black-screen / torn-frame bug). Must stay false.
     resize_without_keyframe: AtomicBool,
+    /// Whether the very first frame this sink received was a keyframe (the configure contract: a fresh
+    /// decoder's first frame must be an IDR). Meaningful only once `pushed() >= 1`.
+    first_was_keyframe: AtomicBool,
 }
 
 impl CountingFrameSink {
@@ -467,6 +470,11 @@ impl CountingFrameSink {
     pub fn saw_resize_without_keyframe(&self) -> bool {
         self.inner.resize_without_keyframe.load(Ordering::Relaxed)
     }
+    /// Whether the first frame this sink received was a keyframe (call only after `pushed() >= 1`).
+    #[must_use]
+    pub fn first_frame_was_keyframe(&self) -> bool {
+        self.inner.first_was_keyframe.load(Ordering::Relaxed)
+    }
 }
 
 impl FrameSink for CountingFrameSink {
@@ -475,7 +483,12 @@ impl FrameSink for CountingFrameSink {
         Ok(())
     }
     fn push(&self, frame: EncodedFrame) -> PushResult {
-        self.inner.pushed.fetch_add(1, Ordering::Relaxed);
+        let prev = self.inner.pushed.fetch_add(1, Ordering::Relaxed);
+        if prev == 0 {
+            self.inner
+                .first_was_keyframe
+                .store(frame.is_keyframe, Ordering::Relaxed);
+        }
         if frame.is_keyframe {
             self.inner.keyframes.fetch_add(1, Ordering::Relaxed);
         }
