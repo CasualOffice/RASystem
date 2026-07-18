@@ -1116,7 +1116,12 @@
     time:** a second `FileOffer` while one is in flight is an out-of-sequence protocol violation, refused
     fail-closed (`InvalidMessage`) **before** authorize/consent — so a malformed/hostile controller can
     neither prompt a wasted consent nor overwrite the active-transfer state and orphan the first partial
-    file on disk.
+    file on disk. **Emergency stop overrides an in-flight offer (Inv 4):** because file consent is awaited
+    *inside* the control loop and the loop's join is only best-effort-awaited on stop, a stop can land while
+    an offer is parked at its consent prompt. `host_handle_file_offer` therefore checks `stop` **before**
+    prompting *and re-checks after* consent returns (refusing with `SessionRevoked` before it ever opens the
+    sink — mirroring the control-lease path), and `host_handle_file_chunk` drops any further bytes once
+    `stop` is set — so a transfer can never be armed, nor a byte written, on a revoked session.
   - **The `FileWriteSink` seam** carries the ADR-086 **symlink-follow (TOCTOU) defense**: the impl MUST
     `open` with `O_NOFOLLOW`/`openat` and refuse a symlink/existing entry — the safe-leaf path string
     (ADR-086) is the *precondition* that makes that write sound. **The Unix backend has landed**

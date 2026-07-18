@@ -1625,7 +1625,11 @@ async fn host_handle_file_offer<C, E>(
     filename: String,
     size: u64,
 ) -> ControlMsg {
-    // ⓪ one transfer at a time. A second offer while one is in flight is an out-of-sequence protocol
+    // ⓪ a stopping session (emergency or graceful) must never begin a transfer — don't even prompt.
+    if inner.stop.load(Ordering::SeqCst) {
+        return file_reject(inner, ErrorCode::SessionRevoked);
+    }
+    // ① one transfer at a time. A second offer while one is in flight is an out-of-sequence protocol
     // violation — refuse it fail-closed *before* authorize/consent, so it can neither prompt a wasted
     // consent nor overwrite the active-transfer state and orphan the first partial file on disk.
     if inner
@@ -1636,7 +1640,7 @@ async fn host_handle_file_offer<C, E>(
     {
         return file_reject(inner, ErrorCode::InvalidMessage);
     }
-    // ① authorize → the host-resolved destination path, or a reject code. No catalogue ⇒ no target.
+    // ② authorize → the host-resolved destination path, or a reject code. No catalogue ⇒ no target.
     let resolved = {
         let cat = inner
             .file_catalogue
@@ -1665,7 +1669,7 @@ async fn host_handle_file_offer<C, E>(
         Ok(d) => d,
         Err(code) => return file_reject(inner, code),
     };
-    // ② per-transfer local consent (Inv 1) — awaited outside any lock.
+    // ③ per-transfer local consent (Inv 1) — awaited outside any lock.
     let consent = inner
         .file_consent
         .lock()
@@ -1674,7 +1678,14 @@ async fn host_handle_file_offer<C, E>(
     if !consent.consent_to_file(&target, &filename, size).await {
         return file_reject(inner, ErrorCode::ConsentDenied);
     }
-    // ③ open the host-resolved destination on the write backend (O_NOFOLLOW). No backend ⇒ can't receive.
+    // Re-check after the (possibly long) consent prompt: an emergency stop or teardown that landed
+    // *during* it must abort the transfer, or we would arm — and then write chunks to disk on — a
+    // revoked session (Inv 4). The control loop's join is only best-effort-awaited on stop, so this
+    // handler can still be resolving a pending consent after `emergency_stop` has returned.
+    if inner.stop.load(Ordering::SeqCst) {
+        return file_reject(inner, ErrorCode::SessionRevoked);
+    }
+    // ④ open the host-resolved destination on the write backend (O_NOFOLLOW). No backend ⇒ can't receive.
     let Some(sink) = inner
         .file_write_sink
         .lock()
@@ -1703,6 +1714,12 @@ async fn host_handle_file_offer<C, E>(
 /// running total; a chunk that would exceed the offered size (or a write failure) **aborts** the
 /// transfer (no oversized/partial file). A chunk with no active transfer is ignored (a stray/late chunk).
 fn host_handle_file_chunk<C, E>(inner: &HostInner<C, E>, data: &[u8]) {
+    // Defense-in-depth for Inv 4: once a stop lands, write no further bytes even to an already-armed
+    // transfer. Teardown's `abort_file_transfer` clears the partial; this just stops feeding it in the
+    // window before teardown runs (the control loop can outlive `emergency_stop`'s best-effort join).
+    if inner.stop.load(Ordering::SeqCst) {
+        return;
+    }
     // Clone the sink Arc first (consistent lock order: write_sink → active_transfer), then work state.
     let sink = inner
         .file_write_sink

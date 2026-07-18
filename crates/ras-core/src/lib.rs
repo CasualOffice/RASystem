@@ -1430,6 +1430,75 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
+    /// A file-consent double that parks until the test releases it — so the test can land an emergency
+    /// stop *while the host is awaiting the consent prompt*, the exact Inv-4 window.
+    struct GatedFileConsent {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait::async_trait]
+    impl crate::FileConsent for GatedFileConsent {
+        async fn consent_to_file(&self, _t: &str, _f: &str, _s: u64) -> bool {
+            self.entered.notify_one(); // tell the test we've reached the prompt
+            self.release.notified().await; // …and block until it releases us
+            true // the user "allows" — but a stop landed meanwhile, so the host must still refuse
+        }
+    }
+
+    /// Inv 4: an emergency stop that lands **while a file offer is awaiting consent** must abort the
+    /// transfer — the host must not arm/open the write sink once it resumes, even though consent returned
+    /// `true`. (The control loop can outlive `emergency_stop`'s best-effort join, so the re-check after
+    /// the prompt is what enforces this.)
+    #[tokio::test]
+    async fn emergency_stop_during_file_consent_refuses_the_transfer() {
+        use ras_protocol::ErrorCode;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let sink = Arc::new(RecordingFileSink::default());
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(&["screen.view", "file.push.logs"]))),
+        )
+        .with_file_catalogue(file_catalogue())
+        .with_file_consent(Arc::new(GatedFileConsent {
+            entered: entered.clone(),
+            release: release.clone(),
+        }))
+        .with_file_write_sink(sink.clone());
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+
+        controller.send_file_offer("logs".to_string(), "app.log".to_string(), 11);
+        entered.notified().await; // host is now parked in the consent prompt
+        host.emergency_stop(ErrorCode::SessionRevoked).await; // stop lands mid-prompt
+        release.notify_one(); // user finally "allows" — too late
+
+        // The write sink must never be opened: the post-consent stop re-check rejects before ④ open.
+        let opened = wait_until(
+            || {
+                sink.opened
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+            },
+            200,
+        )
+        .await;
+        assert!(
+            !opened,
+            "a stop during the file-consent prompt must not arm/open the transfer (Inv 4)"
+        );
+    }
+
     // ── Audio plane, host→controller (ADR-077) ──────────────────────────────────────────────────
     /// Controller-side [`AudioOutput`] that tallies packets delivered through the transport — proves a
     /// true end-to-end host→controller flow, not just a host-local send.
