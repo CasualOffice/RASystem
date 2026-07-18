@@ -53,6 +53,13 @@ capabilities implemented at the code level; on-device runtime verification statu
   the transport but never presents its grant can no longer wedge or leak the host control task; teardown
   now aborts a parked control task so an emergency stop always reclaims it (Inv 4). Found and verified by
   an adversarial multi-agent review of the reconnection path.
+- Closed an **AccessRequest replay window**: the single-use nonce was remembered for the cache TTL
+  (`MAX_REQUEST_TTL_MS`) but a request accepted with a future-dated `issued_at` stays fresh for
+  `MAX_REQUEST_TTL_MS + CLOCK_SKEW_MS`, so identical signed bytes could be replayed in the ~60s gap. The
+  nonce is now remembered until the request's own `expires_at` (its true replay horizon), independent of
+  cache-TTL sizing. Found and verified by an adversarial multi-agent review of the authorization core
+  (the other four lenses — grant forgery, endpoint binding/expiry, per-message capability scope,
+  unattended/pairing — passed clean).
 - **Never-panic fuzz on every untrusted-input decoder** — control framing, the video/audio wire
   headers, PASETO grants + access requests, the audit log file, and pasted connection tickets.
 

@@ -332,11 +332,28 @@ impl NonceCache {
         self.seen.is_empty()
     }
 
-    /// Record `nonce` as used, or reject it. Returns:
+    /// Record `nonce` as used, or reject it. Remembered until `now + ttl_ms`. Returns:
     /// * `Ok(())` — fresh nonce, now remembered until `now + ttl_ms`.
     /// * `Err(ReplayDetected)` — this nonce was already seen within its TTL.
     /// * `Err(Internal)` — the cache is saturated even after sweeping (fail-closed DoS ceiling).
     pub fn check_and_insert(&mut self, nonce: [u8; 16], now: UnixMillis) -> Result<(), ErrorCode> {
+        self.check_and_insert_until(nonce, now, now.saturating_add(self.ttl_ms))
+    }
+
+    /// Record `nonce` as used, remembering it until **at least** `remember_until` (but never less than
+    /// the configured `now + ttl_ms` floor). Use this for a signed request whose own `expires_at` is the
+    /// true replay horizon: a request may be accepted with a future-dated `issued_at` (up to the caller's
+    /// clock-skew tolerance), so `expires_at` can exceed `now + ttl_ms`. Keying retention to `now + ttl`
+    /// would sweep the nonce while the *identical signed bytes still pass freshness* — a replay window
+    /// (Inv 3). **Contract:** the caller MUST have already validated freshness (so `remember_until` is
+    /// bounded, e.g. `≤ now + MAX_REQUEST_TTL_MS + CLOCK_SKEW_MS`); this keeps retention bounded and the
+    /// DoS ceiling meaningful. Same `Ok`/`ReplayDetected`/`Internal` outcomes as [`check_and_insert`].
+    pub fn check_and_insert_until(
+        &mut self,
+        nonce: [u8; 16],
+        now: UnixMillis,
+        remember_until: UnixMillis,
+    ) -> Result<(), ErrorCode> {
         self.sweep(now);
         if self.seen.contains_key(&nonce) {
             return Err(ErrorCode::ReplayDetected);
@@ -345,7 +362,8 @@ impl NonceCache {
             // Fail closed: never evict a still-valid nonce to make room (that would reopen replay).
             return Err(ErrorCode::Internal);
         }
-        self.seen.insert(nonce, now.saturating_add(self.ttl_ms));
+        let expiry = remember_until.max(now.saturating_add(self.ttl_ms));
+        self.seen.insert(nonce, expiry);
         Ok(())
     }
 }
@@ -494,6 +512,29 @@ mod tests {
                                                        // cache must not falsely flag a *fresh* reuse of a long-gone nonce as a replay.
         assert!(c.check_and_insert(n, 2_001).is_ok());
         assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn check_and_insert_until_remembers_past_the_ttl_floor() {
+        // A request whose replay horizon (`remember_until`) exceeds `now + ttl` must be remembered for
+        // the full horizon, not just `now + ttl` — otherwise it is replayable in the gap (Inv 3).
+        let mut c = NonceCache::new(1_000, 1024);
+        let n = [5u8; 16];
+        assert!(c.check_and_insert_until(n, 1_000, 5_000).is_ok()); // remember until 5_000, not 2_000
+                                                                    // Past the old `now + ttl` (2_000) but within the horizon → still a replay.
+        assert_eq!(
+            c.check_and_insert_until(n, 2_500, 5_000),
+            Err(ErrorCode::ReplayDetected)
+        );
+        // Only after the true horizon does a fresh reuse readmit.
+        assert!(c.check_and_insert_until(n, 5_001, 6_000).is_ok());
+        // `remember_until` below the floor still holds for at least `now + ttl`.
+        let mut c2 = NonceCache::new(1_000, 1024);
+        assert!(c2.check_and_insert_until([6u8; 16], 1_000, 1_200).is_ok()); // floor → 2_000
+        assert_eq!(
+            c2.check_and_insert_until([6u8; 16], 1_500, 1_200),
+            Err(ErrorCode::ReplayDetected)
+        );
     }
 
     #[test]

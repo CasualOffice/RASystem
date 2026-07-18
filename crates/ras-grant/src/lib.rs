@@ -332,7 +332,12 @@ pub fn validate_access_request(
     {
         return Err(ErrorCode::RequestExpired);
     }
-    nonces.check_and_insert(req.nonce, now)?;
+    // Remember the nonce until the request's OWN expiry, not merely `now + cache_ttl`: freshness above
+    // (which just bounded `expires_at ≤ issued_at + MAX_REQUEST_TTL_MS` with `issued_at ≤ now +
+    // CLOCK_SKEW_MS`) permits a future-dated `issued_at`, so the identical signed bytes stay replayable
+    // until `req.expires_at`, which can exceed `now + cache_ttl`. Keying nonce retention to `expires_at`
+    // closes that window exactly, independent of how the cache's TTL is sized (Inv 3, replay defense).
+    nonces.check_and_insert_until(req.nonce, now, req.expires_at)?;
     if recognize(&req.requested_capabilities).is_empty() {
         return Err(ErrorCode::CapabilityDenied);
     }

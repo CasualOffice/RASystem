@@ -174,6 +174,43 @@ fn replayed_nonce_is_rejected() {
     );
 }
 
+/// A request accepted with a **future-dated** `issued_at` (the max the clock-skew tolerance allows)
+/// stays fresh until `issued_at + MAX_REQUEST_TTL_MS`, which is `CLOCK_SKEW_MS` beyond `now + cache_ttl`.
+/// The nonce must be remembered for that FULL horizon — otherwise the identical signed bytes, replayed
+/// after the old `now + ttl` retention but before the request's own expiry, would be accepted twice
+/// (Inv 3 replay defense; found by the authorization-core adversarial review).
+#[test]
+fn a_future_dated_request_cannot_be_replayed_after_the_cache_ttl() {
+    let mut fx = Fixture::new();
+    let issued = NOW + CLOCK_SKEW_MS; // maximal permitted forward skew
+    let req = AccessRequest::signed(
+        &fx.controller,
+        [1u8; 16],
+        PROTOCOL_VERSION,
+        fx.host_id,
+        "n".to_string(),
+        CTRL_EP,
+        caps(&["screen.view"]),
+        "r".to_string(),
+        issued,
+        issued + MAX_REQUEST_TTL_MS, // = NOW + CLOCK_SKEW_MS + MAX_REQUEST_TTL_MS
+        [9u8; 16],
+    )
+    .unwrap();
+    // Accepted now.
+    assert!(validate_access_request(&req, &fx.host_id, &CTRL_EP, NOW, &mut fx.nonces).is_ok());
+
+    // Replay past the OLD `now + cache_ttl` (NOW + MAX_REQUEST_TTL_MS) but still within the request's own
+    // freshness window: the request is still valid (expires at NOW + CLOCK_SKEW_MS + MAX_REQUEST_TTL_MS),
+    // so ONLY the nonce cache can stop the replay — and it must.
+    let replay_at = NOW + MAX_REQUEST_TTL_MS + 1;
+    assert_eq!(
+        validate_access_request(&req, &fx.host_id, &CTRL_EP, replay_at, &mut fx.nonces),
+        Err(ErrorCode::ReplayDetected),
+        "a future-dated request's nonce must be remembered until its own expiry, not merely now+ttl"
+    );
+}
+
 #[test]
 fn a_bad_signature_does_not_consume_the_nonce() {
     // An unauthenticated attacker must not be able to poison the nonce cache: the nonce is only
