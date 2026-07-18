@@ -547,7 +547,15 @@
     host loop owns via a bounded drop-newest queue (cursor is advisory — it never backpressures control).
     The send-side "seen" set is capped (128 ids, oldest-evicted). Aborted on teardown (advisory data, no
     cleanup obligation — unlike input's key-release). Loopback-tested: a repeated id arrives as
-    `CursorCached`, not a re-sent shape.
+    `CursorCached`, not a re-sent shape; a unit test pins the eviction property (an id pushed past the cap
+    is re-sent full, never referenced as cached).
+  - **Cache interop contract (shared, not per-side).** A `CursorCached` reference only resolves if the
+    controller's `CursorSink` caches with a policy compatible with the host's send-side cache. That cap is
+    now the single public `ras_core::CURSOR_CACHE_CAP` (= 128), and the `CursorSink` trait doc pins the
+    contract the app must honor: retain **≥ CURSOR_CACHE_CAP** distinct shapes by id, evict **oldest-first
+    (FIFO, not LRU)**, and **cache even a dropped-render shape** (there is no upstream re-request — the host
+    only re-sends once it too evicts the id). Violating it is a stale/blank cursor (a render glitch, never a
+    security issue — cursor pixels are display-only).
   - **Deferred (on-device/GUI):** host cursor **capture** (per-OS: `NSCursor`/`CGImage`,
     `XFixesGetCursorImage`, `GetCursorInfo`+`DrawIconEx`) behind the `CursorObserver` seam, controller
     **render** (a `CursorSink` that draws the cached RGBA on the pointer overlay/WebCodecs canvas), and a

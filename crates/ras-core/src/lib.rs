@@ -42,7 +42,7 @@ pub use deps::{
     AudioOutput, AudioSink, AudioSourceDyn, AuditSink, ControlChannelDyn, ControlConsent,
     CursorFrame, CursorObserver, CursorShape, CursorSink, FileConsent, FileWriteSink, FrameSink,
     GrantDecision, GrantSessionValidator, GrantValidator, PushResult, SessionAuthContext,
-    SessionTransport, VideoSinkDyn, VideoSourceDyn,
+    SessionTransport, VideoSinkDyn, VideoSourceDyn, CURSOR_CACHE_CAP,
 };
 pub use event::{
     LifecycleEvent, LifecycleStream, QualitySample, SessionId, StopReason, StreamDescriptor,

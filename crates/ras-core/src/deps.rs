@@ -178,13 +178,34 @@ pub trait CursorObserver: Send {
     async fn next(&mut self) -> Option<CursorFrame>;
 }
 
+/// The cursor-shape dedup window shared by the host send-side cache and the controller [`CursorSink`]
+/// (ADR-073). The host sends a `CursorCached { id }` reference (no RGBA) only while it still holds `id`
+/// in a FIFO cache of this many distinct shapes; a sink that retains **at least** this many distinct
+/// shapes, evicting oldest-first, can therefore always resolve a reference. Making it a shared constant
+/// (rather than a private `128` on each side) is what keeps the two caches interoperable.
+pub const CURSOR_CACHE_CAP: usize = 128;
+
 /// Where the host's cursor updates go on the controller (ADR-073). Implemented by the app (draws the
 /// shape on the pointer overlay) and a recorder in tests. **Sync + non-blocking** like [`FrameSink`]: a
 /// slow sink drops internally, never backpressures the control channel.
+///
+/// # Cache contract (must match the host to render correctly)
+/// The host omits the RGBA of a repeated shape and sends [`Self::set_cached`] instead. To resolve those
+/// references the sink MUST cache shapes with a policy compatible with the host's send-side cache:
+/// - retain **at least** [`CURSOR_CACHE_CAP`] distinct shapes by `id`, evicting **oldest-first (FIFO)**;
+/// - a cache **hit does not reorder** (the host uses insertion order, not LRU) — else the two caches
+///   diverge and a still-referenced `id` gets evicted early;
+/// - under load the sink may drop the *render*, but MUST still record the shape in its cache — dropping
+///   a `set_shape` from the cache would strand a later `set_cached(id)` (there is no upstream re-request
+///   path; the host only re-sends a full shape once it *also* evicts the id).
+///
+/// Holding to this, any `set_cached(id)` the host can send is resolvable; violating it shows a stale or
+/// blank remote cursor (a render glitch, never a security issue — cursor pixels are display-only).
 pub trait CursorSink: Send + Sync {
-    /// A fresh cursor shape — draw it and cache it by `shape.id`.
+    /// A fresh cursor shape — draw it and record it in the cache by `shape.id` (see the cache contract).
     fn set_shape(&self, shape: CursorShape);
-    /// Reuse a previously-sent shape by `id` (the host sent no RGBA to save bandwidth).
+    /// Reuse a previously-sent shape by `id` (the host sent no RGBA to save bandwidth). Resolvable
+    /// whenever the cache contract above is honored.
     fn set_cached(&self, id: u32);
     /// The OS cursor is hidden — draw nothing.
     fn hide(&self);

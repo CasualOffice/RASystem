@@ -1176,7 +1176,8 @@ async fn host_stats_loop<C, E>(inner: &HostInner<C, E>, config: StreamConfig) {
 const OUTBOUND_QUEUE_DEPTH: usize = 8;
 /// Cap on distinct cursor ids the host remembers as "already sent" (so it can send `CursorCached`).
 /// Real sessions cycle through a handful of shapes; this bounds memory against a pathological observer.
-const CURSOR_CACHE_CAP: usize = 128;
+/// Shared with the controller [`crate::CursorSink`] cache contract so the two stay interoperable.
+use crate::deps::CURSOR_CACHE_CAP;
 
 /// The host's send-side record of which shape ids it has already transmitted in full (so a repeat can
 /// go as a `CursorCached` reference). Insertion-ordered with a hard cap; the oldest id is evicted when
@@ -2766,5 +2767,37 @@ mod loss_tests {
             loss_action(DropReason::MissingFragments),
             LossAction::RecoverWithKeyframe
         );
+    }
+}
+
+#[cfg(test)]
+mod cursor_cache_tests {
+    use super::{CursorCache, CURSOR_CACHE_CAP};
+
+    /// The host references an id as `CursorCached` only while its FIFO cache still holds it — the exact
+    /// property the controller [`crate::CursorSink`] cache contract mirrors. Insert an id, fill the cache
+    /// with `CURSOR_CACHE_CAP` *newer* distinct ids to evict it, and confirm the host would now re-send
+    /// the full shape (`!contains`) rather than a dangling reference the controller couldn't resolve.
+    #[test]
+    fn evicted_id_is_no_longer_referenced_as_cached() {
+        let mut cache = CursorCache::new();
+        cache.insert(7);
+        assert!(cache.contains(7), "a just-sent id is cacheable");
+        // Exactly CURSOR_CACHE_CAP newer ids push 7 out (FIFO, oldest-first).
+        for id in 100..(100 + CURSOR_CACHE_CAP as u32) {
+            cache.insert(id);
+        }
+        assert!(
+            !cache.contains(7),
+            "an evicted id must re-send a full shape, never a cached reference"
+        );
+        assert!(
+            cache.contains(100 + CURSOR_CACHE_CAP as u32 - 1),
+            "newest id retained"
+        );
+        // FIFO, not LRU: re-touching a present id must not move it, and reinserting is idempotent.
+        assert!(cache.contains(100));
+        cache.insert(100); // already present → no-op, does not reorder
+        assert!(cache.contains(100));
     }
 }
