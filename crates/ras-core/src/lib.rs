@@ -2073,6 +2073,66 @@ mod e2e {
         );
     }
 
+    /// Foundation for reconnection (ADR-091): the loopback link can be **cut** (severs all channels)
+    /// and then **healed** (re-arms fresh channels + wakes a waiting `reconnect()`), after which fresh
+    /// control channels carry traffic again — modeling a re-dialed connection whose streams are new.
+    #[tokio::test]
+    async fn loopback_reconnect_rearms_a_severed_link() {
+        use crate::deps::SessionTransport;
+        let (host, controller, faults) = loopback_pair_with_faults();
+        let target: crate::deps::DialTarget = EndpointAddr::new(EndpointId([0u8; 32]));
+
+        // Take the initial channels, then sever the link.
+        let mut hc = host.control_channel().await.unwrap();
+        let mut cc = controller.control_channel().await.unwrap();
+        faults.cut();
+        assert!(
+            cc.recv().await.is_err(),
+            "recv must error on a severed link"
+        );
+        assert!(
+            hc.send(ras_protocol::ControlMsg::Hello {
+                protocol_version: 1
+            })
+            .await
+            .is_err(),
+            "send must error on a severed link"
+        );
+
+        // A reconnect() blocks until the link is healed, then reports Ok.
+        let ctrl2 = controller.clone();
+        let t2 = target.clone();
+        let recon = tokio::spawn(async move { ctrl2.reconnect(&t2).await });
+        // Give the reconnect a moment to park on the cut, then heal.
+        assert!(
+            !wait_until(|| recon.is_finished(), 80).await,
+            "reconnect must block while the link is still cut"
+        );
+        faults.heal();
+        assert!(
+            recon.await.unwrap().is_ok(),
+            "reconnect must resolve once the link heals"
+        );
+
+        // Fresh channels now carry traffic again.
+        let mut hc2 = host.control_channel().await.unwrap();
+        let mut cc2 = controller.control_channel().await.unwrap();
+        hc2.send(ras_protocol::ControlMsg::Hello {
+            protocol_version: 1,
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                cc2.recv().await,
+                Ok(ras_protocol::ControlMsg::Hello {
+                    protocol_version: 1
+                })
+            ),
+            "the re-armed control channel must deliver messages"
+        );
+    }
+
     #[tokio::test]
     async fn controller_suspends_then_terminates_when_transport_drops() {
         let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();

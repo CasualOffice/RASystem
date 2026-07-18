@@ -203,6 +203,24 @@ impl SessionTransport for LoopbackTransport {
         Ok(LOOPBACK_PEER)
     }
 
+    async fn reconnect(&self, _target: &DialTarget) -> Result<PeerIdentity, CoreError> {
+        // Model a re-dial: block until the link is healed (the fault handle re-arms the channels and
+        // clears the cut), then report the re-authenticated peer. The caller then re-fetches its
+        // freshly-armed channels and re-runs the handshake (which re-validates the grant host-side).
+        let mut cut = self.cut.clone();
+        loop {
+            if !*cut.borrow() {
+                return Ok(LOOPBACK_PEER);
+            }
+            if cut.changed().await.is_err() {
+                return Err(CoreError::fatal(
+                    ErrorCode::TransportError,
+                    "loopback closed",
+                ));
+            }
+        }
+    }
+
     async fn control_channel(&self) -> Result<Box<dyn ControlChannelDyn>, CoreError> {
         self.control
             .lock()
@@ -319,12 +337,68 @@ impl SessionTransport for LoopbackTransport {
 pub struct LoopbackFaults {
     cut_tx: watch::Sender<bool>,
     video_tx: mpsc::Sender<VideoEvent>,
+    // Held so [`heal`](Self::heal) can re-arm both ends after a cut (models a re-dialed connection).
+    host: Arc<LoopbackTransport>,
+    controller: Arc<LoopbackTransport>,
 }
 
 impl LoopbackFaults {
     /// Sever the link. Idempotent.
     pub fn cut(&self) {
         let _ = self.cut_tx.send(true);
+    }
+
+    /// **Heal** a severed link — re-arm fresh channels on both transports (modeling a re-dialed
+    /// connection whose streams are brand new) and then clear the cut. A [`SessionTransport::reconnect`]
+    /// awaiting on either transport wakes once the cut clears, and its subsequent `control_channel()` /
+    /// `video_source()` yields the freshly-armed channel. Ordering matters: slots are filled **before**
+    /// the cut is cleared, so a woken reconnecter never races an empty slot.
+    pub fn heal(&self) {
+        let (h2c_tx, h2c_rx) = mpsc::channel(64); // host → controller control
+        let (c2h_tx, c2h_rx) = mpsc::channel(64); // controller → host control
+        let (vid_tx, vid_rx) = mpsc::channel(8); // host → controller video
+        let (aud_tx, aud_rx) = mpsc::channel(16); // host → controller audio
+        let cut_rx = self.cut_tx.subscribe();
+        *self
+            .host
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(LoopbackControl {
+            tx: h2c_tx,
+            rx: c2h_rx,
+            cut: cut_rx.clone(),
+        });
+        *self
+            .host
+            .video_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(vid_tx);
+        *self
+            .host
+            .audio_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(aud_tx);
+        *self
+            .controller
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(LoopbackControl {
+            tx: c2h_tx,
+            rx: h2c_rx,
+            cut: cut_rx,
+        });
+        *self
+            .controller
+            .video_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(vid_rx);
+        *self
+            .controller
+            .audio_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(aud_rx);
+        // Clear the cut LAST, so a woken `reconnect()` always finds armed slots.
+        let _ = self.cut_tx.send(false);
     }
 
     /// Inject a video event into the controller's source (e.g. a transport-generated `FrameDropped`).
@@ -401,7 +475,13 @@ pub fn loopback_pair_with_faults() -> (
 ) {
     let (cut_tx, cut_rx) = watch::channel(false);
     let (host, controller, video_tx) = build_pair(cut_rx, None);
-    (host, controller, LoopbackFaults { cut_tx, video_tx })
+    let faults = LoopbackFaults {
+        cut_tx,
+        video_tx,
+        host: host.clone(),
+        controller: controller.clone(),
+    };
+    (host, controller, faults)
 }
 
 /// A content-free [`FrameSink`] that tallies delivery. Cheap to clone (shares its counters), so a
