@@ -242,9 +242,13 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   `MAX_FILE_CHUNK`) → the host writes each chunk to the resolved dest via an injected `FileWriteSink`
   (`with_file_write_sink`), tracking the total; an **over-run** past the offered size (or a short
   transfer) **aborts** — no oversized/partial file — and `FileComplete` finalizes iff `received == size`.
-  Loopback-tested (offer→accept→chunks→complete lands the bytes intact; over-run aborts). Only follow-up:
-  the `O_NOFOLLOW`/`openat` OS write backend (the symlink-follow TOCTOU defense the `FileWriteSink` docs
-  mandate) + the confirmation UI.
+  Loopback-tested (offer→accept→chunks→complete lands the bytes intact; over-run aborts). **The Unix
+  write backend landed too:** `ras-files::SafeFileWriter` opens with `O_NOFOLLOW | O_CREAT | O_EXCL` (mode
+  0600) — a symlink dest refused (`O_NOFOLLOW`), an existing entry refused (`O_EXCL`), abort removes the
+  partial; pure `std`+`libc` (no ras-core dep — the app wraps it), `unsafe`-free, and **genuinely
+  unit-tested off-device** with real tempfiles (write+read-back, existing-refused, a real symlink refused
+  with the target untouched). Only follow-ups: the Windows `CreateFile`+reparse-point backend + the
+  confirmation UI.
 - **Audit journal — Inv 10 implemented (ADR-088).** `ras-audit` (was a stub) is now a per-session
   **SHA-256 hash chain** of **content-free** `AuditEvent`s (enum tags + counters only — never a pixel,
   keystroke, clipboard byte, typed text, path, or secret; a `content` field is absent by construction,
@@ -596,6 +600,7 @@ casual-ras/
     ras-policy/           # capability intersection, local policy, signed-catalogue file push (ADR-086)
     ras-control/          # control leases, generations, input routing + OsInputSink/ClipboardSink seams
     ras-clipboard/        # cross-platform clipboard write backend (arboard; set-never-paste, ADR-079)
+    ras-files/            # safe file-write backend (O_NOFOLLOW|O_EXCL; symlink/clobber refusal, ADR-090)
     ras-media/            # capture/encode/decode traits + pipeline (video + audio, ADR-077)
     ras-audio-opus/       # Opus audio encoder/decoder (audiopus/vendored libopus, ADR-080)
     ras-media-macos/      # macOS backend: ScreenCaptureKit + VideoToolbox (FFI; unsafe confined here)

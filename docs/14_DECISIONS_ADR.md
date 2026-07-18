@@ -1107,7 +1107,14 @@
     chunk with no active transfer is ignored; teardown aborts any in-progress transfer.
   - **The `FileWriteSink` seam** carries the ADR-086 **symlink-follow (TOCTOU) defense**: the impl MUST
     `open` with `O_NOFOLLOW`/`openat` and refuse a symlink/existing entry — the safe-leaf path string
-    (ADR-086) is the *precondition* that makes that write sound. That OS backend is the on-device row.
+    (ADR-086) is the *precondition* that makes that write sound. **The Unix backend has landed**
+    (`ras-files::SafeFileWriter`): `O_NOFOLLOW | O_CREAT | O_EXCL` at mode `0600` — a symlink dest is
+    refused (`O_NOFOLLOW`), an existing entry is refused (`O_EXCL`, never clobber), `abort` removes the
+    partial. Pure `std` + `libc` (no `ras-core` dep — the app wraps it in a `FileWriteSink`), `unsafe`-
+    free, and — unusually for an OS backend — **genuinely unit-tested off-device** with real tempfiles
+    (write+read-back, existing-file-refused, and a **real symlink refused with the target left
+    untouched**). `O_NOFOLLOW` guards only the final component, so the sandbox dir must be host-owned
+    (documented). Windows (a `CreateFile` + reparse-point check) compiles to an empty lib for now.
   - **Verify:** wire round-trip + oversize-chunk-refused + fuzz (ras-protocol); a `ras-core` loopback test
     with a recording `FileWriteSink` — a full offer→accept→chunks→complete lands the **bytes intact, in
     order**, at the resolved path with `finish` called; and an **over-run** (chunk larger than the offered

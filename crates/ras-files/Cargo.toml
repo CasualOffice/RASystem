@@ -1,0 +1,20 @@
+[package]
+name = "ras-files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Safe file-write backend for the signed-catalogue file-transfer data path (ADR-090). Opens the
+# host-resolved destination with O_NOFOLLOW | O_CREAT | O_EXCL — the symlink-follow (TOCTOU) defense
+# (docs/20 §3.3). Pure `std` + `libc` (for the O_NOFOLLOW constant); no dependency on the heavy
+# `ras-core` — the app wraps `SafeFileWriter` in a `ras_core::FileWriteSink`. Unix-only for now (empty
+# on Windows, which needs a CreateFile + reparse-point check — a follow-up); `unsafe`-free.
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true
