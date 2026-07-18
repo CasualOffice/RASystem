@@ -1346,6 +1346,90 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
+    /// Drain the controller lifecycle stream up to the next file accept/reject event (skipping media
+    /// events), or `None` on timeout.
+    async fn next_file_event(events: &mut LifecycleStream) -> Option<LifecycleEvent> {
+        for _ in 0..50 {
+            match tokio::time::timeout(Duration::from_millis(50), events.recv()).await {
+                Ok(Some(
+                    e @ (LifecycleEvent::FileTransferAccepted
+                    | LifecycleEvent::FileTransferRejected { .. }),
+                )) => return Some(e),
+                Ok(Some(_)) => continue,
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// One transfer at a time (ADR-090): a second `FileOffer` while one is in flight is refused
+    /// fail-closed (`InvalidMessage`) — it can neither re-open the sink to a new destination nor orphan
+    /// the first partial file — and the original transfer still completes intact.
+    #[tokio::test]
+    async fn file_transfer_refuses_a_concurrent_offer() {
+        use ras_protocol::ErrorCode;
+        use std::sync::atomic::Ordering::Relaxed;
+        let sink = Arc::new(RecordingFileSink::default());
+        let (host, controller) = file_host(&["screen.view", "file.push.logs"], sink.clone());
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        let mut events = ctrl_r.unwrap();
+
+        // First offer → accepted, opens "app.log", left in flight (no complete yet).
+        controller.send_file_offer("logs".to_string(), "app.log".to_string(), 11);
+        let first = next_file_event(&mut events).await;
+        assert!(
+            matches!(first, Some(LifecycleEvent::FileTransferAccepted)),
+            "got {first:?}"
+        );
+
+        // Second offer (a different name) while the first is active → refused, sink untouched.
+        controller.send_file_offer("logs".to_string(), "other.log".to_string(), 5);
+        let second = next_file_event(&mut events).await;
+        assert!(
+            matches!(
+                second,
+                Some(LifecycleEvent::FileTransferRejected {
+                    code: ErrorCode::InvalidMessage
+                })
+            ),
+            "a concurrent offer is refused fail-closed, got {second:?}"
+        );
+        assert_eq!(
+            sink.opened
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .unwrap()
+                .0,
+            std::path::PathBuf::from("/var/lib/app/incoming/app.log"),
+            "the concurrent offer must not re-open the sink to a new destination"
+        );
+        assert!(
+            !sink.aborted.load(Relaxed),
+            "the concurrent offer must not abort the in-flight transfer"
+        );
+
+        // The original transfer still streams to completion, bytes intact.
+        controller.send_file_chunk(bytes::Bytes::from_static(b"hello "));
+        controller.send_file_chunk(bytes::Bytes::from_static(b"world"));
+        controller.send_file_complete();
+        assert!(
+            wait_until(|| sink.finished.load(Relaxed), 200).await,
+            "the original transfer finalizes despite the refused concurrent offer"
+        );
+        assert_eq!(
+            &*sink
+                .bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            b"hello world"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     // ── Audio plane, host→controller (ADR-077) ──────────────────────────────────────────────────
     /// Controller-side [`AudioOutput`] that tallies packets delivered through the transport — proves a
     /// true end-to-end host→controller flow, not just a host-local send.

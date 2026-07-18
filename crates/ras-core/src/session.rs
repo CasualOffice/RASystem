@@ -1624,6 +1624,17 @@ async fn host_handle_file_offer<C, E>(
     filename: String,
     size: u64,
 ) -> ControlMsg {
+    // ⓪ one transfer at a time. A second offer while one is in flight is an out-of-sequence protocol
+    // violation — refuse it fail-closed *before* authorize/consent, so it can neither prompt a wasted
+    // consent nor overwrite the active-transfer state and orphan the first partial file on disk.
+    if inner
+        .active_transfer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+    {
+        return file_reject(inner, ErrorCode::InvalidMessage);
+    }
     // ① authorize → the host-resolved destination path, or a reject code. No catalogue ⇒ no target.
     let resolved = {
         let cat = inner

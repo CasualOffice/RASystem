@@ -1104,7 +1104,11 @@
     `FileChunk` is written and the running total tracked; a chunk that would **exceed the offered size**,
     or a write error, **aborts** (discard the partial file) — the size-cap DoS defense on the byte path.
     `FileComplete` finalizes **iff** `received == declared_size`, else aborts (no truncated file). A stray
-    chunk with no active transfer is ignored; teardown aborts any in-progress transfer.
+    chunk with no active transfer is ignored; teardown aborts any in-progress transfer. **One transfer at a
+    time:** a second `FileOffer` while one is in flight is an out-of-sequence protocol violation, refused
+    fail-closed (`InvalidMessage`) **before** authorize/consent — so a malformed/hostile controller can
+    neither prompt a wasted consent nor overwrite the active-transfer state and orphan the first partial
+    file on disk.
   - **The `FileWriteSink` seam** carries the ADR-086 **symlink-follow (TOCTOU) defense**: the impl MUST
     `open` with `O_NOFOLLOW`/`openat` and refuse a symlink/existing entry — the safe-leaf path string
     (ADR-086) is the *precondition* that makes that write sound. **The Unix backend has landed**
@@ -1122,8 +1126,10 @@
     live run needs Windows hardware, as everywhere).
   - **Verify:** wire round-trip + oversize-chunk-refused + fuzz (ras-protocol); a `ras-core` loopback test
     with a recording `FileWriteSink` — a full offer→accept→chunks→complete lands the **bytes intact, in
-    order**, at the resolved path with `finish` called; and an **over-run** (chunk larger than the offered
-    size) **aborts** and never finalizes — both green.
+    order**, at the resolved path with `finish` called; an **over-run** (chunk larger than the offered
+    size) **aborts** and never finalizes; and a **concurrent second offer** mid-transfer is refused
+    (`InvalidMessage`) without re-opening or aborting the in-flight transfer, which still completes intact
+    — all green.
 
 ## Licensing
 
