@@ -375,6 +375,14 @@ mod win {
         if (0x1E..=0x26).contains(&hid) {
             return Some(0x31 + (hid - 0x1E));
         }
+        // Function keys F1–F12 (HID 0x3A..=0x45) → VK_F1..VK_F12 (0x70..0x7B).
+        if (0x3A..=0x45).contains(&hid) {
+            return Some(0x70 + (hid - 0x3A));
+        }
+        // Keypad digits 1–9 (HID 0x59..=0x61) → VK_NUMPAD1..9 (0x61..0x69).
+        if (0x59..=0x61).contains(&hid) {
+            return Some(0x61 + (hid - 0x59));
+        }
         let vk: u16 = match hid {
             0x27 => 0x30, // 0
             // Whitespace / editing.
@@ -395,11 +403,32 @@ mod win {
             0x37 => 0xBE, // . >  (VK_OEM_PERIOD)
             0x38 => 0xBF, // / ?  (VK_OEM_2)
             0x39 => 0x14, // Caps Lock (VK_CAPITAL)
+            // System keys + the 6-key navigation cluster (HID 0x46..=0x4E).
+            0x46 => 0x2C, // Print Screen (VK_SNAPSHOT)
+            0x47 => 0x91, // Scroll Lock  (VK_SCROLL)
+            0x48 => 0x13, // Pause        (VK_PAUSE)
+            0x49 => 0x2D, // Insert       (VK_INSERT)
+            0x4A => 0x24, // Home         (VK_HOME)
+            0x4B => 0x21, // Page Up      (VK_PRIOR)
+            0x4C => 0x2E, // Delete Fwd   (VK_DELETE)
+            0x4D => 0x23, // End          (VK_END)
+            0x4E => 0x22, // Page Down    (VK_NEXT)
             // Arrows.
             0x4F => 0x27, // Right (VK_RIGHT)
             0x50 => 0x25, // Left  (VK_LEFT)
             0x51 => 0x28, // Down  (VK_DOWN)
             0x52 => 0x26, // Up    (VK_UP)
+            // Keypad operators / Num Lock (digits handled by the range above).
+            0x53 => 0x90, // Num Lock (VK_NUMLOCK)
+            0x54 => 0x6F, // KP /     (VK_DIVIDE)
+            0x55 => 0x6A, // KP *     (VK_MULTIPLY)
+            0x56 => 0x6D, // KP -     (VK_SUBTRACT)
+            0x57 => 0x6B, // KP +     (VK_ADD)
+            0x58 => 0x0D, // KP Enter (VK_RETURN)
+            0x62 => 0x60, // KP 0     (VK_NUMPAD0)
+            0x63 => 0x6E, // KP .     (VK_DECIMAL)
+            0x64 => 0xE2, // Non-US \ |   (VK_OEM_102)
+            0x65 => 0x5D, // Application/Menu (VK_APPS)
             // Modifiers (left/right specific virtual keys).
             0xE0 => 0xA2, // Left Control  (VK_LCONTROL)
             0xE1 => 0xA0, // Left Shift    (VK_LSHIFT)
@@ -428,6 +457,22 @@ mod win {
             assert_eq!(hid_to_vk(0x2C), Some(0x20)); // space
             assert_eq!(hid_to_vk(0xE1), Some(0xA0)); // left shift → VK_LSHIFT
             assert_eq!(hid_to_vk(0xFFFF), None); // unmapped → fail-closed
+        }
+
+        #[test]
+        fn function_navigation_and_keypad_keys_are_mapped() {
+            assert_eq!(hid_to_vk(0x3A), Some(0x70)); // F1  → VK_F1
+            assert_eq!(hid_to_vk(0x3E), Some(0x74)); // F5  → VK_F5
+            assert_eq!(hid_to_vk(0x45), Some(0x7B)); // F12 → VK_F12
+            assert_eq!(hid_to_vk(0x49), Some(0x2D)); // Insert → VK_INSERT
+            assert_eq!(hid_to_vk(0x4C), Some(0x2E)); // Delete → VK_DELETE
+            assert_eq!(hid_to_vk(0x4A), Some(0x24)); // Home → VK_HOME
+            assert_eq!(hid_to_vk(0x4B), Some(0x21)); // Page Up → VK_PRIOR
+            assert_eq!(hid_to_vk(0x59), Some(0x61)); // KP 1 → VK_NUMPAD1
+            assert_eq!(hid_to_vk(0x61), Some(0x69)); // KP 9 → VK_NUMPAD9
+            assert_eq!(hid_to_vk(0x62), Some(0x60)); // KP 0 → VK_NUMPAD0
+            assert_eq!(hid_to_vk(0x54), Some(0x6F)); // KP / → VK_DIVIDE
+            assert_eq!(hid_to_vk(0x53), Some(0x90)); // Num Lock → VK_NUMLOCK
         }
 
         #[test]

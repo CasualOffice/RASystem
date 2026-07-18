@@ -429,11 +429,50 @@ mod macos {
             0x37 => 0x2F, // . >
             0x38 => 0x2C, // / ?
             0x39 => 0x39, // Caps Lock
+            // Function keys F1–F12 (HID 0x3A..=0x45). Apple virtual keycodes (kVK_F1..).
+            0x3A => 0x7A, // F1
+            0x3B => 0x78, // F2
+            0x3C => 0x63, // F3
+            0x3D => 0x76, // F4
+            0x3E => 0x60, // F5
+            0x3F => 0x61, // F6
+            0x40 => 0x62, // F7
+            0x41 => 0x64, // F8
+            0x42 => 0x65, // F9
+            0x43 => 0x6D, // F10
+            0x44 => 0x67, // F11
+            0x45 => 0x6F, // F12
+            // Navigation cluster (HID 0x49..=0x4E). Mac hardware has no Print Screen / Scroll Lock /
+            // Pause (HID 0x46..=0x48) — those stay unmapped (fail-closed), never mis-injected.
+            0x49 => 0x72, // Insert    → kVK_Help (Mac has no dedicated Insert)
+            0x4A => 0x73, // Home      (kVK_Home)
+            0x4B => 0x74, // Page Up   (kVK_PageUp)
+            0x4C => 0x75, // Delete Fwd (kVK_ForwardDelete)
+            0x4D => 0x77, // End       (kVK_End)
+            0x4E => 0x79, // Page Down (kVK_PageDown)
             // Arrows (HID 0x4F..=0x52).
             0x4F => 0x7C, // Right
             0x50 => 0x7B, // Left
             0x51 => 0x7D, // Down
             0x52 => 0x7E, // Up
+            // Keypad (HID 0x53..=0x63). Apple kVK_ANSI_Keypad* codes.
+            0x53 => 0x47, // Num Lock → kVK_ANSI_KeypadClear
+            0x54 => 0x4B, // KP /     (KeypadDivide)
+            0x55 => 0x43, // KP *     (KeypadMultiply)
+            0x56 => 0x4E, // KP -     (KeypadMinus)
+            0x57 => 0x45, // KP +     (KeypadPlus)
+            0x58 => 0x4C, // KP Enter (KeypadEnter)
+            0x59 => 0x53, // KP 1
+            0x5A => 0x54, // KP 2
+            0x5B => 0x55, // KP 3
+            0x5C => 0x56, // KP 4
+            0x5D => 0x57, // KP 5
+            0x5E => 0x58, // KP 6
+            0x5F => 0x59, // KP 7
+            0x60 => 0x5B, // KP 8
+            0x61 => 0x5C, // KP 9
+            0x62 => 0x52, // KP 0
+            0x63 => 0x41, // KP .     (KeypadDecimal)
             // Modifiers (HID 0xE0..=0xE7).
             0xE0 => 0x3B, // Left Control
             0xE1 => 0x38, // Left Shift
@@ -469,6 +508,23 @@ mod macos {
             assert_eq!(hid_to_virtual_keycode(0x2C), Some(0x31)); // space
             assert_eq!(hid_to_virtual_keycode(0xE1), Some(0x38)); // left shift
             assert_eq!(hid_to_virtual_keycode(0xFFFF), None); // unmapped → fail-closed
+        }
+
+        #[test]
+        fn function_navigation_and_keypad_keys_are_mapped() {
+            assert_eq!(hid_to_virtual_keycode(0x3A), Some(0x7A)); // F1
+            assert_eq!(hid_to_virtual_keycode(0x3E), Some(0x60)); // F5
+            assert_eq!(hid_to_virtual_keycode(0x45), Some(0x6F)); // F12
+            assert_eq!(hid_to_virtual_keycode(0x4C), Some(0x75)); // Delete Fwd (kVK_ForwardDelete)
+            assert_eq!(hid_to_virtual_keycode(0x4A), Some(0x73)); // Home
+            assert_eq!(hid_to_virtual_keycode(0x4D), Some(0x77)); // End
+            assert_eq!(hid_to_virtual_keycode(0x4B), Some(0x74)); // Page Up
+            assert_eq!(hid_to_virtual_keycode(0x4E), Some(0x79)); // Page Down
+            assert_eq!(hid_to_virtual_keycode(0x62), Some(0x52)); // KP 0
+            assert_eq!(hid_to_virtual_keycode(0x63), Some(0x41)); // KP .
+                                                                  // Mac hardware lacks Print Screen / Scroll Lock / Pause → still fail-closed.
+            assert_eq!(hid_to_virtual_keycode(0x46), None); // Print Screen
+            assert_eq!(hid_to_virtual_keycode(0x48), None); // Pause
         }
 
         #[test]

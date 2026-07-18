@@ -471,11 +471,54 @@ mod linux {
             0x37 => 60, // . >
             0x38 => 61, // / ?
             0x39 => 66, // Caps Lock
+            // Function keys F1–F12 (HID 0x3A..=0x45). evdev codes, +8.
+            0x3A => 67, // F1  (evdev KEY_F1 59)
+            0x3B => 68, // F2  (60)
+            0x3C => 69, // F3  (61)
+            0x3D => 70, // F4  (62)
+            0x3E => 71, // F5  (63)
+            0x3F => 72, // F6  (64)
+            0x40 => 73, // F7  (65)
+            0x41 => 74, // F8  (66)
+            0x42 => 75, // F9  (67)
+            0x43 => 76, // F10 (68)
+            0x44 => 95, // F11 (87)
+            0x45 => 96, // F12 (88)
+            // System keys + the 6-key navigation cluster (HID 0x46..=0x4E).
+            0x46 => 107, // Print Screen (KEY_SYSRQ 99)
+            0x47 => 78,  // Scroll Lock  (70)
+            0x48 => 127, // Pause        (KEY_PAUSE 119)
+            0x49 => 118, // Insert       (KEY_INSERT 110)
+            0x4A => 110, // Home         (KEY_HOME 102)
+            0x4B => 112, // Page Up      (KEY_PAGEUP 104)
+            0x4C => 119, // Delete Fwd   (KEY_DELETE 111)
+            0x4D => 115, // End          (KEY_END 107)
+            0x4E => 117, // Page Down    (KEY_PAGEDOWN 109)
             // Arrows (HID 0x4F..=0x52).
             0x4F => 114, // Right
             0x50 => 113, // Left
             0x51 => 116, // Down
             0x52 => 111, // Up
+            // Keypad (HID 0x53..=0x63) — evdev codes, +8.
+            0x53 => 77,  // Num Lock (KEY_NUMLOCK 69)
+            0x54 => 106, // KP /     (KEY_KPSLASH 98)
+            0x55 => 63,  // KP *     (KEY_KPASTERISK 55)
+            0x56 => 82,  // KP -     (KEY_KPMINUS 74)
+            0x57 => 86,  // KP +     (KEY_KPPLUS 78)
+            0x58 => 104, // KP Enter (KEY_KPENTER 96)
+            0x59 => 87,  // KP 1     (KEY_KP1 79)
+            0x5A => 88,  // KP 2     (80)
+            0x5B => 89,  // KP 3     (81)
+            0x5C => 83,  // KP 4     (KEY_KP4 75)
+            0x5D => 84,  // KP 5     (76)
+            0x5E => 85,  // KP 6     (77)
+            0x5F => 79,  // KP 7     (KEY_KP7 71)
+            0x60 => 80,  // KP 8     (72)
+            0x61 => 81,  // KP 9     (73)
+            0x62 => 90,  // KP 0     (KEY_KP0 82)
+            0x63 => 91,  // KP .     (KEY_KPDOT 83)
+            0x64 => 94,  // Non-US \ |  (KEY_102ND 86)
+            0x65 => 135, // Application/Menu (KEY_COMPOSE 127)
             // Modifiers (HID 0xE0..=0xE7).
             0xE0 => 37,  // Left Control
             0xE1 => 50,  // Left Shift
@@ -501,6 +544,24 @@ mod linux {
             assert_eq!(hid_to_keycode(0x2C), Some(65)); // space
             assert_eq!(hid_to_keycode(0xE1), Some(50)); // left shift
             assert_eq!(hid_to_keycode(0xFFFF), None); // unmapped → fail-closed
+        }
+
+        #[test]
+        fn function_navigation_and_keypad_keys_are_mapped() {
+            // Function keys, the navigation cluster, and the keypad must all be reachable (production
+            // keyboard coverage) — a remote user needs F5, Delete, Home/End/PageUp/Down, and the numpad.
+            assert_eq!(hid_to_keycode(0x3A), Some(67)); // F1
+            assert_eq!(hid_to_keycode(0x3E), Some(71)); // F5
+            assert_eq!(hid_to_keycode(0x45), Some(96)); // F12
+            assert_eq!(hid_to_keycode(0x49), Some(118)); // Insert
+            assert_eq!(hid_to_keycode(0x4A), Some(110)); // Home
+            assert_eq!(hid_to_keycode(0x4C), Some(119)); // Delete Forward
+            assert_eq!(hid_to_keycode(0x4D), Some(115)); // End
+            assert_eq!(hid_to_keycode(0x4B), Some(112)); // Page Up
+            assert_eq!(hid_to_keycode(0x4E), Some(117)); // Page Down
+            assert_eq!(hid_to_keycode(0x53), Some(77)); // Num Lock
+            assert_eq!(hid_to_keycode(0x62), Some(90)); // KP 0
+            assert_eq!(hid_to_keycode(0x63), Some(91)); // KP .
         }
 
         #[test]
