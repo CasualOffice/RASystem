@@ -1544,6 +1544,12 @@ async fn host_control_loop<C, E>(
                 }
                 match host_reserve(inner).await {
                     Some(new_control) => {
+                        // A stop/revoke could have landed during host_reserve's final awaits (after its
+                        // last stop-check) — never resume serving a killed session (Inv 4). The media
+                        // pump + input gate already fail-close on `stop`, but don't even re-arm the loop.
+                        if inner.stop.load(Ordering::SeqCst) {
+                            break;
+                        }
                         *control = new_control;
                         inner.keyframe.store(true, Ordering::Relaxed); // resume on an IDR
                         continue;
