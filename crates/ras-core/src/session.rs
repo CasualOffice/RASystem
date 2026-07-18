@@ -21,7 +21,8 @@ use crate::abr::LatencyFirstAbr;
 use crate::deps::{
     AudioOutput, AuditSink, ControlChannelDyn, ControlConsent, CursorFrame, CursorObserver,
     CursorShape, CursorSink, DenyAllControl, DenyAllFileConsent, DialTarget, FileConsent,
-    FileWriteSink, FrameSink, GrantValidator, SessionAuthContext, SessionTransport, VideoSourceDyn,
+    FileWriteSink, FrameSink, GrantValidator, SessionAuthContext, SessionTransport, VideoSinkDyn,
+    VideoSourceDyn,
 };
 use crate::event::{
     LifecycleEvent, LifecycleSink, LifecycleStream, QualitySample, SessionId, StopReason,
@@ -204,6 +205,14 @@ struct HostInner<C, E> {
     state: Mutex<SessionState>,
     stop: Arc<AtomicBool>,
     keyframe: Arc<AtomicBool>,
+    /// The live video egress sink, shared with the media pump thread (which reads it each frame) so the
+    /// control loop can **swap** it on a re-serve after a reconnect (ADR-091) — the pump keeps running
+    /// across a transport loss (dropping frames) and picks up the fresh sink here. `None` between a loss
+    /// and the re-serve.
+    video_sink_slot: Arc<Mutex<Option<Box<dyn VideoSinkDyn>>>>,
+    /// The negotiated stream config, stored so a re-serve can re-announce it to the re-dialed controller
+    /// without re-negotiating capture (capture/encoder are consumed once and survive the reconnect).
+    current_config: Mutex<Option<StreamConfig>>,
     /// ABR target the media thread applies via `set_bitrate` when it changes (lock-free hot path).
     target_bitrate: Arc<AtomicU32>,
     /// Frames actually handed to the transport since the last stats tick (delivered-fps signal).
@@ -316,6 +325,8 @@ where
                 state: Mutex::new(SessionState::Created),
                 stop: Arc::new(AtomicBool::new(false)),
                 keyframe: Arc::new(AtomicBool::new(false)),
+                video_sink_slot: Arc::new(Mutex::new(None)),
+                current_config: Mutex::new(None),
                 target_bitrate: Arc::new(AtomicU32::new(0)),
                 frames_sent: Arc::new(AtomicU32::new(0)),
                 last_feedback: Mutex::new(None),
@@ -648,21 +659,31 @@ where
             .target_bitrate
             .store(config.target_bitrate_bps, Ordering::Relaxed);
 
-        // Video egress + the media pump thread.
+        // Video egress + the media pump thread. The sink lives in a shared slot the control loop can
+        // swap on a re-serve (ADR-091); the current config is stored so a re-serve can re-announce it.
         let video_sink = inner.transport.video_sink().await?;
+        *inner
+            .video_sink_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(video_sink);
+        *inner
+            .current_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config);
         let frame_interval = Duration::from_micros(1_000_000 / u64::from(config.fps.max(1)));
         let signals = MediaSignals {
             stop: inner.stop.clone(),
             keyframe: inner.keyframe.clone(),
             target_bitrate: inner.target_bitrate.clone(),
             frames_sent: inner.frames_sent.clone(),
+            video_sink: inner.video_sink_slot.clone(),
             opts,
             frame_interval,
         };
         let handle = std::thread::Builder::new()
             .name("ras-host-media".into())
             .spawn(move || {
-                media_pump(&mut capture, &mut encoder, video_sink.as_ref(), &signals);
+                media_pump(&mut capture, &mut encoder, &signals);
             })
             .map_err(|_| CoreError::fatal(ErrorCode::Internal, "spawn media thread"))?;
         *inner
@@ -944,18 +965,17 @@ struct MediaSignals {
     keyframe: Arc<AtomicBool>,
     target_bitrate: Arc<AtomicU32>,
     frames_sent: Arc<AtomicU32>,
+    /// The shared egress sink the control loop swaps on a re-serve (ADR-091). `None` between a transport
+    /// loss and the re-serve — the pump keeps encoding and drops frames until a fresh sink appears.
+    video_sink: Arc<Mutex<Option<Box<dyn VideoSinkDyn>>>>,
     opts: CaptureOptions,
     frame_interval: Duration,
 }
 
 /// The media pump. Pure loop: apply ABR bitrate → (force IDR if requested) → capture → encode →
 /// droppable send. Rebuilds capture on a recoverable error; exits on the stop flag or a fatal error.
-fn media_pump<C, E>(
-    capture: &mut C,
-    encoder: &mut E,
-    sink: &dyn crate::deps::VideoSinkDyn,
-    sig: &MediaSignals,
-) where
+fn media_pump<C, E>(capture: &mut C, encoder: &mut E, sig: &MediaSignals)
+where
     C: ScreenCaptureBackend,
     E: VideoEncoderBackend,
 {
@@ -1002,7 +1022,16 @@ fn media_pump<C, E>(
                         if sig.stop.load(Ordering::Relaxed) {
                             break;
                         }
-                        if sink.send_frame(ef) == ras_transport_iroh::SendOutcome::Sent {
+                        // Send via the shared sink slot (swapped by the control loop on a re-serve). No
+                        // sink armed (between a loss and the re-dial) ⇒ drop the frame and keep pumping.
+                        let sent = sig
+                            .video_sink
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_ref()
+                            .map(|s| s.send_frame(ef))
+                            == Some(ras_transport_iroh::SendOutcome::Sent);
+                        if sent {
                             sig.frames_sent.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -1474,30 +1503,101 @@ async fn host_control_loop<C, E>(
             }
             Ok(_) => {}
             Err(_) => {
-                // Controller vanished without a Bye. Stop the media thread and end the session.
-                if !inner.stop.swap(true, Ordering::SeqCst) {
-                    apply(
-                        &inner.state,
-                        SessionEvent::Fatal {
-                            code: ErrorCode::TransportError,
-                        },
-                    );
-                    if let Some(sink) = inner
-                        .lifecycle
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone()
-                    {
-                        sink.emit(LifecycleEvent::SessionEnded {
-                            reason: StopReason::Error(ErrorCode::TransportError),
-                        });
+                // Controller vanished WITHOUT a Bye ⇒ transport loss. Attempt to re-serve a re-dial
+                // within the window (ADR-091): re-accept, re-read + re-validate the re-presented grant
+                // (Inv 3 — the same validator, no new auth path), re-attach the egress sink, re-announce
+                // the config, and force an IDR. On success keep serving over the fresh channel; on
+                // failure end the session (fail-closed). The media pump keeps running throughout,
+                // dropping frames until the sink slot is re-armed.
+                if inner.stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                match host_reserve(inner).await {
+                    Some(new_control) => {
+                        *control = new_control;
+                        inner.keyframe.store(true, Ordering::Relaxed); // resume on an IDR
+                        continue;
+                    }
+                    None => {
+                        if !inner.stop.swap(true, Ordering::SeqCst) {
+                            apply(
+                                &inner.state,
+                                SessionEvent::Fatal {
+                                    code: ErrorCode::TransportError,
+                                },
+                            );
+                            emit_lifecycle(
+                                inner,
+                                LifecycleEvent::SessionEnded {
+                                    reason: StopReason::Error(ErrorCode::TransportError),
+                                },
+                            );
+                        }
+                        break;
                     }
                 }
-                break;
             }
             } // end `match msg`
         } // end tokio::select!
     }
+}
+
+/// How long the host keeps trying to re-serve a re-dial before ending the session (ADR-091). Kept in
+/// the same ballpark as the controller's reconnect window so both sides give up together.
+const HOST_RESERVE_WINDOW: Duration = Duration::from_secs(10);
+
+/// Re-serve a re-dialed controller after a host-side transport loss (ADR-091). Re-accepts within the
+/// window, re-reads the controller's re-presented grant, and **re-validates it through the same
+/// validator** (Inv 3 — reconnection is not a new authorization path; an expired/revoked/denied grant
+/// refuses the resume). On success it re-attaches a fresh egress sink (swapped into the shared slot the
+/// media pump reads) and re-announces the current stream config, returning the fresh control channel.
+/// `None` on timeout, a lost link, or a refused re-validation → the caller ends the session (fail-closed).
+async fn host_reserve<C, E>(inner: &HostInner<C, E>) -> Option<Box<dyn ControlChannelDyn>> {
+    let target: DialTarget = EndpointAddr::new(EndpointId([0u8; 32]));
+    let peer_identity =
+        match tokio::time::timeout(HOST_RESERVE_WINDOW, inner.transport.reconnect(&target)).await {
+            Ok(Ok(pid)) => pid,
+            _ => return None,
+        };
+    let mut control = inner.transport.control_channel().await.ok()?;
+    // Host speaks first (ADR-059), then re-reads + re-validates the controller's grant.
+    control
+        .send(ControlMsg::Hello {
+            protocol_version: 1,
+        })
+        .await
+        .ok()?;
+    let access_request = match control.recv().await.ok()? {
+        ControlMsg::AuthEnvelope { payload } => payload,
+        _ => return None,
+    };
+    let ctx = SessionAuthContext {
+        peer_identity,
+        access_request,
+        host_id: inner.config.host_id,
+        now: now_ms(),
+    };
+    // Re-validate. The existing granted caps / lease persist (same grant); we only confirm it still
+    // authorizes. A denial (expired/revoked, or a re-prompt the user declined) → refuse the resume.
+    match inner.validator.authorize(&ctx).await {
+        Ok(GrantDecision::Authorized(_)) => {}
+        _ => return None,
+    }
+    // Re-attach egress: a fresh sink into the shared slot the media pump reads, and re-announce config.
+    let sink = inner.transport.video_sink().await.ok()?;
+    *inner
+        .video_sink_slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+    let config = (*inner
+        .current_config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner))?;
+    control
+        .send(ControlMsg::StreamConfig(config_to_wire(&config)))
+        .await
+        .ok()?;
+    Some(control)
 }
 
 /// Emit a lifecycle event if a sink is attached (advisory — never backpressures the control loop).

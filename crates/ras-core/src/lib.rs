@@ -2216,6 +2216,77 @@ mod e2e {
         host_task.abort();
     }
 
+    /// The **full** reconnection path with two real sessions (ADR-091): a real `HostSession` re-serves
+    /// the re-dial (re-validates the grant, re-attaches its egress sink, re-announces the config, forces
+    /// an IDR) while the `ControllerSession` re-dials — so after a mid-stream cut, the session resumes to
+    /// `Active` **and video flows again**, end to end.
+    #[tokio::test]
+    async fn full_session_reconnects_and_video_resumes() {
+        let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32])));
+        cfg.reconnect_window = Duration::from_secs(3);
+        cfg.grant = bytes::Bytes::from_static(&[0xA1, 0xB2, 0xC3]);
+        let controller = ControllerSession::new(cfg, ctrl_tp);
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+        let sink = CountingFrameSink::new();
+        controller
+            .attach_renderer(Arc::new(sink.clone()))
+            .await
+            .unwrap();
+
+        // Video flows initially.
+        assert!(
+            wait_until(|| sink.pushed() >= 3, 800).await,
+            "expected initial frames, got {}",
+            sink.pushed()
+        );
+        let before = sink.pushed();
+
+        // Cut the link: the controller suspends; the host stops delivering (its sink is severed).
+        faults.cut();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Suspended, 500).await,
+            "controller should suspend on transport loss, got {:?}",
+            controller.state()
+        );
+
+        // Heal: the controller re-dials, the host re-serves (re-validates the grant, re-attaches its
+        // egress sink), and the session resumes — with video flowing again.
+        faults.heal();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Active, 2500).await,
+            "controller must resume to Active after re-dial, got {:?}",
+            controller.state()
+        );
+        assert!(
+            wait_until(|| sink.pushed() > before + 2, 2500).await,
+            "video must resume after reconnect (before={before}, now={})",
+            sink.pushed()
+        );
+        // The first frame the renderer got after the resync was a keyframe (no black screen).
+        assert!(
+            sink.first_frame_was_keyframe(),
+            "resumed stream starts on an IDR"
+        );
+        assert!(
+            !sink.saw_resize_without_keyframe(),
+            "no torn frame across the reconnect"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     #[tokio::test]
     async fn controller_suspends_then_terminates_when_transport_drops() {
         let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
