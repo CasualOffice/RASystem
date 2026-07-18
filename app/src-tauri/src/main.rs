@@ -708,6 +708,10 @@ async fn run_share(
     if let Some(ov) = app.get_webview_window("overlay") {
         let _ = ov.hide();
     }
+    // Restore normal main-window behavior now that the session is over.
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_minimizable(true);
+    }
     let _ = app.emit("share-viewer", false);
     let _ = app.emit("share-active", false);
     let _ = app.emit("share-status", "Sharing stopped.");
@@ -919,6 +923,13 @@ async fn serve_one(
     if let Some(ov) = app.get_webview_window("overlay") {
         let _ = ov.show();
     }
+    // Keep the in-app Stop control reachable while sharing (Invariant 7): the `main` window is its home,
+    // so it must not be minimizable away during an active session. Occlusion is still covered by the
+    // always-on-top overlay indicator badge, and closing the window halts the share (see `stop_active_share`).
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_minimizable(false);
+        let _ = win.set_focus();
+    }
 
     loop {
         tokio::select! {
@@ -1031,6 +1042,23 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     app.restart();
 }
 
+/// Tear down any active share deterministically (Invariant 7). Pixels must never outlive the
+/// indicator + Stop surface: the in-app indicator/Stop live in the `main` window, but the capture→
+/// stream loop runs in a detached `run_share` task and the always-on-top `overlay` window keeps the
+/// process alive after `main` closes — so without this, closing the main window would leave the screen
+/// streaming to the viewer with every indicator gone. Called from the window-close / exit event handler,
+/// so the stop is synchronous and in-process (no unawaited-IPC race like the JS `beforeunload` path).
+fn stop_active_share(handle: &tauri::AppHandle) {
+    use tauri::Manager;
+    let state = handle.state::<AppState>();
+    // Take the session out in its own statement so the `MutexGuard` temporary is dropped at the `;`
+    // (before `state`), rather than living to the end of an `if let` block.
+    let session = lock(&state.share.session).take();
+    if let Some(s) = session {
+        let _ = s.stop.send(true);
+    }
+}
+
 fn main() {
     // WebKitGTK's DMABUF renderer crashes or paints white artifacts on many Linux
     // GPU/driver/compositor combinations — a well-known Tauri-on-Linux failure, and worse here
@@ -1086,6 +1114,25 @@ fn main() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Casual RAS");
+        .build(tauri::generate_context!())
+        .expect("error while building Casual RAS")
+        .run(|handle, event| match &event {
+            // Closing the `main` window — the sole home of the in-app REMOTE-ACTIVE indicator and the
+            // Stop button — must halt any active share (Invariant 7). The always-on-top `overlay` window
+            // would otherwise keep the process (and the detached capture→stream loop) alive with no
+            // visible indicator. Stop first (synchronous, in-process), then exit so no headless share
+            // lingers. `ExitRequested` covers Cmd-Q / quit-menu paths for the same reason.
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { .. },
+                ..
+            } if label.as_str() == "main" => {
+                stop_active_share(handle);
+                handle.exit(0);
+            }
+            tauri::RunEvent::ExitRequested { .. } => {
+                stop_active_share(handle);
+            }
+            _ => {}
+        });
 }

@@ -7,6 +7,37 @@
 
 const { listen } = window.__TAURI__.event;
 
+// Always-visible "remote active" indicator (Invariant 7). The in-app indicator + Stop live in the main
+// window, which the host user can minimize / move / occlude; this badge lives on the always-on-top,
+// maximized overlay covering the shared display, so an active session is ALWAYS visible on that display
+// regardless of the main window's state. Driven by the same share-viewer / share-control / share-active
+// events as the in-app badge (Tauri `emit` broadcasts to every window, including this one).
+const badge = document.getElementById("active-badge");
+const badgeText = document.getElementById("active-text");
+let viewing = false;
+let controlling = false;
+function renderBadge() {
+  if (controlling) badgeText.textContent = "REMOTE CONTROL ACTIVE";
+  else if (viewing) badgeText.textContent = "REMOTE VIEWING ACTIVE";
+  badge.classList.toggle("on", viewing || controlling);
+}
+listen("share-viewer", (e) => {
+  viewing = !!e.payload;
+  renderBadge();
+});
+listen("share-control", (e) => {
+  controlling = !!e.payload;
+  renderBadge();
+});
+listen("share-active", (e) => {
+  // The whole share ended (or failed to start) — clear both, so the badge never outlives the session.
+  if (!e.payload) {
+    viewing = false;
+    controlling = false;
+    renderBadge();
+  }
+});
+
 const cv = document.getElementById("ptr");
 const g = cv.getContext("2d");
 

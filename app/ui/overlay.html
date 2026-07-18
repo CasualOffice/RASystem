@@ -18,10 +18,54 @@
         width: 100vw;
         height: 100vh;
       }
+      /* Always-visible "remote active" indicator (Invariant 7). Lives on the always-on-top, maximized,
+         un-minimizable overlay so it stays visible on the shared display even if the main app window is
+         minimized, moved off-screen, or occluded. Click-through (pointer-events:none) like the overlay. */
+      #active-badge {
+        position: fixed;
+        top: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: none;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 18px;
+        background: rgba(201, 32, 26, 0.94);
+        color: #fff;
+        font: 700 14px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        letter-spacing: 0.05em;
+        border-radius: 999px;
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+        pointer-events: none;
+        user-select: none;
+        z-index: 2147483647;
+      }
+      #active-badge.on {
+        display: inline-flex;
+      }
+      #active-badge .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #fff;
+        animation: rasblink 1.4s ease-in-out infinite;
+      }
+      @keyframes rasblink {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.35;
+        }
+      }
     </style>
   </head>
   <body>
     <canvas id="ptr"></canvas>
+    <div id="active-badge" role="status" aria-live="polite">
+      <span class="dot"></span><span id="active-text">REMOTE VIEWING ACTIVE</span>
+    </div>
     <script type="module" src="overlay.js"></script>
   </body>
 </html>

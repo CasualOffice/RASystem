@@ -4722,6 +4722,11 @@ dependencies = [
 [[package]]
 name = "ras-audit"
 version = "0.0.0"
+dependencies = [
+ "ras-identity",
+ "ras-protocol",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "ras-bootstrap"
