@@ -226,7 +226,11 @@ impl Default for SyntheticEncoder {
 impl VideoEncoderBackend for SyntheticEncoder {
     fn configure(&mut self, config: &StreamConfig) -> Result<(), MediaError> {
         self.config = *config;
-        self.next_frame_id = 0;
+        // `first = true` guarantees the next frame is a keyframe (the configure contract). `next_frame_id`
+        // is NOT reset: `frame_id` stays **monotonic across a reconfigure** (a mid-stream resolution change,
+        // ADR-060), matching the real encoders (e.g. OpenH264 keeps its counter) — the per-frame-stream
+        // transport detects loss by `frame_id` gaps, so a reset would look like a backwards jump. It starts
+        // at 0 only because `new()` initializes it there.
         self.first = true;
         self.force_keyframe = false;
         Ok(())
@@ -502,6 +506,54 @@ mod tests {
                 "starts with an Annex-B start code"
             );
         }
+    }
+
+    #[test]
+    fn reconfigure_keeps_frame_id_monotonic_and_forces_a_keyframe() {
+        let mut cap = SyntheticCaptureBackend::new(1280, 720);
+        let opts = CaptureOptions {
+            monitor: MonitorId(0),
+            target_fps: 60,
+            excluded_window_ids: vec![],
+        };
+        let cfg = cap.start(&opts).unwrap();
+        let mut enc = SyntheticEncoder::new();
+        enc.configure(&cfg).unwrap();
+        let dur = core::time::Duration::from_millis(1);
+
+        let f0 = enc
+            .encode(cap.next_frame(dur).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        let f1 = enc
+            .encode(cap.next_frame(dur).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!((f0.frame_id, f1.frame_id), (0, 1));
+        assert!(f0.is_keyframe && !f1.is_keyframe);
+
+        // A mid-stream reconfigure (resolution change, ADR-060): the next frame is an IDR, but frame_id
+        // must NOT reset — it stays monotonic (matching the real encoders + the per-frame-stream
+        // transport's gap detection, which would read a reset as a backwards jump).
+        let new_cfg = StreamConfig {
+            width: 1920,
+            height: 1080,
+            ..cfg
+        };
+        enc.configure(&new_cfg).unwrap();
+        let f2 = enc
+            .encode(cap.next_frame(dur).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            f2.frame_id, 2,
+            "frame_id must stay monotonic across a reconfigure, not reset"
+        );
+        assert!(
+            f2.is_keyframe,
+            "the first frame after a reconfigure is a keyframe"
+        );
+        assert_eq!(f2.config.width, 1920, "the new config rides the frame");
     }
 
     #[test]
