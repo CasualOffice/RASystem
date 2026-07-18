@@ -2333,11 +2333,13 @@ mod e2e {
         host_task.abort();
     }
 
-    /// Reconnection is not a new authorization (ADR-091): a re-dial from the **same** transport-
-    /// authenticated endpoint must NOT re-run the validator (no fresh consent prompt on a network blip).
-    /// The original consent stands and the granted caps persist; only a *different* endpoint re-authorizes.
+    /// Reconnection re-runs the ordinary handshake (ADR-091): the host **re-validates** the grant on a
+    /// re-dial — signature / endpoint / **expiry**, identical to a first connect. Grant expiry is enforced
+    /// ONLY at this validation, so it must NOT be skipped (the earlier "same-endpoint skip" was a P0 that
+    /// let an expired grant resume — caught by adversarial review). The validator is therefore re-invoked;
+    /// the session still resumes when the grant is still valid.
     #[tokio::test]
-    async fn reconnect_does_not_re_authorize_the_same_endpoint() {
+    async fn reconnect_re_validates_the_grant() {
         use std::sync::atomic::Ordering::Relaxed;
         let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
@@ -2362,7 +2364,7 @@ mod e2e {
         assert_eq!(
             calls.load(Relaxed),
             1,
-            "authorized exactly once on the initial connect"
+            "authorized once on the initial connect"
         );
 
         faults.cut();
@@ -2370,16 +2372,77 @@ mod e2e {
         faults.heal();
         assert!(
             wait_until(|| controller.state() == SessionState::Active, 2500).await,
-            "the session must resume to Active"
+            "the session must resume to Active when the grant is still valid"
         );
-        // The re-dial re-authenticated the SAME endpoint (Inv 9) → no second authorize/consent.
-        assert_eq!(
-            calls.load(Relaxed),
-            1,
-            "a reconnect from the same endpoint must NOT re-prompt consent"
+        assert!(
+            calls.load(Relaxed) >= 2,
+            "the grant must be RE-VALIDATED on reconnect (expiry is enforced only here), got {}",
+            calls.load(Relaxed)
         );
 
         controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
+    /// A grant no longer valid at re-dial time (e.g. it expired during the outage) must NOT resume: the
+    /// host re-validation refuses it and the session terminates, fail-closed (ADR-091 / Inv 3). Guards
+    /// the P0 fix — reconnection re-runs `validate_grant`, so a dead grant cannot silently resurrect.
+    #[tokio::test]
+    async fn reconnect_with_a_no_longer_valid_grant_is_refused() {
+        use std::sync::atomic::Ordering::Relaxed;
+        // Authorizes the first call (connect), denies every re-validation after — models a grant that
+        // expired between connect and the re-dial.
+        struct AuthorizeOnce {
+            calls: Arc<std::sync::atomic::AtomicU64>,
+            caps: ras_policy::CapabilitySet,
+        }
+        #[async_trait::async_trait]
+        impl crate::deps::GrantValidator for AuthorizeOnce {
+            async fn authorize(
+                &self,
+                _ctx: &crate::deps::SessionAuthContext,
+            ) -> Result<crate::deps::GrantDecision, crate::CoreError> {
+                if self.calls.fetch_add(1, Relaxed) == 0 {
+                    Ok(crate::deps::GrantDecision::Authorized(self.caps.clone()))
+                } else {
+                    Ok(crate::deps::GrantDecision::Denied(
+                        ras_protocol::ErrorCode::GrantInvalid,
+                    ))
+                }
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(AuthorizeOnce {
+                calls: calls.clone(),
+                caps: caps(&["screen.view"]),
+            }),
+        );
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32])));
+        cfg.reconnect_window = Duration::from_secs(2);
+        cfg.grant = bytes::Bytes::from_static(&[0xA1, 0xB2, 0xC3]);
+        let controller = ControllerSession::new(cfg, ctrl_tp);
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+        assert!(wait_until(|| controller.state() == SessionState::Active, 500).await);
+
+        faults.cut();
+        assert!(wait_until(|| controller.state() == SessionState::Suspended, 500).await);
+        faults.heal();
+        // Re-validation refuses (grant no longer valid) → the session must terminate, never resume.
+        assert!(
+            wait_until(|| controller.state() == SessionState::Terminated, 2500).await,
+            "an expired/invalid grant must NOT resume on reconnect, got {:?}",
+            controller.state()
+        );
+
         host.stop(StopReason::UserRequested).await;
     }
 

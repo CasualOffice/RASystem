@@ -212,7 +212,9 @@ struct HostInner<C, E> {
     video_sink_slot: Arc<Mutex<Option<Box<dyn VideoSinkDyn>>>>,
     /// The negotiated stream config, stored so a re-serve can re-announce it to the re-dialed controller
     /// without re-negotiating capture (capture/encoder are consumed once and survive the reconnect).
-    current_config: Mutex<Option<StreamConfig>>,
+    /// Shared with the media pump (`Arc`) so a **mid-stream resolution change** updates it — else a
+    /// re-serve after a resolution change would re-announce the *stale* original dimensions.
+    current_config: Arc<Mutex<Option<StreamConfig>>>,
     /// The live audio egress sink, shared with the audio pump thread (mirrors `video_sink_slot`), so a
     /// re-serve can re-attach a fresh audio sink after a reconnect. `None` when no audio is active, or
     /// between a loss and the re-serve.
@@ -330,7 +332,7 @@ where
                 stop: Arc::new(AtomicBool::new(false)),
                 keyframe: Arc::new(AtomicBool::new(false)),
                 video_sink_slot: Arc::new(Mutex::new(None)),
-                current_config: Mutex::new(None),
+                current_config: Arc::new(Mutex::new(None)),
                 audio_sink_slot: Arc::new(Mutex::new(None)),
                 target_bitrate: Arc::new(AtomicU32::new(0)),
                 frames_sent: Arc::new(AtomicU32::new(0)),
@@ -682,6 +684,7 @@ where
             target_bitrate: inner.target_bitrate.clone(),
             frames_sent: inner.frames_sent.clone(),
             video_sink: inner.video_sink_slot.clone(),
+            current_config: inner.current_config.clone(),
             opts,
             frame_interval,
         };
@@ -973,6 +976,9 @@ struct MediaSignals {
     /// The shared egress sink the control loop swaps on a re-serve (ADR-091). `None` between a transport
     /// loss and the re-serve — the pump keeps encoding and drops frames until a fresh sink appears.
     video_sink: Arc<Mutex<Option<Box<dyn VideoSinkDyn>>>>,
+    /// Shared with `HostInner::current_config` — the pump updates it on a mid-stream resolution change
+    /// so a later re-serve re-announces the *current* dimensions, not the stale originals.
+    current_config: Arc<Mutex<Option<StreamConfig>>>,
     opts: CaptureOptions,
     frame_interval: Duration,
 }
@@ -1018,6 +1024,11 @@ where
                         // of configure's reset), so no P-frame at new dimensions reaches the decoder.
                         encoder.request_keyframe(KeyframeReason::ConfigChanged);
                         applied_bitrate = new_cfg.target_bitrate_bps;
+                        // Publish the new config so a re-serve after this resolution change re-announces
+                        // the CURRENT dimensions, not the stale originals (ADR-091).
+                        *sig.current_config
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(new_cfg);
                     }
                 }
                 match encoder.encode(frame) {
@@ -1561,23 +1572,33 @@ async fn host_control_loop<C, E>(
     }
 }
 
-/// How long the host keeps trying to re-serve a re-dial before ending the session (ADR-091). Kept in
-/// the same ballpark as the controller's reconnect window so both sides give up together.
-const HOST_RESERVE_WINDOW: Duration = Duration::from_secs(10);
-
 /// Re-serve a re-dialed controller after a host-side transport loss (ADR-091). Re-accepts within the
-/// window, re-reads the controller's re-presented grant, and **re-validates it through the same
-/// validator** (Inv 3 — reconnection is not a new authorization path; an expired/revoked/denied grant
-/// refuses the resume). On success it re-attaches a fresh egress sink (swapped into the shared slot the
-/// media pump reads) and re-announces the current stream config, returning the fresh control channel.
-/// `None` on timeout, a lost link, or a refused re-validation → the caller ends the session (fail-closed).
+/// controller's reconnect window, re-reads the controller's re-presented grant, and **re-validates it
+/// through the same validator** (Inv 3 — reconnection is *not* a new authorization path; the validator
+/// re-checks signature/endpoint/**expiry** exactly as on a first connect). On success it re-attaches a
+/// fresh egress sink (swapped into the shared slot the media pump reads) and re-announces the current
+/// stream config, returning the fresh control channel. `None` on timeout, a lost link, a refused
+/// re-validation, **or a stop/revoke landing mid-reserve** → the caller ends the session (fail-closed).
 async fn host_reserve<C, E>(inner: &HostInner<C, E>) -> Option<Box<dyn ControlChannelDyn>> {
+    // A session that is stopping/revoked must never be re-served (Inv 4). `stop` is re-checked after
+    // each await below, because this runs in the control task, which `emergency_stop` only
+    // best-effort-joins — it can outlive the stop and must not re-animate a killed session.
+    if inner.stop.load(Ordering::SeqCst) {
+        return None;
+    }
     let target: DialTarget = EndpointAddr::new(EndpointId([0u8; 32]));
-    let peer_identity =
-        match tokio::time::timeout(HOST_RESERVE_WINDOW, inner.transport.reconnect(&target)).await {
-            Ok(Ok(pid)) => pid,
-            _ => return None,
-        };
+    let peer_identity = match tokio::time::timeout(
+        inner.config.reconnect_window,
+        inner.transport.reconnect(&target),
+    )
+    .await
+    {
+        Ok(Ok(pid)) => pid,
+        _ => return None,
+    };
+    if inner.stop.load(Ordering::SeqCst) {
+        return None;
+    }
     let mut control = inner.transport.control_channel().await.ok()?;
     // Host speaks first (ADR-059), then re-reads + re-validates the controller's grant.
     control
@@ -1590,28 +1611,26 @@ async fn host_reserve<C, E>(inner: &HostInner<C, E>) -> Option<Box<dyn ControlCh
         ControlMsg::AuthEnvelope { payload } => payload,
         _ => return None,
     };
-    // Reconnection is NOT a new authorization (ADR-091): if the re-dialed peer is the **same
-    // transport-authenticated endpoint** the session already consented to (Inv 9), resume without
-    // re-running the validator — re-prompting the local user on every network blip would be wrong (the
-    // original consent stands, and the granted caps/lease persist). Only a *different*/unknown endpoint
-    // re-runs the full validator, fail-closed. The endpoint comes from the transport, never a claim.
-    let original_endpoint = *inner
-        .peer_endpoint
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let same_endpoint = original_endpoint != [0u8; 32] && peer_identity.0 == original_endpoint;
-    if !same_endpoint {
-        let ctx = SessionAuthContext {
-            peer_identity,
-            access_request,
-            host_id: inner.config.host_id,
-            now: now_ms(),
-        };
-        // A denial (expired/revoked, or a re-prompt the user declined) → refuse the resume.
-        match inner.validator.authorize(&ctx).await {
-            Ok(GrantDecision::Authorized(_)) => {}
-            _ => return None,
-        }
+    // ALWAYS re-validate — reconnection re-runs the ordinary handshake (ADR-091). The validator
+    // re-checks the grant's signature, sender-constraint against the freshly transport-authenticated
+    // endpoint, and **`not_before ≤ now ≤ expires_at`**, identical to a first connect — the ONLY place
+    // grant expiry is enforced (there is no mid-session expiry check). Skipping it on a "same endpoint"
+    // would let a grant that expired during the outage resume (Inv 3). For the production signed-grant
+    // validator this is silent (no human prompt, just re-validation); for the MVP LocalConsent validator
+    // it re-prompts, which is the documented fail-closed behavior.
+    let ctx = SessionAuthContext {
+        peer_identity,
+        access_request,
+        host_id: inner.config.host_id,
+        now: now_ms(),
+    };
+    match inner.validator.authorize(&ctx).await {
+        Ok(GrantDecision::Authorized(_)) => {}
+        _ => return None,
+    }
+    // The validator can await for a while (a consent prompt); a stop landing during it must still win.
+    if inner.stop.load(Ordering::SeqCst) {
+        return None;
     }
     // Re-attach egress: a fresh sink into the shared slot the media pump reads, and re-announce config.
     let sink = inner.transport.video_sink().await.ok()?;

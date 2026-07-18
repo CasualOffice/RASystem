@@ -294,9 +294,10 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
     clean `Bye{NormalClosure}` → `Terminated` (prompt), `Bye{SessionRevoked}` → `Revoked` (host only),
     and a missing `Bye` → `Suspended` (transport loss). **Reconnection now drives the `Suspended` path
     (ADR-091):** within the reconnect window the controller re-dials (on a lost recv *or* a failed
-    send) and re-presents its grant; the host re-serves and re-validates it (no new authorization path;
-    a re-dial from the *same* transport-authenticated endpoint skips re-consent, Inv 9); the session
-    resumes to `Active` with a forced IDR across **all three planes** (video/control/audio), or
+    send) and re-presents its grant; the host **re-validates it through the unchanged validator**
+    (signature / endpoint / **expiry**, identical to a first connect — grant expiry is enforced *only*
+    here, so it is never skipped, and a stop/revoke landing mid-reserve refuses the resume, Inv 3/4); the
+    session resumes to `Active` with a forced IDR across **all three planes** (video/control/audio), or
     `Terminated` if the window elapses (fail-closed). The testkit's `LoopbackCut` fault handle gained a
     `heal()` that re-arms the link, so the full cut→re-dial→resume path is exercised with two real
     sessions. The **iroh concrete re-dial** (`Endpoint` accept/connect) stays the on-device follow-up.
