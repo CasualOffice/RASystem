@@ -366,9 +366,11 @@ pub fn verify_chain(session_id: &[u8; 16], entries: &[AuditEntry]) -> Result<(),
     Ok(())
 }
 
-/// A host-signed commitment to a journal's head at a point in time (Inv 10). Anyone holding the host
-/// public key can verify it; a rewritten journal produces a different head, so its old checkpoint no
-/// longer verifies and a new valid one cannot be forged without the host key.
+/// A host-signed commitment to a journal's head at a point in time (Inv 10). A verifier that supplies
+/// the **independently-trusted** host public key (see [`Checkpoint::verify`]) can authenticate it: a
+/// rewritten journal produces a different head, so its old checkpoint no longer verifies, and a new one
+/// cannot be forged without the host key. (A checkpoint signed by *any other* key is rejected — the
+/// verifier must not trust the checkpoint's own embedded `signer`.)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Checkpoint {
     /// The session this checkpoint is for.
@@ -384,15 +386,32 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
-    /// Verify this checkpoint's signature against its embedded signer, **and** that it commits to
-    /// `expected_head` for `session_id`. Fail-closed: any mismatch returns `false`.
+    /// Verify this checkpoint against the **trusted host key** `trusted_signer` (the caller's independently
+    /// known host identity — never the checkpoint's own `signer` field), that it commits to `expected_head`
+    /// for `session_id`, and that its embedded `signer` matches the trusted key. Fail-closed: any mismatch
+    /// returns `false`.
+    ///
+    /// Binding to `trusted_signer` is the load-bearing check. Verifying under the *embedded* `self.signer`
+    /// alone would be a forgery oracle: an attacker who rewrites the journal can generate their own keypair,
+    /// sign a fresh checkpoint over the rewritten head, stamp their pubkey into `signer`, and it would
+    /// "verify". Authenticity comes only from checking the signature under a key the verifier already
+    /// trusts.
     #[must_use]
-    pub fn verify(&self, session_id: &[u8; 16], expected_head: &Hash) -> bool {
-        if &self.session_id != session_id || &self.head_hash != expected_head {
+    pub fn verify(
+        &self,
+        session_id: &[u8; 16],
+        expected_head: &Hash,
+        trusted_signer: &[u8; PUBLIC_KEY_LEN],
+    ) -> bool {
+        if &self.session_id != session_id
+            || &self.head_hash != expected_head
+            || &self.signer != trusted_signer
+        {
             return false;
         }
         let msg = checkpoint_message(&self.session_id, self.entry_count, &self.head_hash);
-        verify(&self.signer, &msg, &self.signature).is_ok()
+        // Verify under the trusted key, not the embedded `signer` (equal here after the check above).
+        verify(trusted_signer, &msg, &self.signature).is_ok()
     }
 }
 
@@ -615,31 +634,37 @@ mod tests {
     #[test]
     fn signed_checkpoint_round_trips_and_catches_rewrites() {
         let ks = SoftwareKeyStore::generate().unwrap();
+        let host_key = ks.public_key();
         let j = populated();
         let cp = j.checkpoint(&ks).unwrap();
-        // Verifies against the genuine head + signer.
-        assert!(cp.verify(&SID, &j.head()));
+        // Verifies against the genuine head under the trusted host key.
+        assert!(cp.verify(&SID, &j.head(), &host_key));
         assert_eq!(cp.entry_count, 7);
 
         // A rewritten journal has a different head, so the old checkpoint no longer matches it…
         let mut forged = AuditJournal::new(SID);
         forged.append(AuditEvent::SessionStarted, 1000); // attacker's shorter, "clean" history
-        assert!(!cp.verify(&SID, &forged.head()));
+        assert!(!cp.verify(&SID, &forged.head(), &host_key));
 
-        // …and a checkpoint the attacker signs with their OWN key doesn't verify as the host.
+        // …and a checkpoint the attacker signs with their OWN key over the rewritten head is REJECTED
+        // when the verifier pins the host key — closing the forgery-oracle (verifying under the embedded
+        // `signer` would have accepted it).
         let attacker = SoftwareKeyStore::generate().unwrap();
         let forged_cp = forged.checkpoint(&attacker).unwrap();
-        // It self-verifies (attacker key over attacker head)…
-        assert!(forged_cp.verify(&SID, &forged.head()));
-        // …but is not the host's key, so a verifier pinning the host key rejects it.
-        assert_ne!(forged_cp.signer, ks.public_key());
+        assert_ne!(forged_cp.signer, host_key);
+        assert!(
+            !forged_cp.verify(&SID, &forged.head(), &host_key),
+            "an attacker-key checkpoint must not authenticate against the trusted host key"
+        );
+        // The forged signature is internally valid (self-consistent) — only the key-pin defeats it.
+        assert!(forged_cp.verify(&SID, &forged.head(), &attacker.public_key()));
 
         // A tampered head with the genuine signature fails (signature covers the head).
         let mut bad = cp.clone();
         bad.head_hash[0] ^= 0xFF;
-        assert!(!bad.verify(&SID, &bad.head_hash));
+        assert!(!bad.verify(&SID, &bad.head_hash, &host_key));
         // Wrong session id fails too.
-        assert!(!cp.verify(&[0x00; 16], &j.head()));
+        assert!(!cp.verify(&[0x00; 16], &j.head(), &host_key));
     }
 
     #[test]
@@ -650,7 +675,7 @@ mod tests {
         assert!(j.verify().is_ok());
         assert_eq!(j.head(), genesis_hash(&SID));
         let cp = j.checkpoint(&ks).unwrap();
-        assert!(cp.verify(&SID, &genesis_hash(&SID)));
+        assert!(cp.verify(&SID, &genesis_hash(&SID), &ks.public_key()));
         assert_eq!(cp.entry_count, 0);
     }
 
@@ -724,7 +749,7 @@ mod tests {
         // A signed checkpoint over the original head still matches the reloaded head → no rewrite.
         let ks = SoftwareKeyStore::generate().unwrap();
         let cp = j.checkpoint(&ks).unwrap();
-        assert!(cp.verify(&SID, &loaded.last().unwrap().entry_hash));
+        assert!(cp.verify(&SID, &loaded.last().unwrap().entry_hash, &ks.public_key()));
         let _ = std::fs::remove_file(&path);
     }
 

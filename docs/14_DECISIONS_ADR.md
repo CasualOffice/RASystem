@@ -1041,6 +1041,13 @@
     rewrite — a forged chain has a different head, so the old signed checkpoint no longer matches and no
     valid new one can be produced without the host key. Domain-separated hashes/signatures + a
     session-id-bound genesis (a chain from another session can't be spliced in).
+    - **Verification MUST pin the trusted host key (authenticity is not self-certifying).** `Checkpoint::verify`
+      takes the verifier's independently-known host public key and checks the signature under *it* (and that
+      the embedded `signer` equals it) — never under the checkpoint's own `signer` field. Verifying under the
+      embedded key would be a forgery oracle: an attacker who rewrites the journal can mint their own keypair,
+      sign a fresh checkpoint over the rewritten head, stamp in their pubkey, and it would "verify." Authenticity
+      comes only from a key the verifier already trusts. (Caught in review; the `signed_checkpoint_round_trips_and_catches_rewrites`
+      test now asserts an attacker-key checkpoint is **rejected** under the pinned host key.)
   - **Content-free by construction (Inv 8/11).** `AuditEvent` carries only enum tags + counters
     (generation, a clipboard **byte length**, an `ErrorCode`) — never a pixel, keystroke, clipboard byte,
     typed text, filename/path, or secret. There is *nowhere* to put content; a `content` field is absent
