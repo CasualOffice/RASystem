@@ -108,6 +108,59 @@ impl ErrorCode {
             ErrorCode::NormalClosure => "NORMAL_CLOSURE",
         }
     }
+
+    /// A stable numeric id (matching the wire `proto` enum numbering, 1-based). Use for compact,
+    /// order-independent persistence/serialization (e.g. the audit journal) — never derived from the
+    /// Rust enum's declaration order (`as u32`), which would silently shift if a variant is inserted.
+    #[must_use]
+    pub const fn to_code(self) -> u16 {
+        match self {
+            ErrorCode::InvalidMessage => 1,
+            ErrorCode::UnsupportedVersion => 2,
+            ErrorCode::IdentityMismatch => 3,
+            ErrorCode::SignatureInvalid => 4,
+            ErrorCode::RequestExpired => 5,
+            ErrorCode::ReplayDetected => 6,
+            ErrorCode::ConsentDenied => 7,
+            ErrorCode::CapabilityDenied => 8,
+            ErrorCode::GrantInvalid => 9,
+            ErrorCode::LeaseInvalid => 10,
+            ErrorCode::SessionRevoked => 11,
+            ErrorCode::TransportError => 12,
+            ErrorCode::CaptureFailed => 13,
+            ErrorCode::EncoderFailed => 14,
+            ErrorCode::InputFailed => 15,
+            ErrorCode::PolicyChanged => 16,
+            ErrorCode::Internal => 17,
+            ErrorCode::NormalClosure => 18,
+        }
+    }
+
+    /// Inverse of [`Self::to_code`]. `None` for an unrecognized code (fail-closed — never defaulted).
+    #[must_use]
+    pub const fn from_code(code: u16) -> Option<Self> {
+        Some(match code {
+            1 => ErrorCode::InvalidMessage,
+            2 => ErrorCode::UnsupportedVersion,
+            3 => ErrorCode::IdentityMismatch,
+            4 => ErrorCode::SignatureInvalid,
+            5 => ErrorCode::RequestExpired,
+            6 => ErrorCode::ReplayDetected,
+            7 => ErrorCode::ConsentDenied,
+            8 => ErrorCode::CapabilityDenied,
+            9 => ErrorCode::GrantInvalid,
+            10 => ErrorCode::LeaseInvalid,
+            11 => ErrorCode::SessionRevoked,
+            12 => ErrorCode::TransportError,
+            13 => ErrorCode::CaptureFailed,
+            14 => ErrorCode::EncoderFailed,
+            15 => ErrorCode::InputFailed,
+            16 => ErrorCode::PolicyChanged,
+            17 => ErrorCode::Internal,
+            18 => ErrorCode::NormalClosure,
+            _ => return None,
+        })
+    }
 }
 
 impl core::fmt::Display for ErrorCode {
@@ -602,6 +655,26 @@ mod tests {
         assert_eq!(ErrorCode::SignatureInvalid.as_str(), "SIGNATURE_INVALID");
         assert_eq!(ErrorCode::Internal.as_str(), "INTERNAL_ERROR");
         assert_eq!(ErrorCode::CapabilityDenied.to_string(), "CAPABILITY_DENIED");
+    }
+
+    #[test]
+    fn error_code_numeric_round_trips_and_matches_the_wire_numbering() {
+        // Every variant round-trips through its stable numeric id, and the ids match the proto enum.
+        for (code, n) in [
+            (ErrorCode::InvalidMessage, 1u16),
+            (ErrorCode::CapabilityDenied, 8),
+            (ErrorCode::SessionRevoked, 11),
+            (ErrorCode::NormalClosure, 18),
+        ] {
+            assert_eq!(code.to_code(), n);
+            assert_eq!(ErrorCode::from_code(n), Some(code));
+        }
+        // Exhaustive round-trip over the whole range; 0 and out-of-range are rejected (fail-closed).
+        for n in 1..=18u16 {
+            assert_eq!(ErrorCode::from_code(n).map(ErrorCode::to_code), Some(n));
+        }
+        assert_eq!(ErrorCode::from_code(0), None);
+        assert_eq!(ErrorCode::from_code(19), None);
     }
 
     #[test]

@@ -250,8 +250,12 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   records `SessionStarted` / `ControlLeaseGranted`/`Revoked` / `InputRejected` / `ClipboardApplied`/
   `Rejected` / `EmergencyStop` + `SessionEnded`, each before the equivalent lifecycle emit; the sink owns
   clock + journal + persistence so `ras-core` stays clock/I/O-free. Loopback-tested (recorded chain
-  verifies). Follow-up: durable persistence (append-only file / SQLite + periodic checkpoints),
-  Merkle-batched forward-secure checkpoints, remaining source points (consent/audio/file-push).
+  verifies). **Durable persistence landed too:** `ras_audit::AuditLog` is an **append-only, length-
+  prefixed record file** — crash-safe (`load` stops at a torn trailing record, never corrupting the valid
+  prefix) and restart-survivable (reload → `verify_chain` + a signed `Checkpoint` catches any rewrite;
+  a same-length event swap breaks the chain — tested). No SQLite (avoids a `-sys` dep); added
+  `ErrorCode::to_code`/`from_code` (stable numeric) for the compact round-trippable encoding. Follow-up:
+  Merkle-batched forward-secure checkpoints, remaining source points (consent/file-push).
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

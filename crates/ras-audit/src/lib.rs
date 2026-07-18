@@ -14,8 +14,10 @@
 //! keystroke, clipboard byte, typed text, file content, path, or secret. A `content` field is *absent by
 //! construction*: there is nowhere to put one.
 //!
-//! **Pure** — no clock (the caller passes timestamps) and no I/O (persistence is the durable-store
-//! follow-up); this crate owns the data structure + crypto, so it is fully unit-testable.
+//! The journal + chain + checkpoint are **pure** — no clock (the caller passes timestamps) and no I/O —
+//! so they are fully unit-testable. Durable persistence is a thin, separate layer ([`AuditLog`]): an
+//! append-only, length-prefixed record file, crash-safe (a partial trailing record is ignored) and
+//! restart-survivable (reload → [`verify_chain`] + a signed [`Checkpoint`] detects any rewrite).
 
 use ras_identity::{verify, KeyStore, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use ras_protocol::{ErrorCode, RasError};
@@ -71,14 +73,11 @@ pub enum AuditEvent {
 
 impl AuditEvent {
     /// Append this event's canonical, deterministic encoding — a discriminant byte plus fixed fields.
-    /// `ErrorCode` is encoded by its stable `as_str` form (length-prefixed), so the encoding never
-    /// depends on enum ordering.
+    /// `ErrorCode` is encoded by its stable 2-byte numeric [`ErrorCode::to_code`], so the encoding is
+    /// fixed-size, round-trippable ([`Self::decode`]), and independent of enum ordering.
     fn encode(self, buf: &mut Vec<u8>) {
         fn put_code(buf: &mut Vec<u8>, code: ErrorCode) {
-            let s = code.as_str().as_bytes();
-            // `as_str` is a short fixed set of ASCII names, always < 256 bytes.
-            buf.push(u8::try_from(s.len()).unwrap_or(u8::MAX));
-            buf.extend_from_slice(s);
+            buf.extend_from_slice(&code.to_code().to_be_bytes());
         }
         match self {
             AuditEvent::SessionStarted => buf.push(0),
@@ -124,6 +123,80 @@ impl AuditEvent {
                 put_code(buf, code);
             }
         }
+    }
+
+    /// Parse an event from the front of `buf` (the inverse of [`Self::encode`]). Returns the event and
+    /// the number of bytes consumed. `None` on an unknown discriminant, a truncated field, or an
+    /// unrecognized `ErrorCode` (fail-closed — never defaulted).
+    fn decode(buf: &[u8]) -> Option<(Self, usize)> {
+        let (&disc, rest) = buf.split_first()?;
+        let u32_at = |b: &[u8]| {
+            let a: [u8; 4] = b.get(..4)?.try_into().ok()?;
+            Some(u32::from_be_bytes(a))
+        };
+        let code_at = |b: &[u8]| {
+            let a: [u8; 2] = b.get(..2)?.try_into().ok()?;
+            ErrorCode::from_code(u16::from_be_bytes(a))
+        };
+        // Fixed-size fields: a u32 adds 4 bytes, an ErrorCode 2 — plus the 1 discriminant byte.
+        Some(match disc {
+            0 => (AuditEvent::SessionStarted, 1),
+            1 => (AuditEvent::ConsentGranted, 1),
+            2 => (AuditEvent::ConsentDenied, 1),
+            3 => (
+                AuditEvent::GrantIssued {
+                    generation: u32_at(rest)?,
+                },
+                5,
+            ),
+            4 => (
+                AuditEvent::ControlLeaseGranted {
+                    generation: u32_at(rest)?,
+                },
+                5,
+            ),
+            5 => (
+                AuditEvent::ControlLeaseRevoked {
+                    code: code_at(rest)?,
+                },
+                3,
+            ),
+            6 => (
+                AuditEvent::InputRejected {
+                    code: code_at(rest)?,
+                },
+                3,
+            ),
+            7 => (
+                AuditEvent::EmergencyStop {
+                    code: code_at(rest)?,
+                },
+                3,
+            ),
+            8 => (AuditEvent::ClipboardApplied { len: u32_at(rest)? }, 5),
+            9 => (
+                AuditEvent::ClipboardRejected {
+                    code: code_at(rest)?,
+                },
+                3,
+            ),
+            10 => (AuditEvent::AudioStarted, 1),
+            11 => (AuditEvent::AudioStopped, 1),
+            12 => (AuditEvent::FilePushAccepted, 1),
+            13 => (
+                AuditEvent::FilePushRejected {
+                    code: code_at(rest)?,
+                },
+                3,
+            ),
+            14 => (
+                AuditEvent::SessionEnded {
+                    code: code_at(rest)?,
+                },
+                3,
+            ),
+            _ => return None,
+        })
     }
 }
 
@@ -333,6 +406,124 @@ fn checkpoint_message(session_id: &[u8; 16], entry_count: u64, head_hash: &Hash)
     msg
 }
 
+// ── Durable persistence: an append-only record log (Inv 10) ───────────────────────────────────────
+//
+// The journal is pure in-memory above; this is the durable layer. Records are length-prefixed and
+// **append-only**; a crash mid-write leaves an incomplete trailing record that [`AuditLog::load`]
+// stops at (never corrupting the valid prefix). Loaded entries are validated with [`verify_chain`],
+// and a signed [`Checkpoint`] over the head makes any *rewrite* of the file detectable.
+
+/// Fixed part of a serialized entry: `seq(8) ‖ timestamp(8) ‖ prev_hash(32) ‖ entry_hash(32)`, then the
+/// variable event encoding.
+const ENTRY_HEADER_LEN: usize = 8 + 8 + 32 + 32;
+/// Upper bound on one serialized record (a real record is ~85 bytes); guards `load` against a corrupt
+/// length prefix.
+const MAX_RECORD_LEN: usize = 4096;
+
+impl AuditEntry {
+    /// Serialize to a self-contained record (the inverse is [`Self::from_record`]).
+    fn to_record(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(ENTRY_HEADER_LEN + 8);
+        v.extend_from_slice(&self.seq.to_be_bytes());
+        v.extend_from_slice(&self.timestamp.to_be_bytes());
+        v.extend_from_slice(&self.prev_hash);
+        v.extend_from_slice(&self.entry_hash);
+        self.event.encode(&mut v);
+        v
+    }
+
+    /// Parse a record produced by [`Self::to_record`]. `None` on a short/oversized buffer, an
+    /// undecodable event, or trailing garbage (the record must be exactly header + event bytes).
+    fn from_record(buf: &[u8]) -> Option<Self> {
+        if buf.len() < ENTRY_HEADER_LEN {
+            return None;
+        }
+        let seq = u64::from_be_bytes(buf[0..8].try_into().ok()?);
+        let timestamp = u64::from_be_bytes(buf[8..16].try_into().ok()?);
+        let prev_hash: Hash = buf[16..48].try_into().ok()?;
+        let entry_hash: Hash = buf[48..ENTRY_HEADER_LEN].try_into().ok()?;
+        let (event, consumed) = AuditEvent::decode(&buf[ENTRY_HEADER_LEN..])?;
+        if ENTRY_HEADER_LEN + consumed != buf.len() {
+            return None; // no trailing bytes — a record is exact
+        }
+        Some(AuditEntry {
+            seq,
+            timestamp,
+            prev_hash,
+            event,
+            entry_hash,
+        })
+    }
+}
+
+/// An append-only, file-backed audit record log (Inv 10 durable store). Each [`AuditEntry`] is written
+/// as a `u32` big-endian length prefix followed by its record bytes. Restart-survivable: reload with
+/// [`Self::load`] and validate with [`verify_chain`] + a signed [`Checkpoint`].
+#[derive(Clone, Debug)]
+pub struct AuditLog {
+    path: std::path::PathBuf,
+}
+
+impl AuditLog {
+    /// A log backed by `path` (created on first [`Self::append`]; not opened until then).
+    #[must_use]
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Append one entry durably (open-append, write length-prefixed record, flush). Append-only — never
+    /// rewrites earlier bytes.
+    ///
+    /// # Errors
+    /// Any filesystem error opening/writing/flushing the log.
+    pub fn append(&self, entry: &AuditEntry) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let record = entry.to_record();
+        let len = u32::try_from(record.len()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "audit record too large")
+        })?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        f.write_all(&len.to_be_bytes())?;
+        f.write_all(&record)?;
+        f.flush()
+    }
+
+    /// Load every complete record in order. A partial/corrupt **trailing** record (e.g. a crash during
+    /// append) ends the read at the last valid entry — it never fails the whole load or corrupts the
+    /// valid prefix. Middle tampering is *not* silently accepted: the loaded entries still verify via
+    /// [`verify_chain`], which breaks on any altered link. A missing file loads as empty.
+    ///
+    /// # Errors
+    /// A filesystem read error other than "not found".
+    pub fn load(&self) -> std::io::Result<Vec<AuditEntry>> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut out = Vec::new();
+        let mut pos = 0usize;
+        while pos + 4 <= bytes.len() {
+            // `pos + 4 <= len` is guaranteed by the loop condition, so index directly (no fallible cast).
+            let len =
+                u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                    as usize;
+            if len == 0 || len > MAX_RECORD_LEN || pos + 4 + len > bytes.len() {
+                break; // corrupt length or truncated trailing record — stop at the valid prefix
+            }
+            let Some(entry) = AuditEntry::from_record(&bytes[pos + 4..pos + 4 + len]) else {
+                break; // undecodable trailing record — stop
+            };
+            out.push(entry);
+            pos += 4 + len;
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -461,5 +652,128 @@ mod tests {
         let cp = j.checkpoint(&ks).unwrap();
         assert!(cp.verify(&SID, &genesis_hash(&SID)));
         assert_eq!(cp.entry_count, 0);
+    }
+
+    fn tmp_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("ras-audit-{}-{}", std::process::id(), tag))
+    }
+
+    #[test]
+    fn event_encode_decode_round_trips_every_variant() {
+        let events = [
+            AuditEvent::SessionStarted,
+            AuditEvent::ConsentGranted,
+            AuditEvent::ConsentDenied,
+            AuditEvent::GrantIssued { generation: 7 },
+            AuditEvent::ControlLeaseGranted { generation: 42 },
+            AuditEvent::ControlLeaseRevoked {
+                code: ErrorCode::CapabilityDenied,
+            },
+            AuditEvent::InputRejected {
+                code: ErrorCode::ReplayDetected,
+            },
+            AuditEvent::EmergencyStop {
+                code: ErrorCode::SessionRevoked,
+            },
+            AuditEvent::ClipboardApplied { len: 12_345 },
+            AuditEvent::ClipboardRejected {
+                code: ErrorCode::CapabilityDenied,
+            },
+            AuditEvent::AudioStarted,
+            AuditEvent::AudioStopped,
+            AuditEvent::FilePushAccepted,
+            AuditEvent::FilePushRejected {
+                code: ErrorCode::InvalidMessage,
+            },
+            AuditEvent::SessionEnded {
+                code: ErrorCode::NormalClosure,
+            },
+        ];
+        for ev in events {
+            let mut buf = Vec::new();
+            ev.encode(&mut buf);
+            let (decoded, consumed) = AuditEvent::decode(&buf).expect("decodes");
+            assert_eq!(decoded, ev);
+            assert_eq!(consumed, buf.len(), "consumes exactly its own bytes");
+        }
+        // Fail-closed: unknown discriminant, truncated field, empty.
+        assert!(AuditEvent::decode(&[0xFF]).is_none());
+        assert!(AuditEvent::decode(&[3, 0, 0]).is_none()); // GrantIssued needs a full u32
+        assert!(AuditEvent::decode(&[]).is_none());
+    }
+
+    #[test]
+    fn file_log_persists_reloads_and_verifies() {
+        let path = tmp_path("persist");
+        let _ = std::fs::remove_file(&path);
+        let log = AuditLog::new(&path);
+        let j = populated();
+        for e in j.entries() {
+            log.append(e).unwrap();
+        }
+        let loaded = log.load().unwrap();
+        assert_eq!(
+            loaded,
+            j.entries(),
+            "reloaded entries match the journal exactly"
+        );
+        assert!(
+            verify_chain(&SID, &loaded).is_ok(),
+            "the reloaded chain verifies"
+        );
+        // A signed checkpoint over the original head still matches the reloaded head → no rewrite.
+        let ks = SoftwareKeyStore::generate().unwrap();
+        let cp = j.checkpoint(&ks).unwrap();
+        assert!(cp.verify(&SID, &loaded.last().unwrap().entry_hash));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_log_tolerates_a_truncated_trailing_record() {
+        let path = tmp_path("truncated");
+        let _ = std::fs::remove_file(&path);
+        let log = AuditLog::new(&path);
+        let j = populated();
+        for e in j.entries() {
+            log.append(e).unwrap();
+        }
+        // Chop the last few bytes (a crash mid-append): load returns the intact prefix, not an error.
+        let full = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &full[..full.len() - 3]).unwrap();
+        let loaded = log.load().unwrap();
+        assert!(
+            loaded.len() == j.len() - 1 && !loaded.is_empty(),
+            "only the torn trailing record is dropped"
+        );
+        assert!(
+            verify_chain(&SID, &loaded).is_ok(),
+            "the surviving prefix still verifies"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_log_middle_tamper_is_caught_by_verify_chain() {
+        let path = tmp_path("tamper");
+        let _ = std::fs::remove_file(&path);
+        let log = AuditLog::new(&path);
+        let j = populated();
+        for e in j.entries() {
+            log.append(e).unwrap();
+        }
+        // Swap the first record's event to a *different but same-length* variant, leaving its committed
+        // entry_hash stale: it still parses, but the recomputed hash no longer matches → chain breaks.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let ev_byte = 4 + ENTRY_HEADER_LEN; // u32 len + entry header → the event discriminant
+        assert_eq!(bytes[ev_byte], 0, "first event is SessionStarted (disc 0)");
+        bytes[ev_byte] = 2; // → ConsentDenied, also a 1-byte event
+        std::fs::write(&path, &bytes).unwrap();
+        let loaded = log.load().unwrap();
+        assert_eq!(
+            verify_chain(&SID, &loaded),
+            Err(AuditError::ChainBroken { seq: 0 }),
+            "a tampered committed entry must break the chain"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

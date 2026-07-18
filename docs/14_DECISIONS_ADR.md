@@ -1045,11 +1045,22 @@
     emit. The sink owns the clock + journal + persistence, so `ras-core` stays clock- and I/O-free.
     Loopback-tested: recording sinks over a real journal capture the sequence (incl. the revoke and
     audio-start/stop paths) and the **hash-chain verifies**.
-  - **Scope:** the pure journal + chain + signed checkpoint (in the new-dep-light `ras-audit`: `sha2`
-    (RustCrypto, MIT/Apache) + the `ras-identity`/`ras-protocol` seams), plus the host-loop `AuditSink`
-    wiring above. Deferred: **durable persistence** (append-only file / SQLite with periodic
-    checkpoints), forward-secure key evolution + Merkle-batched checkpoints (`docs/06 §12`), and the last
-    source points (consent grant/deny, file-push accept/reject) as those subsystems reach the host loop.
+  - **Durable persistence — NOW LANDED (append-only file).** `AuditLog` is a thin, separate layer over
+    the pure journal: each `AuditEntry` is written as a `u32`-length-prefixed record (`seq ‖ timestamp ‖
+    prev_hash ‖ entry_hash ‖ event`, the `ErrorCode` as its stable 2-byte `to_code`). It is **append-only
+    + crash-safe**: `load` reads every complete record and **stops at a partial/undecodable trailing
+    record** (a crash mid-append) without failing or corrupting the valid prefix; middle tampering is
+    *not* accepted silently — the reloaded entries still run through `verify_chain` (which breaks on any
+    altered link) and a signed `Checkpoint` over the head catches a whole-file rewrite. SQLite is **not**
+    used (avoids a `-sys` dep); the flat log suffices for the per-session journal. Fully unit-tested with
+    a tempfile: persist→reload→verify, torn-tail tolerance, and a same-length event swap caught by the
+    chain. Added `ErrorCode::to_code`/`from_code` (stable numeric, matching the wire numbering) to
+    `ras-protocol` for the compact round-trippable encoding.
+  - **Scope:** the pure journal + chain + signed checkpoint + the append-only `AuditLog` (in the
+    new-dep-light `ras-audit`: `sha2` (RustCrypto, MIT/Apache) + the `ras-identity`/`ras-protocol` seams),
+    plus the host-loop `AuditSink` wiring above. Deferred: forward-secure key evolution + Merkle-batched
+    checkpoints (`docs/06 §12`), and the last source points (consent grant/deny, file-push accept/reject)
+    as those subsystems reach the host loop.
   - **Verify:** chain links + verifies; append is deterministic + session-bound; content-tamper / reorder
     / middle-removal each break the chain at the right `seq`; a signed checkpoint round-trips and a
     rewritten journal (shorter "clean" history, tampered head, or an attacker-key signature) fails
