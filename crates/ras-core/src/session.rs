@@ -33,9 +33,9 @@ use crate::{
 };
 use ras_control::{ClipboardSink, LeaseManager, OsInputSink, LEASE_DEFAULT_TTL_MS};
 use ras_media::{
-    AudioCaptureBackend, AudioCodec, AudioConfig, AudioEncoderBackend, CaptureOptions, ColorSpace,
-    MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec, VideoEncoderBackend,
-    VideoTransportKind, WindowId,
+    AudioCaptureBackend, AudioCodec, AudioConfig, AudioEncoderBackend, CaptureOptions,
+    CapturedFrame, ColorSpace, MonitorId, ScreenCaptureBackend, StreamConfig, VideoCodec,
+    VideoEncoderBackend, VideoTransportKind, WindowId,
 };
 use ras_policy::file::{authorize_file_push, DropCatalogue, FilePushError, FilePushRequest};
 use ras_policy::{clipboard_push_allowed, CapabilitySet, ClipboardDirection, AUDIO_LISTEN};
@@ -973,21 +973,44 @@ fn media_pump<C, E>(
         // rebuild call. We resolve to a rebuild/stop flag inside the match and act after it.
         let mut rebuild = false;
         match capture.next_frame(sig.frame_interval) {
-            Ok(Some(frame)) => match encoder.encode(frame) {
-                Ok(Some(ef)) => {
-                    // Re-check stop between encode and send: an emergency stop set mid-pipeline must
-                    // not let this last frame escape to the controller (Invariant 4).
-                    if sig.stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    if sink.send_frame(ef) == ras_transport_iroh::SendOutcome::Sent {
-                        sig.frames_sent.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(frame)) => {
+                // Mid-stream resolution / monitor / DPI change: the captured frame no longer matches
+                // the encoder's configured size. Reconfigure the encoder to the new dimensions and
+                // force an IDR, so the receiver reconfigures its decoder **atomically with a decodable
+                // keyframe** (the new `StreamConfig` rides every `EncodedFrame`, ADR-060). Without this
+                // the encoder is fed mismatched frames — corrupt output or a stalled stream, i.e. a
+                // black screen on the controller after a monitor change (backlog X6 / no-black-screen).
+                let (fw, fh) = (frame.width(), frame.height());
+                let cfg = encoder.config();
+                if fw > 0 && fh > 0 && (fw != cfg.width || fh != cfg.height) {
+                    let new_cfg = StreamConfig {
+                        width: fw,
+                        height: fh,
+                        ..cfg
+                    };
+                    if encoder.configure(&new_cfg).is_ok() {
+                        // Guarantee the first frame at the new size is an IDR (belt-and-braces on top
+                        // of configure's reset), so no P-frame at new dimensions reaches the decoder.
+                        encoder.request_keyframe(KeyframeReason::ConfigChanged);
+                        applied_bitrate = new_cfg.target_bitrate_bps;
                     }
                 }
-                Ok(None) => {}
-                Err(e) if e.recoverable => {}
-                Err(_) => break,
-            },
+                match encoder.encode(frame) {
+                    Ok(Some(ef)) => {
+                        // Re-check stop between encode and send: an emergency stop set mid-pipeline must
+                        // not let this last frame escape to the controller (Invariant 4).
+                        if sig.stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if sink.send_frame(ef) == ras_transport_iroh::SendOutcome::Sent {
+                            sig.frames_sent.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) if e.recoverable => {}
+                    Err(_) => break,
+                }
+            }
             Ok(None) => {}
             // Recoverable capture error (SCK restart / DXGI ACCESS_LOST): rebuild after the borrow.
             Err(e) if e.recoverable => rebuild = true,

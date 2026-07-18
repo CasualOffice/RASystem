@@ -6,7 +6,7 @@
 //! [`CountingFrameSink`] is a content-free [`FrameSink`] that just tallies what it receives, for
 //! asserting end-to-end delivery and keyframe plumbing.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -417,6 +417,12 @@ struct CountingState {
     pushed: AtomicU64,
     keyframes: AtomicU64,
     last_frame_id: AtomicU64,
+    last_width: AtomicU32,
+    last_height: AtomicU32,
+    /// Set if a frame arrived whose config dimensions differ from the previous frame's but which was
+    /// **not** a keyframe — i.e. a resolution change reached the decoder without an accompanying IDR
+    /// (a black-screen / torn-frame bug). Must stay false.
+    resize_without_keyframe: AtomicBool,
 }
 
 impl CountingFrameSink {
@@ -445,6 +451,22 @@ impl CountingFrameSink {
     pub fn is_configured(&self) -> bool {
         self.inner.configured.load(Ordering::Relaxed)
     }
+    /// The config width of the most recently pushed frame.
+    #[must_use]
+    pub fn last_width(&self) -> u32 {
+        self.inner.last_width.load(Ordering::Relaxed)
+    }
+    /// The config height of the most recently pushed frame.
+    #[must_use]
+    pub fn last_height(&self) -> u32 {
+        self.inner.last_height.load(Ordering::Relaxed)
+    }
+    /// Whether any resolution change reached the decoder without an accompanying keyframe (must be
+    /// false — every dimension change must arrive on an IDR, or the decoder shows a black/torn frame).
+    #[must_use]
+    pub fn saw_resize_without_keyframe(&self) -> bool {
+        self.inner.resize_without_keyframe.load(Ordering::Relaxed)
+    }
 }
 
 impl FrameSink for CountingFrameSink {
@@ -456,6 +478,15 @@ impl FrameSink for CountingFrameSink {
         self.inner.pushed.fetch_add(1, Ordering::Relaxed);
         if frame.is_keyframe {
             self.inner.keyframes.fetch_add(1, Ordering::Relaxed);
+        }
+        // Track config dimensions and flag any dimension change that arrives on a non-keyframe.
+        let (w, h) = (frame.config.width, frame.config.height);
+        let pw = self.inner.last_width.swap(w, Ordering::Relaxed);
+        let ph = self.inner.last_height.swap(h, Ordering::Relaxed);
+        if (pw != 0 || ph != 0) && (pw != w || ph != h) && !frame.is_keyframe {
+            self.inner
+                .resize_without_keyframe
+                .store(true, Ordering::Relaxed);
         }
         self.inner
             .last_frame_id

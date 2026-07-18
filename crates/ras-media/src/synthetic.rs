@@ -8,6 +8,9 @@
 //! **without a real decoder**. It is deliberately *not* decodable H.264; a future `openh264` feature
 //! (via `libloading`, never x264/GPL) can swap in genuinely decodable frames.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::audio::{
@@ -48,8 +51,11 @@ impl CapturedFrame for SyntheticFrame {
 /// Deterministic capture source. Produces one frame per `next_frame`, timestamped on a synthetic
 /// monotonic clock derived from the frame counter and fps (no wall-clock — reproducible in CI).
 pub struct SyntheticCaptureBackend {
-    width: u32,
-    height: u32,
+    // Behind atomics + `Arc` so a test can change the captured resolution **mid-stream** (via
+    // [`SyntheticCaptureBackend::size_control`]) after the backend has been moved into the media pump
+    // thread — exercising the resolution/monitor-change path (backlog X6 / no-black-screen).
+    width: Arc<AtomicU32>,
+    height: Arc<AtomicU32>,
     fps: u32,
     counter: u64,
     started: bool,
@@ -60,19 +66,27 @@ impl SyntheticCaptureBackend {
     #[must_use]
     pub fn new(width: u32, height: u32) -> Self {
         Self {
-            width,
-            height,
+            width: Arc::new(AtomicU32::new(width)),
+            height: Arc::new(AtomicU32::new(height)),
             fps: 60,
             counter: 0,
             started: false,
         }
     }
 
+    /// A shared handle to change the captured resolution mid-stream (test/dev aid). Storing new
+    /// `(width, height)` values makes subsequent `next_frame`s (and `config()`) report the new size,
+    /// which drives the media pump's encoder-reconfigure-and-force-IDR path.
+    #[must_use]
+    pub fn size_control(&self) -> (Arc<AtomicU32>, Arc<AtomicU32>) {
+        (Arc::clone(&self.width), Arc::clone(&self.height))
+    }
+
     fn stream_config(&self) -> StreamConfig {
         StreamConfig {
             codec: VideoCodec::H264AnnexB,
-            width: self.width,
-            height: self.height,
+            width: self.width.load(Ordering::Relaxed),
+            height: self.height.load(Ordering::Relaxed),
             fps: self.fps,
             target_bitrate_bps: 6_000_000,
             color: ColorSpace::Bt709Limited,
@@ -103,8 +117,8 @@ impl ScreenCaptureBackend for SyntheticCaptureBackend {
         self.counter += 1;
         Ok(Some(SyntheticFrame {
             captured_at_us,
-            width: self.width,
-            height: self.height,
+            width: self.width.load(Ordering::Relaxed),
+            height: self.height.load(Ordering::Relaxed),
         }))
     }
 
@@ -143,14 +157,18 @@ impl ScreenCaptureBackend for SyntheticCaptureBackend {
 
     /// The active display reflects the backend's own frame size at 100% scale (id 0, primary).
     fn captured_display(&self) -> Option<MonitorDef> {
+        let (w, h) = (
+            self.width.load(Ordering::Relaxed),
+            self.height.load(Ordering::Relaxed),
+        );
         Some(MonitorDef {
             id: MonitorId(0),
             left: 0,
             top: 0,
-            logical_width: self.width,
-            logical_height: self.height,
-            pixel_width: self.width,
-            pixel_height: self.height,
+            logical_width: w,
+            logical_height: h,
+            pixel_width: w,
+            pixel_height: h,
             scale_percent: 100,
             primary: true,
         })

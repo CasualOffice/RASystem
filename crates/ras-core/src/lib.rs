@@ -565,6 +565,72 @@ mod e2e {
         assert_eq!(host.state(), SessionState::Terminated);
     }
 
+    /// A mid-stream resolution change (monitor/DPI/resolution) must reconfigure the encoder and reach
+    /// the controller **atomically with a fresh keyframe** — never a P-frame at the new dimensions,
+    /// which would decode to a black/torn frame (backlog X6 / the no-black-screen guarantee).
+    #[tokio::test]
+    async fn resolution_change_forces_a_keyframe_no_black_screen() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let capture = SyntheticCaptureBackend::new(1280, 720);
+        let (w_ctl, h_ctl) = capture.size_control(); // shared handle kept before the move
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            capture,
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+        let sink = CountingFrameSink::new();
+        controller
+            .attach_renderer(Arc::new(sink.clone()))
+            .await
+            .unwrap();
+
+        // Frames flow at the initial 1280×720.
+        assert!(
+            wait_until(
+                || sink.last_width() == 1280 && sink.last_height() == 720,
+                400
+            )
+            .await,
+            "expected initial frames at 1280x720, got {}x{}",
+            sink.last_width(),
+            sink.last_height()
+        );
+
+        // Change the captured resolution mid-stream (monitor swap / DPI change).
+        w_ctl.store(1920, Relaxed);
+        h_ctl.store(1080, Relaxed);
+
+        // The controller must now receive frames at the new 1920×1080…
+        assert!(
+            wait_until(
+                || sink.last_width() == 1920 && sink.last_height() == 1080,
+                600
+            )
+            .await,
+            "frames must follow the new resolution, got {}x{}",
+            sink.last_width(),
+            sink.last_height()
+        );
+        // …and no dimension change ever reached the decoder on a non-keyframe (no black screen).
+        assert!(
+            !sink.saw_resize_without_keyframe(),
+            "a resolution change must arrive atomically with an IDR"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     #[tokio::test]
     async fn controller_pointer_reaches_host_as_a_lifecycle_event() {
         let (host_tp, ctrl_tp) = loopback_pair();
