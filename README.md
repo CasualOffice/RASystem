@@ -41,7 +41,7 @@ verification on Linux/Windows, session reconnection, and signed distribution. We
 | Consent · always-visible indicator · emergency stop | Working |
 | Tamper-evident audit (hash-chained, host-signed) | Implemented |
 | Clipboard · file transfer · audio · chat · cursor · multi-monitor | Implemented at code level ([`docs/20`](docs/20_FEATURE_GAPS_AND_ROADMAP.md)) |
-| **Session reconnection** across a network blip / NAT rebind | **Not yet** — a known ship-blocker ([`docs/21` X1](docs/21_PRODUCTION_READINESS_BACKLOG.md)) |
+| **Session reconnection** across a network blip / NAT rebind | Implemented — controller re-dials, host re-serves, grant re-validated, video resumes on a keyframe (loopback-tested; iroh re-dial is the on-device step) |
 | Signed/notarized installers · activated auto-update | **Not yet** — alpha builds ship unsigned (ADR-072) |
 | Fraud-friction subsystem | Roadmap |
 
