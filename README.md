@@ -21,25 +21,33 @@ from the proven core.
 
 ---
 
-## Status — alpha (Phase 1 in progress)
+## Status — alpha, hardening toward production
 
-A two-machine application works today: one unified desktop app (ADR-062) that can **Share** this
-screen or **Connect** to another, peer-to-peer over real **iroh/QUIC**, with a connection-ticket
-flow, real local **Allow/Deny** consent (Invariant 1), an always-visible indicator, an emergency
-stop, and a remote "point here" cursor.
+The **security core and the full remote-access feature set are implemented at the code level**
+(CI-green; unit-, property-, fuzz-, and loopback-tested) — signed authorization, per-message
+capability enforcement, remote keyboard/mouse control on all three OSes, clipboard, file transfer,
+audio, chat, cursor, and multi-monitor. The current focus is **production maturity**: on-device
+verification on Linux/Windows, session reconnection, and signed distribution. We grade candidly on
+*production behavior*, not "compiles + loopback-green" — the honest gap list is the
+[production-readiness backlog](docs/21_PRODUCTION_READINESS_BACKLOG.md).
 
 | Capability | State |
 |---|---|
 | Connect / view another machine | macOS · Linux · Windows (decode-only, ships everywhere) |
-| Share this screen — macOS | Hardware path (ScreenCaptureKit + VideoToolbox), on-device verified |
-| Share this screen — Linux · Windows | Implemented (PipeWire / Windows.Graphics.Capture → OpenH264); CI compile-gated, on-device runtime verification pending |
-| Local Allow/Deny consent, indicator, stop | Working |
-| Remote visual pointer | Working (no keyboard/mouse injection yet) |
-| Signed grants · capability leases · audit | Roadmap (Phase 2) |
+| Share this screen — macOS | Hardware (ScreenCaptureKit + VideoToolbox) — **on-device verified** |
+| Share this screen — Linux · Windows | Implemented (PipeWire / Windows.Graphics.Capture → OpenH264); **on-device runtime verification pending** (Windows needs hardware the team lacks) |
+| Remote control — full keyboard + mouse | Implemented on all three backends (CGEvent / XTEST / SendInput), complete keymaps; **on-device verification pending** |
+| Signed grants · capability leases · per-message enforcement | Implemented — PASETO v4.public grants, host-authoritative capability gate (Inv 15) |
+| Consent · always-visible indicator · emergency stop | Working |
+| Tamper-evident audit (hash-chained, host-signed) | Implemented |
+| Clipboard · file transfer · audio · chat · cursor · multi-monitor | Implemented at code level ([`docs/20`](docs/20_FEATURE_GAPS_AND_ROADMAP.md)) |
+| **Session reconnection** across a network blip / NAT rebind | **Not yet** — a known ship-blocker ([`docs/21` X1](docs/21_PRODUCTION_READINESS_BACKLOG.md)) |
+| Signed/notarized installers · activated auto-update | **Not yet** — alpha builds ship unsigned (ADR-072) |
 | Fraud-friction subsystem | Roadmap |
 
-Live tracker: [`docs/17_ROADMAP_AND_MILESTONES.md`](docs/17_ROADMAP_AND_MILESTONES.md) · detailed
-engineering status: [`CLAUDE.md §3`](CLAUDE.md).
+Live tracker: [`docs/17_ROADMAP_AND_MILESTONES.md`](docs/17_ROADMAP_AND_MILESTONES.md) · honest
+production gap list: [`docs/21`](docs/21_PRODUCTION_READINESS_BACKLOG.md) · detailed engineering
+status: [`CLAUDE.md §3`](CLAUDE.md).
 
 ## Priorities
 
@@ -57,14 +65,16 @@ decision rule enforced throughout the design, not a slogan ([`CLAUDE.md §2`](CL
   handshake, with no pixels sent, until the local user clicks **Allow**; Deny or a timeout refuses
   fail-closed. A controller requests; it never self-authorizes. The shipping build does not even link
   a "skip consent" path.
-- **Host-issued authorization** *(roadmap)* — the host validates a signed access request and issues a
-  short-lived signed session grant; a future server replaces only the *issuer*, never the validator
-  or the wire protocol. Today's consent is real but coarse — no signed grants, leases, or
-  capabilities yet.
-- **Capability-based, per-message enforcement** *(roadmap)* — fine-grained permissions checked
-  host-side on every message, never trusting the controller's claimed scope.
+- **Host-issued authorization** — the host validates a signed access request and issues a short-lived,
+  endpoint-bound, signed **PASETO v4.public** session grant; a future server replaces only the
+  *issuer*, never the validator or the wire protocol. *(Implemented at code level; grant/consent flow
+  wiring into the app UI is in progress.)*
+- **Capability-based, per-message enforcement** — fine-grained permissions checked host-side on every
+  message, never trusting the controller's claimed scope (the RustDesk-CVE-2026-57850 class). *(The
+  host-authoritative gate is implemented and unit-tested.)*
 - **Virtual multi-cursor collaboration** — one real OS-input controller at a time; everyone else is a
-  rendered virtual pointer. The alpha is view-only plus a visual remote pointer.
+  rendered virtual pointer. Full remote keyboard/mouse control is implemented on all three OSes
+  (on-device verification pending); collaboration UI is on the roadmap.
 - **On-device fraud and harm-prevention** *(roadmap)* — a privacy-safe, on-device subsystem designed
   to add friction and containment against remote-access scams. It is honest about its limits: it aims
   to **deter** a coached victim and **contain** a remote attacker — it does not claim to "prevent

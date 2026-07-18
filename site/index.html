@@ -46,8 +46,8 @@
             { "@type": "Question", "name": "What is Casual RAS?", "acceptedAnswer": { "@type": "Answer", "text": "Casual RAS is an embeddable remote-access engine. Software vendors embed it into their own apps to add consent-based screen viewing and collaborative remote pointers under their own brand, workflow and authorization model, without sending users to a separate remote-desktop product. Transport is peer-to-peer over Iroh/QUIC." } },
             { "@type": "Question", "name": "Does it need a server?", "acceptedAnswer": { "@type": "Answer", "text": "No application backend is required for the MVP. Direct peer-to-peer connections are preferred; when direct connectivity is unavailable, an encrypted relay fallback carries the traffic. There is no central application server in the middle." } },
             { "@type": "Question", "name": "How does consent work?", "acceptedAnswer": { "@type": "Answer", "text": "The local user is the final owner of the machine. A connecting viewer is held in the handshake — no pixels are sent — until the local user clicks Allow. Deny, or 90 seconds of silence, refuses the session fail-closed. A viewer requests access; it never self-authorizes." } },
-            { "@type": "Question", "name": "Can a viewer control my keyboard and mouse?", "acceptedAnswer": { "@type": "Answer", "text": "Not in the current alpha. It is view-only: a viewer can see the shared screen and point at it with a visual remote cursor, but no clicks or keystrokes are injected into the shared machine's operating system." } },
-            { "@type": "Question", "name": "Which platforms are supported?", "acceptedAnswer": { "@type": "Answer", "text": "Connecting to view another machine works on macOS, Linux and Windows. Sharing your own screen is macOS-only in the alpha; Linux and Windows sharing are planned. It ships as one application that does both." } },
+            { "@type": "Question", "name": "Can a viewer control my keyboard and mouse?", "acceptedAnswer": { "@type": "Answer", "text": "Yes — full remote keyboard and mouse control is implemented on macOS, Linux and Windows, always behind explicit local consent and a per-message capability check the host enforces (the controller never self-authorizes). It is in on-device verification. The independently verified path today is view-only plus a visual remote pointer." } },
+            { "@type": "Question", "name": "Which platforms are supported?", "acceptedAnswer": { "@type": "Answer", "text": "Connecting to view another machine works on macOS, Linux and Windows. Sharing your own screen is verified on macOS; Linux and Windows sharing are implemented (PipeWire and Windows.Graphics.Capture) and in on-device verification. It ships as one application that does both." } },
             { "@type": "Question", "name": "What license is it under?", "acceptedAnswer": { "@type": "Answer", "text": "Apache-2.0, including a patent grant, so it is safe to embed in proprietary applications. Copyleft (GPL/LGPL/AGPL/SSPL) dependencies are rejected and blocked at build time." } }
           ] }
         ]
@@ -258,11 +258,11 @@
                 <tr><td>macOS screen sharing</td><td><span class="pill now"><svg width="14" height="14" aria-hidden="true"><use href="#i-check"/></svg> Alpha</span></td></tr>
                 <tr><td>macOS / Linux / Windows viewing</td><td><span class="pill now"><svg width="14" height="14" aria-hidden="true"><use href="#i-check"/></svg> Alpha</span></td></tr>
                 <tr><td>Remote visual pointer</td><td><span class="pill now"><svg width="14" height="14" aria-hidden="true"><use href="#i-check"/></svg> Alpha</span></td></tr>
-                <tr><td>Keyboard &amp; mouse control</td><td><span class="pill no"><svg width="14" height="14" aria-hidden="true"><use href="#i-x"/></svg> Not available</span></td></tr>
-                <tr><td>Linux &amp; Windows sharing</td><td><span class="pill next"><svg width="14" height="14" aria-hidden="true"><use href="#i-clock"/></svg> Planned</span></td></tr>
-                <tr><td>Signed grants &amp; capability leases</td><td><span class="pill next"><svg width="14" height="14" aria-hidden="true"><use href="#i-clock"/></svg> Planned</span></td></tr>
+                <tr><td>Keyboard &amp; mouse control</td><td><span class="pill next"><svg width="14" height="14" aria-hidden="true"><use href="#i-clock"/></svg> Implemented — verifying</span></td></tr>
+                <tr><td>Linux &amp; Windows sharing</td><td><span class="pill next"><svg width="14" height="14" aria-hidden="true"><use href="#i-clock"/></svg> Implemented — verifying</span></td></tr>
+                <tr><td>Signed grants &amp; capability leases</td><td><span class="pill now"><svg width="14" height="14" aria-hidden="true"><use href="#i-check"/></svg> Implemented</span></td></tr>
+                <tr><td>Tamper-evident audit</td><td><span class="pill now"><svg width="14" height="14" aria-hidden="true"><use href="#i-check"/></svg> Implemented</span></td></tr>
                 <tr><td>C ABI &amp; Node.js SDK</td><td><span class="pill next"><svg width="14" height="14" aria-hidden="true"><use href="#i-clock"/></svg> Planned</span></td></tr>
-                <tr><td>Tamper-evident audit</td><td><span class="pill next"><svg width="14" height="14" aria-hidden="true"><use href="#i-clock"/></svg> Planned</span></td></tr>
               </tbody>
             </table>
           </div>
@@ -344,7 +344,7 @@ cargo run</code></pre>
                 <li><strong>Consent is honest and unspoofable.</strong> Active viewing is always visible; branding may not hide it.</li>
                 <li><strong>Transport encryption is necessary, not sufficient.</strong> Authorization is enforced by the host.</li>
                 <li><strong>Secrets never touch logs</strong> — keys, tokens, clipboard, typed text or screen pixels.</li>
-                <li><strong>Capability scope is enforced host-side, per message</strong> — never trust a client’s claimed scope (roadmap).</li>
+                <li><strong>Capability scope is enforced host-side, per message</strong> — never trust a client’s claimed scope (implemented).</li>
               </ul>
             </div>
           </details>
@@ -358,11 +358,11 @@ cargo run</code></pre>
           </details>
           <details>
             <summary>Can a viewer control my keyboard and mouse?</summary>
-            <div>Not in the alpha. It is view-only: the viewer sees the shared screen and points at it with a visual cursor. No clicks or keystrokes are injected into the shared machine’s OS.</div>
+            <div>Yes — full keyboard and mouse control is implemented on all three platforms, always behind explicit local consent and a per-message capability check the host enforces (the controller never self-authorizes). It is in on-device verification; the independently verified experience today is view-only plus a visual remote pointer.</div>
           </details>
           <details>
             <summary>Which platforms can share vs. view?</summary>
-            <div>Viewing works on macOS, Linux and Windows. Sharing is macOS-first in the alpha; Linux (PipeWire) and Windows (Desktop Duplication) sharing backends are next.</div>
+            <div>Viewing works on macOS, Linux and Windows. Sharing is verified on macOS; Linux (PipeWire) and Windows (Windows.Graphics.Capture) sharing backends are implemented and in on-device verification.</div>
           </details>
           <details>
             <summary>Is there an SDK yet?</summary>
