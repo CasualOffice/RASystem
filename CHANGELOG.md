@@ -72,7 +72,22 @@ capabilities implemented at the code level; on-device runtime verification statu
 - **Never-panic fuzz on every untrusted-input decoder** — control framing, the video/audio wire
   headers, PASETO grants + access requests, the audit log file, and pasted connection tickets.
 
+### Fixed
+
+- **Decoder not reconfigured on a mid-stream resolution / monitor / DPI change** — the host reconfigured
+  its encoder and forced a keyframe, but the controller kept its decoder at the original dimensions, so a
+  live monitor/resolution change rendered torn/stretched (or error-looped to black). The controller now
+  reconfigures the decoder atomically with the keyframe that carries the new dimensions. Found by an
+  adversarial multi-agent review of the media/transport path; also closed the test gap that let it ship.
+
 ### Known limitations
+
+- **Video smoothness under packet loss** — the per-frame video streams are drained serially on the
+  receiver, so QUIC's transport-level head-of-line-freedom between streams isn't carried through at the
+  app layer: under loss, a stalled frame delays already-arrived frames behind it (bursty delivery). This
+  is a smoothness cost only — control and audio ride separate planes, so the stop button is unaffected —
+  and the concurrent-drain fix is deferred to on-device media tuning (it needs real lossy-network
+  validation to avoid premature keyframe requests under ordinary jitter).
 
 - **Unsigned by the OS** (no code-signing / notarization yet) — Gatekeeper/SmartScreen warn (ADR-072).
 - On-device runtime verification is pending on Linux and Windows (Windows needs hardware the team
