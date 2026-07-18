@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 772" width="1200" height="772" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="Casual RAS feature map: Media, Remote control, Data channels, Security, and Transport capabilities, with status legend.">
+  <defs>
+    <style>
+      .card { fill:#14141c; stroke:#26262f; stroke-width:1.5; }
+      .title { font-size:20px; font-weight:700; fill:#ececef; }
+      .item { font-size:14px; fill:#c7c8d4; }
+      .muted { font-size:14px; fill:#8a8a99; }
+      .kicker { font-size:14px; font-weight:600; letter-spacing:.14em; fill:#7be0cf; }
+      .h1 { font-size:30px; font-weight:800; fill:#ececef; }
+      .sub { font-size:15px; fill:#b6b6c4; }
+      .leg { font-size:13.5px; fill:#b6b6c4; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="772" fill="#0b0b0e"/>
+
+  <!-- Header -->
+  <text x="40" y="46" class="kicker">CASUAL RAS &#183; WHAT'S INSIDE</text>
+  <text x="40" y="82" class="h1">An embeddable remote-access engine</text>
+  <text x="40" y="108" class="sub">Peer-to-peer over iroh/QUIC &#183; host-issued authorization &#183; Security &#8594; Latency &#8594; UX</text>
+
+  <!-- ===== Row 1 ===== -->
+  <!-- Media -->
+  <g transform="translate(40,130)">
+    <rect class="card" width="354" height="296" rx="14"/>
+    <rect x="22" y="26" width="4" height="18" rx="2" fill="#7be0cf"/>
+    <text x="36" y="41" class="title">Media</text>
+    <g transform="translate(24,78)">
+      <circle cx="4" cy="-4" r="3.5" fill="#57d98a"/><text x="18" y="0" class="item">Screen capture &#8212; macOS HW &#183; Linux/Win SW</text>
+      <circle cx="4" cy="36" r="3.5" fill="#7be0cf"/><text x="18" y="40" class="item">H.264 &#8594; WebCodecs decode &#8594; canvas</text>
+      <circle cx="4" cy="76" r="3.5" fill="#7be0cf"/><text x="18" y="80" class="item">Output audio &#8212; Opus over QUIC datagrams</text>
+      <circle cx="4" cy="116" r="3.5" fill="#7be0cf"/><text x="18" y="120" class="item">Cursor shapes &#183; multi-monitor &#183; HiDPI</text>
+      <circle cx="4" cy="156" r="3.5" fill="#7be0cf"/><text x="18" y="160" class="item">Latency-first adaptive bitrate</text>
+    </g>
+  </g>
+
+  <!-- Remote control -->
+  <g transform="translate(423,130)">
+    <rect class="card" width="354" height="296" rx="14"/>
+    <rect x="22" y="26" width="4" height="18" rx="2" fill="#8b8cf6"/>
+    <text x="36" y="41" class="title">Remote control</text>
+    <g transform="translate(24,78)">
+      <circle cx="4" cy="-4" r="3.5" fill="#57d98a"/><text x="18" y="0" class="item">Keyboard + mouse &#8212; mac &#183; Linux &#183; Windows</text>
+      <circle cx="4" cy="36" r="3.5" fill="#7be0cf"/><text x="18" y="40" class="item">Control leases &#183; one OS-input controller</text>
+      <circle cx="4" cy="76" r="3.5" fill="#7be0cf"/><text x="18" y="80" class="item">Emergency stop overrides everything</text>
+      <circle cx="4" cy="116" r="3.5" fill="#7be0cf"/><text x="18" y="120" class="item">Relative pointer &#183; Unicode text &#183; lock sync</text>
+      <circle cx="4" cy="156" r="3.5" fill="#7be0cf"/><text x="18" y="160" class="item">Per-message capability gate (host-side)</text>
+    </g>
+  </g>
+
+  <!-- Data channels -->
+  <g transform="translate(806,130)">
+    <rect class="card" width="354" height="296" rx="14"/>
+    <rect x="22" y="26" width="4" height="18" rx="2" fill="#7be0cf"/>
+    <text x="36" y="41" class="title">Data channels</text>
+    <g transform="translate(24,78)">
+      <circle cx="4" cy="-4" r="3.5" fill="#7be0cf"/><text x="18" y="0" class="item">Clipboard &#8212; set, never auto-paste</text>
+      <circle cx="4" cy="36" r="3.5" fill="#7be0cf"/><text x="18" y="40" class="item">File transfer &#8212; host-signed catalogue</text>
+      <circle cx="4" cy="76" r="3.5" fill="#7be0cf"/><text x="18" y="80" class="item">Safe writes &#8212; O_NOFOLLOW / CREATE_NEW</text>
+      <circle cx="4" cy="116" r="3.5" fill="#7be0cf"/><text x="18" y="120" class="item">In-session chat</text>
+      <circle cx="4" cy="156" r="3.5" fill="#7be0cf"/><text x="18" y="160" class="item">Secrets redacted at every log boundary</text>
+    </g>
+  </g>
+
+  <!-- ===== Row 2 ===== -->
+  <!-- Security -->
+  <g transform="translate(40,450)">
+    <rect class="card" width="354" height="296" rx="14"/>
+    <rect x="22" y="26" width="4" height="18" rx="2" fill="#8b8cf6"/>
+    <text x="36" y="41" class="title">Security</text>
+    <g transform="translate(24,78)">
+      <circle cx="4" cy="-4" r="3.5" fill="#7be0cf"/><text x="18" y="0" class="item">PASETO v4.public signed grants</text>
+      <circle cx="4" cy="36" r="3.5" fill="#7be0cf"/><text x="18" y="40" class="item">Host-issued, short-lived, endpoint-bound</text>
+      <circle cx="4" cy="76" r="3.5" fill="#7be0cf"/><text x="18" y="80" class="item">Local Allow/Deny consent (fail-closed)</text>
+      <circle cx="4" cy="116" r="3.5" fill="#7be0cf"/><text x="18" y="120" class="item">Hash-chained, host-signed audit</text>
+      <circle cx="4" cy="156" r="3.5" fill="#7be0cf"/><text x="18" y="160" class="item">Paired-controller registry &#183; key tiers</text>
+    </g>
+  </g>
+
+  <!-- Transport -->
+  <g transform="translate(423,450)">
+    <rect class="card" width="354" height="296" rx="14"/>
+    <rect x="22" y="26" width="4" height="18" rx="2" fill="#7be0cf"/>
+    <text x="36" y="41" class="title">Transport</text>
+    <g transform="translate(24,78)">
+      <circle cx="4" cy="-4" r="3.5" fill="#7be0cf"/><text x="18" y="0" class="item">iroh / QUIC &#8212; encrypted P2P</text>
+      <circle cx="4" cy="36" r="3.5" fill="#7be0cf"/><text x="18" y="40" class="item">Separate control / video / audio planes</text>
+      <circle cx="4" cy="76" r="3.5" fill="#7be0cf"/><text x="18" y="80" class="item">NAT traversal + encrypted relay fallback</text>
+      <circle cx="4" cy="116" r="3.5" fill="#7be0cf"/><text x="18" y="120" class="item">Session reconnection (adversarially hardened)</text>
+      <circle cx="4" cy="156" r="3.5" fill="#7be0cf"/><text x="18" y="160" class="item">Connection tickets (CASUALRAS1:&#8230;)</text>
+    </g>
+  </g>
+
+  <!-- Legend / status -->
+  <g transform="translate(806,450)">
+    <rect class="card" width="354" height="296" rx="14" fill="#101017"/>
+    <rect x="22" y="26" width="4" height="18" rx="2" fill="#57d98a"/>
+    <text x="36" y="41" class="title">Status</text>
+    <g transform="translate(24,82)">
+      <circle cx="4" cy="-4" r="5" fill="#57d98a"/><text x="20" y="0" class="leg">macOS on-device verified</text>
+      <circle cx="4" cy="34" r="5" fill="#7be0cf"/><text x="20" y="38" class="leg">Implemented (code &#183; unit/fuzz/loopback-green)</text>
+      <circle cx="4" cy="68" r="5" fill="#8a8a99"/><text x="20" y="72" class="muted">Linux/Windows on-device run pending</text>
+    </g>
+    <line x1="24" y1="182" x2="330" y2="182" stroke="#26262f" stroke-width="1"/>
+    <text x="24" y="214" class="leg">Six security-critical surfaces have passed</text>
+    <text x="24" y="236" class="leg">independent adversarial multi-agent review.</text>
+    <text x="24" y="270" style="font-size:13px; fill:#7be0cf; font-weight:600;">Apache-2.0 &#183; no GPL/AGPL in the graph</text>
+  </g>
+</svg>

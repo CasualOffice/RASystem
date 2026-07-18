@@ -19,6 +19,8 @@ from the proven core.
 
 **Website:** https://ras.casualoffice.org · **Downloads:** [GitHub Releases](https://github.com/CasualOffice/RASystem/releases)
 
+![Casual RAS feature map — Media (screen capture, H.264/WebCodecs, Opus audio, cursor, multi-monitor, adaptive bitrate); Remote control (keyboard + mouse on macOS/Linux/Windows, control leases, emergency stop, per-message capability gate); Data channels (clipboard, file transfer, chat); Security (PASETO grants, local consent, hash-chained audit, paired-controller registry); Transport (iroh/QUIC, separate planes, NAT traversal, hardened session reconnection).](site/assets/feature-map.svg)
+
 ---
 
 ## Status — alpha, hardening toward production
