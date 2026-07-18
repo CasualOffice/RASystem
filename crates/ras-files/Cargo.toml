@@ -8,13 +8,31 @@ authors.workspace = true
 publish = false
 
 # Safe file-write backend for the signed-catalogue file-transfer data path (ADR-090). Opens the
-# host-resolved destination with O_NOFOLLOW | O_CREAT | O_EXCL — the symlink-follow (TOCTOU) defense
-# (docs/20 §3.3). Pure `std` + `libc` (for the O_NOFOLLOW constant); no dependency on the heavy
-# `ras-core` — the app wraps `SafeFileWriter` in a `ras_core::FileWriteSink`. Unix-only for now (empty
-# on Windows, which needs a CreateFile + reparse-point check — a follow-up); `unsafe`-free.
+# host-resolved destination refusing a symlink/existing entry — the symlink-follow (TOCTOU) defense
+# (docs/20 §3.3): Unix O_NOFOLLOW|O_CREAT|O_EXCL, Windows CreateFileW+CREATE_NEW. No dependency on the
+# heavy `ras-core` — the app wraps `SafeFileWriter` in a `ras_core::FileWriteSink`. `unsafe` confined to
+# the Windows CreateFile FFI path (the Unix path is safe std + libc).
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[lints]
-workspace = true
+# Windows write backend over CreateFileW (CREATE_NEW = the atomic O_EXCL analogue: refuses any existing
+# entry, including a symlink/junction). Unused on other targets.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_IO",
+] }
+
+# The Unix backend is `unsafe`-free (std + libc); `unsafe` is confined to the Windows CreateFile FFI
+# path (CONTRIBUTING §5), like the input FFI crates — so the crate relaxes the workspace `unsafe_code`
+# deny (it cannot be per-module). Re-declares the workspace lint set.
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

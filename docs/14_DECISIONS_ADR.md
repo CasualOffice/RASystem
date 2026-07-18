@@ -1114,7 +1114,12 @@
     free, and — unusually for an OS backend — **genuinely unit-tested off-device** with real tempfiles
     (write+read-back, existing-file-refused, and a **real symlink refused with the target left
     untouched**). `O_NOFOLLOW` guards only the final component, so the sandbox dir must be host-owned
-    (documented). Windows (a `CreateFile` + reparse-point check) compiles to an empty lib for now.
+    (documented). The **Windows backend landed too** (`CreateFileW` + `CREATE_NEW` — the atomic `O_EXCL`
+    analogue: refuses any existing entry incl. a symlink/junction, no sharing), behind the same
+    `SafeFileWriter` type; `unsafe` is confined to that FFI path (the crate relaxes `unsafe_code` like the
+    input backends), the raw `HANDLE` is stored as an `isize` to stay `Send + Sync` (a compile-time
+    assertion enforces it), and it is **cross-compile + clippy-clean for `x86_64-pc-windows-msvc`** (the
+    live run needs Windows hardware, as everywhere).
   - **Verify:** wire round-trip + oversize-chunk-refused + fuzz (ras-protocol); a `ras-core` loopback test
     with a recording `FileWriteSink` — a full offer→accept→chunks→complete lands the **bytes intact, in
     order**, at the resolved path with `finish` called; and an **over-run** (chunk larger than the offered

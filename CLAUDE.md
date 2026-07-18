@@ -247,8 +247,11 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   0600) — a symlink dest refused (`O_NOFOLLOW`), an existing entry refused (`O_EXCL`), abort removes the
   partial; pure `std`+`libc` (no ras-core dep — the app wraps it), `unsafe`-free, and **genuinely
   unit-tested off-device** with real tempfiles (write+read-back, existing-refused, a real symlink refused
-  with the target untouched). Only follow-ups: the Windows `CreateFile`+reparse-point backend + the
-  confirmation UI.
+  with the target untouched). The **Windows backend landed too** (`CreateFileW`+`CREATE_NEW` — atomic
+  `O_EXCL`, refuses any existing entry incl. a symlink/junction; `unsafe` confined to that FFI path, raw
+  `HANDLE` stored as `isize` to stay `Send+Sync` — a compile-time assertion enforces it;
+  cross-compile/clippy-clean for windows-msvc, needs Windows hardware to run). **File transfer is now
+  complete on all three platforms at the code level.** Only follow-up: the confirmation UI.
 - **Audit journal — Inv 10 implemented (ADR-088).** `ras-audit` (was a stub) is now a per-session
   **SHA-256 hash chain** of **content-free** `AuditEvent`s (enum tags + counters only — never a pixel,
   keystroke, clipboard byte, typed text, path, or secret; a `content` field is absent by construction,

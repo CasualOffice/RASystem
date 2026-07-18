@@ -8,9 +8,11 @@
 //! - an **existing** entry is refused (`O_EXCL`) — a push never overwrites/clobbers an existing file.
 //!
 //! It is deliberately **not** coupled to the heavy `ras-core` crate: the app wraps this in a
-//! `ras_core::FileWriteSink` (mapping `io::Error` → the core error). One transfer at a time. Unix-only
-//! for now — Windows needs a `CreateFile` + reparse-point check and compiles to an empty lib here, so
-//! `cargo build --workspace` stays green on Windows CI. `unsafe`-free (uses `std::os::unix` + `libc`).
+//! `ras_core::FileWriteSink` (mapping `io::Error` → the core error). One transfer at a time. Two OS
+//! implementations behind the one [`SafeFileWriter`] type: **Unix** (`O_NOFOLLOW | O_CREAT | O_EXCL`,
+//! `unsafe`-free std + `libc`) and **Windows** (`CreateFileW` with `CREATE_NEW` — the atomic `O_EXCL`
+//! analogue, refusing any existing entry incl. a symlink/junction). `unsafe` is confined to the Windows
+//! `CreateFile` FFI path (CONTRIBUTING §5), like the input backends; the Unix path is safe.
 //!
 //! **Caveat (surfaced honestly):** `O_NOFOLLOW` protects only the **final** path component. The sandbox
 //! *directory* must be host-owned and not attacker-writable; a fully hardened impl would resolve each
@@ -105,6 +107,153 @@ mod unix {
 
 #[cfg(unix)]
 pub use unix::SafeFileWriter;
+
+#[cfg(windows)]
+mod windows_impl {
+    use std::io;
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, DeleteFileW, FlushFileBuffers, WriteFile, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_NONE,
+    };
+
+    // The raw `HANDLE` is a pointer (`!Send`), so store it as an `isize` (which is `Send + Sync`) and
+    // rebuild the `HANDLE` at each call — this keeps `SafeFileWriter: Send + Sync` for the sink seam.
+    struct Open {
+        handle: isize,
+        dest_wide: Vec<u16>,
+    }
+
+    /// Windows [`SafeFileWriter`]: `CreateFileW` + `CREATE_NEW` (never clobbers/follows an existing entry)
+    /// with no sharing. Same lifecycle as the Unix impl.
+    #[derive(Default)]
+    pub struct SafeFileWriter {
+        state: Mutex<Option<Open>>,
+    }
+
+    fn wide(p: &Path) -> Vec<u16> {
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    fn win_err(e: windows::core::Error) -> io::Error {
+        io::Error::other(e.message())
+    }
+
+    impl SafeFileWriter {
+        /// A fresh writer with no open transfer.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Open `dest` for a new transfer. `CREATE_NEW` fails if any entry exists at the path (incl. a
+        /// symlink/junction) — the atomic `O_EXCL` + no-clobber guarantee.
+        ///
+        /// # Errors
+        /// The destination exists (incl. a link) or any other `CreateFileW` failure.
+        pub fn open(&self, dest: &Path, _size: u64) -> io::Result<()> {
+            let dest_wide = wide(dest);
+            // SAFETY: `dest_wide` is a valid NUL-terminated wide string kept alive in `Open`.
+            let handle = unsafe {
+                CreateFileW(
+                    PCWSTR(dest_wide.as_ptr()),
+                    GENERIC_WRITE.0,
+                    FILE_SHARE_NONE,
+                    None,
+                    CREATE_NEW,
+                    FILE_ATTRIBUTE_NORMAL,
+                    None,
+                )
+            }
+            .map_err(win_err)?;
+            *self.state.lock().unwrap_or_else(|e| e.into_inner()) = Some(Open {
+                handle: handle.0 as isize,
+                dest_wide,
+            });
+            Ok(())
+        }
+
+        /// Append one chunk to the open transfer.
+        ///
+        /// # Errors
+        /// No transfer is open, or the write fails / is short.
+        pub fn write(&self, data: &[u8]) -> io::Result<()> {
+            let g = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(o) = g.as_ref() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "no open transfer",
+                ));
+            };
+            let mut written: u32 = 0;
+            // SAFETY: valid handle from `open`; `data`/`written` are valid for the call.
+            unsafe {
+                WriteFile(
+                    HANDLE(o.handle as *mut core::ffi::c_void),
+                    Some(data),
+                    Some(&mut written),
+                    None,
+                )
+            }
+            .map_err(win_err)?;
+            if written as usize != data.len() {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "short write"));
+            }
+            Ok(())
+        }
+
+        /// Finalize the completed file (`FlushFileBuffers` + close).
+        ///
+        /// # Errors
+        /// No transfer is open, or the flush fails.
+        pub fn finish(&self) -> io::Result<()> {
+            let o = self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no open transfer"))?;
+            let handle = HANDLE(o.handle as *mut core::ffi::c_void);
+            // SAFETY: valid handle from `open`, closed exactly once here.
+            let flushed = unsafe { FlushFileBuffers(handle) };
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            flushed.map_err(win_err)
+        }
+
+        /// Abort the transfer and delete the partial file. Idempotent.
+        pub fn abort(&self) {
+            if let Some(o) = self.state.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let handle = HANDLE(o.handle as *mut core::ffi::c_void);
+                // SAFETY: valid handle from `open`, closed exactly once.
+                unsafe {
+                    let _ = CloseHandle(handle);
+                    let _ = DeleteFileW(PCWSTR(o.dest_wide.as_ptr()));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+pub use windows_impl::SafeFileWriter;
+
+// Compile-time guarantee that the sink is `Send + Sync` on every platform (needed for the
+// `Arc<dyn ras_core::FileWriteSink>` seam) — catches a `!Send` raw handle at build time.
+#[cfg(any(unix, windows))]
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<SafeFileWriter>();
+};
 
 #[cfg(all(test, unix))]
 mod tests {
