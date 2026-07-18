@@ -207,6 +207,14 @@ const controlBtn = document.getElementById("control");
 const macMod = document.getElementById("macmod");
 const macModCb = document.getElementById("macmod-cb");
 const banner = document.getElementById("banner");
+const reconnectBanner = document.getElementById("reconnect-banner");
+
+// Reconnection state from the Rust lifecycle drain (task #22 / ADR-091): show a "reconnecting…" banner
+// while the controller re-dials a dropped transport; hide it once resumed (or the session ends). The
+// video itself keeps its last frame until fresh frames + an IDR arrive on resume (no black screen).
+listen("conn-status", (e) => {
+  reconnectBanner.hidden = e.payload !== "reconnecting";
+});
 
 // Cmd↔Ctrl primary-modifier remap (ADR-075). Explicit, user-visible, default OFF. When on, the
 // operator's ⌘ is transmitted as Ctrl on the remote (and Ctrl as ⌘) — scoped to ONLY the primary
@@ -237,6 +245,7 @@ function resetState() {
 function setLive(isLive) {
   active = isLive;
   banner.hidden = !isLive;
+  if (!isLive) reconnectBanner.hidden = true; // clear any reconnecting banner when the session ends
   connectBtn.disabled = isLive;
   ticketInput.disabled = isLive;
   stopBtn.disabled = !isLive;

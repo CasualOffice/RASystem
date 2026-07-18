@@ -49,10 +49,34 @@ struct AppState {
 struct ConnectedSession {
     _endpoint: Arc<Endpoint>,
     controller: Arc<ControllerSession>,
-    _events: LifecycleStream,
     /// Monotonic per-session input sequence (Phase 3): the host rejects any `seq ≤ last_seen`, so this
     /// must strictly increase across every `Input` this viewer sends under its lease.
     input_seq: std::sync::atomic::AtomicU64,
+}
+
+/// Drain the viewer's `ras-core` lifecycle stream and surface reconnection state to the UI (task #22).
+/// The controller re-dials on transport loss (ADR-091); the viewer needs to see it. Emits a **string**
+/// `conn-status` (mirrors the host's `share-status`): `reconnecting` on `Suspended`, `connected` on
+/// `Resumed`, `ended` on teardown. The task ends when the stream closes (session dropped on disconnect).
+async fn drain_viewer_lifecycle(mut events: LifecycleStream, app: tauri::AppHandle) {
+    use ras_core::LifecycleEvent;
+    while let Some(ev) = events.recv().await {
+        match ev {
+            LifecycleEvent::Suspended { .. } => {
+                let _ = app.emit("conn-status", "reconnecting");
+            }
+            LifecycleEvent::Resumed => {
+                let _ = app.emit("conn-status", "connected");
+            }
+            LifecycleEvent::SessionEnded { .. }
+            | LifecycleEvent::Disconnected { .. }
+            | LifecycleEvent::Revoked { .. } => {
+                let _ = app.emit("conn-status", "ended");
+                break;
+            }
+            _ => {}
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -117,6 +141,7 @@ impl FrameSink for ChannelFrameSink {
 /// validated the grant against this endpoint.
 #[tauri::command]
 async fn connect_to_host(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     ticket: String,
     on_frame: Channel<InvokeResponseBody>,
@@ -200,10 +225,15 @@ async fn connect_to_host(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Drain the lifecycle stream so reconnection (Suspended/Resumed) surfaces in the viewer UI (#22)
+    // instead of being parked. The task ends when the stream closes (the session is dropped below on a
+    // later disconnect). Emit an initial "connected" so the UI clears any stale banner.
+    let _ = app.emit("conn-status", "connected");
+    tauri::async_runtime::spawn(drain_viewer_lifecycle(events, app));
+
     *lock(&state.session) = Some(ConnectedSession {
         _endpoint: endpoint,
         controller,
-        _events: events,
         input_seq: std::sync::atomic::AtomicU64::new(0),
     });
     Ok(())
