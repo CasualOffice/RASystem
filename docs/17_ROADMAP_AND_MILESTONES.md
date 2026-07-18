@@ -47,6 +47,31 @@ detail lives in `docs/11`; macOS detail in `docs/18` (host deep-dive). All non-h
 **Critical path:** M0 → M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8. Media (`MED`) and transport (`NET`)
 can proceed in parallel with security (`SEC`) after M0; the controller UI (`UI`) tracks M2+.
 
+> **Note on ordering.** A large slice of the M6/M8 feature set (clipboard, file transfer, output audio,
+> chat, cursor channel, multi-monitor, session reconnection, signed-updater wiring, cross-platform
+> capture + input) landed **early**, alongside M2–M4, because the target is a production-grade product
+> rather than a minimal MVP. So several `☐` items in Phases 5–6 below are already implemented at the code
+> level; the genuinely-remaining M5–M9 work is the process-isolation split, the fraud subsystem, the SDK,
+> the hardware-encoder matrix, and OS code-signing + third-party assessment.
+
+### Security-hardening status (cross-cutting)
+
+The pure Rust security/correctness layer has been put through a **systematic adversarial multi-agent
+review** — independent lenses per surface, every finding verified-or-refuted before it counts. **Seven
+surfaces reviewed**, surfacing and fixing **11 real defects** (1 P0, 6 P1), each with a regression test:
+
+- **Reconnection (ADR-091):** ☑ hardened — fixed a P0 (an expired grant could resume) + a P1 (a silent
+  re-dialer could wedge the host); both reconnect ends are now window-bounded, grant always re-validated.
+- **Authorization core:** ☑ fixed a nonce replay window (nonce now remembered to the request's own expiry).
+- **Input / OS-injection + lease:** ☑ fixed three stuck-key hazards (emergency-stop race, lease expiry,
+  lease re-issue) — held keys are now flushed on every lease-death path.
+- **Media / transport:** ☑ fixed a decoder-not-reconfigured-on-resolution-change bug; documented the
+  serial-read HOL limitation honestly.
+- **File-transfer danger channel:** ☑ **clean** — the three RustDesk CVE-class defenses held.
+- **Audit journal + identity/tiers:** ☑ **clean** — tamper-evidence, signed-checkpoint authenticity,
+  content-freedom, and the Tier-0 software cap all verified.
+- **App integration layer (consent / indicator / secret hygiene / command surface):** ◐ under review.
+
 ---
 
 ## Phase 0 — Foundations & first light → **M0**
@@ -501,12 +526,19 @@ controller embeds in a sample web app and connects to a native host.
 **① Design gate:** multi-monitor selection + layout-version model; HW-encoder capability matrix;
 file-transfer + action-catalogue schemas; updater + rollback.
 
-**② Build — tasks**
-- ☐ `MED` Multi-monitor + selection; HW-encoder matrix (NVENC/QSV/AMF + no-HW fallback). ☐ `CORE`
-  Clipboard text; controlled file transfer (per-transfer approval, hashing, scan hook); signed action
-  catalogue. ☐ `NET` Reconnection hardening. ☐ `INF` Signed updater (rollback protection, staged);
-  **EV code-signing** (keys in HSM/TPM off build). ☐ `INF` SBOM + enterprise diagnostics. ☐ `QA`
-  Compatibility matrix (`docs/08 §5`), long-duration stability, security review, release-rollback.
+**② Build — tasks** *(several landed early, alongside M2–M4 — see the ordering note at the top)*
+- ◐ `MED` Multi-monitor enumeration + HiDPI model landed (ADR-081); **HW-encoder matrix**
+  (NVENC/QSV/AMF + no-HW fallback) still ☐ — Linux/Windows use the software OpenH264 path today.
+- ☑ `CORE` Clipboard text (both directions, set-never-paste, ADR-076/079); controlled file transfer
+  (signed catalogue, per-transfer consent, `O_NOFOLLOW`/`CREATE_NEW` write backend, ADR-086/089/090);
+  in-session chat; output audio (Opus). Signed **action** catalogue beyond file-push is still ☐.
+- ☑ `NET` Reconnection + hardening (ADR-091) — re-dial both ends, grant re-validated, window-bounded,
+  adversarially reviewed.
+- ◐ `INF` Signed **updater** wired (Tauri Ed25519, ADR-078) — inert until keys provisioned; **EV
+  code-signing** (OS-vouches-for-installer, keys in HSM/TPM off build) still ☐ — **funding-gated**
+  (ADR-072).
+- ☐ `INF` SBOM (CycloneDX) + enterprise diagnostics. ☐ `QA` Compatibility matrix (`docs/08 §5`),
+  long-duration stability, **third-party security assessment**, release-rollback.
 
 **③ Exit criteria:** go/no-go criteria in `docs/08 §8` met (no critical security issue, third-party
 security assessment, EV-signed installer, crash-free long sessions, direct+relay reliability, input
