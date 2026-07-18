@@ -91,10 +91,13 @@ mod linux {
     }
 
     /// An XTEST-backed [`OsInputSink`]. Holds one X11 connection; `None` means no reachable X server
-    /// (fail-closed — the host refuses the lease).
+    /// (fail-closed — the host refuses the lease). `xtest_available` records whether the server actually
+    /// advertises the XTEST extension — without it every `fake_input` would fail, so the lease must be
+    /// refused up front rather than granted and then silently no-op.
     #[derive(Debug)]
     pub struct X11InputSink {
         conn: Option<RustConnection>,
+        xtest_available: bool,
         root: Window,
         screen_w: u16,
         screen_h: u16,
@@ -117,8 +120,16 @@ mod linux {
                     let screen = &conn.setup().roots[screen_num];
                     let (root, w, h) =
                         (screen.root, screen.width_in_pixels, screen.height_in_pixels);
+                    // Verify XTEST is actually present + usable before we ever claim we can inject:
+                    // negotiate the extension version (a single round-trip). If the server doesn't
+                    // advertise XTEST, `input_permitted` stays false and the host refuses the lease
+                    // rather than granting one whose every event would silently fail.
+                    let xtest_available = conn
+                        .xtest_get_version(2, 1)
+                        .is_ok_and(|c| c.reply().is_ok());
                     Self {
                         conn: Some(conn),
+                        xtest_available,
                         root,
                         screen_w: w,
                         screen_h: h,
@@ -127,6 +138,7 @@ mod linux {
                 }
                 Err(_) => Self {
                     conn: None,
+                    xtest_available: false,
                     root: 0,
                     screen_w: 0,
                     screen_h: 0,
@@ -404,8 +416,9 @@ mod linux {
         }
 
         fn input_permitted(&self) -> bool {
-            // Fail-closed: no reachable X server ⇒ the host refuses the lease.
-            self.conn.is_some()
+            // Fail-closed: a reachable X server AND a usable XTEST extension are both required, or the
+            // host refuses the lease (never grant one that would silently no-op on every event).
+            self.conn.is_some() && self.xtest_available
         }
     }
 
