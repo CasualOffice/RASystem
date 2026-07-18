@@ -2216,6 +2216,47 @@ mod e2e {
         host_task.abort();
     }
 
+    /// The send path must re-dial too, not just the recv path: a command issued while the link is cut is
+    /// picked up by the control loop, whose send then fails — and that failure must route to the same
+    /// re-dial handler, so the session still resumes (previously a failed send terminated the session).
+    #[tokio::test]
+    async fn a_command_send_during_a_cut_still_re_dials() {
+        let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32])));
+        cfg.reconnect_window = Duration::from_secs(3);
+        cfg.grant = bytes::Bytes::from_static(&[0xA1, 0xB2, 0xC3]);
+        let controller = ControllerSession::new(cfg, ctrl_tp);
+        let host_task = tokio::spawn(manual_reserving_host(host_tp));
+
+        controller.connect().await.unwrap();
+        assert!(wait_until(|| controller.state() == SessionState::Active, 500).await);
+
+        // Cut, then keep issuing commands — the control loop's send fails on them, exercising the
+        // send-path loss handler (it must re-dial, not terminate).
+        faults.cut();
+        for _ in 0..3 {
+            let _ = controller
+                .request_keyframe(KeyframeReason::DecoderReset)
+                .await;
+        }
+        assert!(
+            wait_until(|| controller.state() == SessionState::Suspended, 500).await,
+            "should suspend (via the send-path or recv-path loss handler), got {:?}",
+            controller.state()
+        );
+
+        // Heal → resumes to Active regardless of which path detected the loss.
+        faults.heal();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Active, 2000).await,
+            "a send-path loss must re-dial and resume, got {:?}",
+            controller.state()
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host_task.abort();
+    }
+
     /// The **full** reconnection path with two real sessions (ADR-091): a real `HostSession` re-serves
     /// the re-dial (re-validates the grant, re-attaches its egress sink, re-announces the config, forces
     /// an IDR) while the `ControllerSession` re-dials — so after a mid-stream cut, the session resumes to

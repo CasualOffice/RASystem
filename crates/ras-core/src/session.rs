@@ -2559,51 +2559,46 @@ async fn controller_control_loop(
 ) {
     loop {
         tokio::select! {
-            cmd = cmd_rx.recv() => match cmd {
-                Some(ControlCommand::Keyframe(reason)) => {
-                    let msg = ControlMsg::KeyframeRequest(ras_protocol::KeyframeRequest {
-                        since_frame: 0,
-                        reason,
-                    });
-                    if control.send(msg).await.is_err() { break; }
-                }
-                Some(ControlCommand::Feedback(fb)) => {
-                    if control.send(ControlMsg::Feedback(fb)).await.is_err() { break; }
-                }
-                Some(ControlCommand::Pointer(p)) => {
-                    if control.send(ControlMsg::Pointer(p)).await.is_err() { break; }
-                }
-                Some(ControlCommand::ControlRequest(capabilities)) => {
-                    if control.send(ControlMsg::ControlRequest { capabilities }).await.is_err() { break; }
-                }
-                Some(ControlCommand::Input(env)) => {
-                    if control.send(ControlMsg::Input(env)).await.is_err() { break; }
-                }
-                Some(ControlCommand::ClipboardText(text)) => {
-                    let msg = ControlMsg::ClipboardText { text: ras_protocol::Redacted(text) };
-                    if control.send(msg).await.is_err() { break; }
-                }
-                Some(ControlCommand::Chat(text)) => {
-                    let msg = ControlMsg::ChatMessage { text: ras_protocol::Redacted(text) };
-                    if control.send(msg).await.is_err() { break; }
-                }
-                Some(ControlCommand::FileOffer(target, filename, size)) => {
-                    let msg = ControlMsg::FileOffer { target, filename, size };
-                    if control.send(msg).await.is_err() { break; }
-                }
-                Some(ControlCommand::FileChunk(data)) => {
-                    if control.send(ControlMsg::FileChunk { data }).await.is_err() { break; }
-                }
-                Some(ControlCommand::FileComplete) => {
-                    if control.send(ControlMsg::FileComplete).await.is_err() { break; }
-                }
-                Some(ControlCommand::Bye) => {
-                    // A controller leaving is a clean peer close, never a revoke — a controller
-                    // cannot revoke the host (Invariants 1/13). Use the benign closure code.
-                    let _ = control.send(ControlMsg::Bye { code: ErrorCode::NormalClosure }).await;
+            cmd = cmd_rx.recv() => {
+                // Map the command to a wire message, then send it at the ONE site below — so a send that
+                // fails on a transport loss re-dials (ADR-091) instead of terminating, exactly like a
+                // lost recv. `Bye`/channel-close are clean exits (no re-dial).
+                let msg = match cmd {
+                    Some(ControlCommand::Keyframe(reason)) => {
+                        ControlMsg::KeyframeRequest(ras_protocol::KeyframeRequest {
+                            since_frame: 0,
+                            reason,
+                        })
+                    }
+                    Some(ControlCommand::Feedback(fb)) => ControlMsg::Feedback(fb),
+                    Some(ControlCommand::Pointer(p)) => ControlMsg::Pointer(p),
+                    Some(ControlCommand::ControlRequest(capabilities)) => {
+                        ControlMsg::ControlRequest { capabilities }
+                    }
+                    Some(ControlCommand::Input(env)) => ControlMsg::Input(env),
+                    Some(ControlCommand::ClipboardText(text)) => ControlMsg::ClipboardText {
+                        text: ras_protocol::Redacted(text),
+                    },
+                    Some(ControlCommand::Chat(text)) => ControlMsg::ChatMessage {
+                        text: ras_protocol::Redacted(text),
+                    },
+                    Some(ControlCommand::FileOffer(target, filename, size)) => {
+                        ControlMsg::FileOffer { target, filename, size }
+                    }
+                    Some(ControlCommand::FileChunk(data)) => ControlMsg::FileChunk { data },
+                    Some(ControlCommand::FileComplete) => ControlMsg::FileComplete,
+                    // A controller leaving is a clean peer close, never a revoke — a controller cannot
+                    // revoke the host (Invariants 1/13). Send the benign closure code and exit.
+                    Some(ControlCommand::Bye) => {
+                        let _ = control.send(ControlMsg::Bye { code: ErrorCode::NormalClosure }).await;
+                        break;
+                    }
+                    None => break,
+                };
+                if control.send(msg).await.is_err() {
+                    if controller_handle_loss(inner, &mut control).await { continue; }
                     break;
                 }
-                None => break,
             },
             msg = control.recv() => match msg {
                 Ok(ControlMsg::Bye { code }) => {
@@ -2738,38 +2733,13 @@ async fn controller_control_loop(
                 }
                 Ok(_) => {}
                 Err(_) => {
-                    // The reliable channel died WITHOUT a clean Bye ⇒ transport loss, not a peer
-                    // close. Freeze video but keep the UI live (Active → Suspended), then drive a
-                    // re-dial within the reconnect window (ADR-091). A successful re-dial re-runs the
-                    // handshake — re-presenting the existing grant, which the host re-validates (no new
-                    // auth path, Inv 3) — and resumes with a forced IDR. Window expiry → Terminated.
-                    if inner.stop.load(Ordering::SeqCst) {
-                        break;
+                    // The reliable channel died WITHOUT a clean Bye ⇒ transport loss, not a peer close.
+                    // Freeze video but keep the UI live and drive a re-dial (ADR-091); resume over the
+                    // fresh channel, or terminate if it fails. Same handler as a failed send above.
+                    if controller_handle_loss(inner, &mut control).await {
+                        continue;
                     }
-                    if apply(&inner.state, SessionEvent::TransportLost).is_none() {
-                        break; // not in a suspendable state (e.g. still connecting) — just end
-                    }
-                    emit_controller_lifecycle(inner, LifecycleEvent::Suspended { since_ms: 0 });
-                    match controller_redial(inner).await {
-                        Some(new_control) => {
-                            control = new_control; // resume the loop over the fresh channel
-                            continue;
-                        }
-                        None => {
-                            // Window expired, session stopped, or the host refused the resume (e.g.
-                            // an expired/revoked grant) → terminate, fail-closed.
-                            if apply(&inner.state, SessionEvent::ReconnectWindowExpired).is_some() {
-                                inner.stop.store(true, Ordering::SeqCst);
-                                emit_controller_lifecycle(
-                                    inner,
-                                    LifecycleEvent::SessionEnded {
-                                        reason: StopReason::Timeout,
-                                    },
-                                );
-                            }
-                            break;
-                        }
-                    }
+                    break;
                 }
             },
         }
@@ -2785,6 +2755,42 @@ fn emit_controller_lifecycle(inner: &ControllerInner, event: LifecycleEvent) {
         .clone()
     {
         sink.emit(event);
+    }
+}
+
+/// Handle a controller-side transport loss uniformly (ADR-091): suspend, drive the re-dial, and on
+/// success **reassign `control`** to the fresh channel. Returns `true` if the session resumed (the
+/// caller `continue`s its loop over the new channel), `false` to terminate. Both the failed-recv and
+/// failed-send paths route here so a command send that races the cut resumes just like a lost recv.
+async fn controller_handle_loss(
+    inner: &ControllerInner,
+    control: &mut Box<dyn ControlChannelDyn>,
+) -> bool {
+    if inner.stop.load(Ordering::SeqCst) {
+        return false;
+    }
+    // Not in a suspendable state (e.g. still connecting) ⇒ terminate rather than re-dial.
+    if apply(&inner.state, SessionEvent::TransportLost).is_none() {
+        return false;
+    }
+    emit_controller_lifecycle(inner, LifecycleEvent::Suspended { since_ms: 0 });
+    match controller_redial(inner).await {
+        Some(new_control) => {
+            *control = new_control;
+            true
+        }
+        None => {
+            if apply(&inner.state, SessionEvent::ReconnectWindowExpired).is_some() {
+                inner.stop.store(true, Ordering::SeqCst);
+                emit_controller_lifecycle(
+                    inner,
+                    LifecycleEvent::SessionEnded {
+                        reason: StopReason::Timeout,
+                    },
+                );
+            }
+            false
+        }
     }
 }
 
