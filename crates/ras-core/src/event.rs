@@ -79,6 +79,9 @@ pub struct QualitySample {
     pub loss_pct: f32,
     /// Frames actually delivered per second.
     pub delivered_fps: u16,
+    /// Estimated available bandwidth, **kilobits/sec** (the connection-stats readout every incumbent
+    /// shows). Display projection of the transport's `estimated_bandwidth_bps`.
+    pub bandwidth_kbps: u32,
 }
 
 impl QualitySample {
@@ -90,6 +93,8 @@ impl QualitySample {
             rtt_ms: h.rtt_us / 1000,
             loss_pct: h.loss_fraction * 100.0,
             delivered_fps,
+            // bits/s → kbit/s (the "N Mbps" the connection-stats UI shows).
+            bandwidth_kbps: h.estimated_bandwidth_bps / 1000,
         }
     }
 }
@@ -252,5 +257,31 @@ impl LifecycleSink {
     pub(crate) fn emit(&self, ev: LifecycleEvent) {
         // try_send: advisory events must never backpressure the session's hot path.
         let _ = self.0.try_send(ev);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QualitySample;
+    use ras_transport_iroh::{ConnHealth, LinkState, PathKind};
+
+    /// The UI diagnostics readout projects every field from the transport health snapshot — including
+    /// bandwidth (bits/s → kbit/s), the connection-stats value every incumbent shows.
+    #[test]
+    fn quality_sample_projects_health_including_bandwidth() {
+        let h = ConnHealth {
+            path: PathKind::Relayed,
+            rtt_us: 42_000,
+            loss_fraction: 0.025,
+            estimated_bandwidth_bps: 8_500_000,
+            frames_dropped: 3,
+            state: LinkState::Live,
+        };
+        let s = QualitySample::from_health(&h, 58);
+        assert_eq!(s.path, PathKind::Relayed);
+        assert_eq!(s.rtt_ms, 42); // 42_000 µs → 42 ms
+        assert!((s.loss_pct - 2.5).abs() < 0.001); // 0.025 → 2.5 %
+        assert_eq!(s.delivered_fps, 58);
+        assert_eq!(s.bandwidth_kbps, 8_500); // 8_500_000 bit/s → 8_500 kbit/s
     }
 }
