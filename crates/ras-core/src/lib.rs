@@ -2133,6 +2133,89 @@ mod e2e {
         );
     }
 
+    /// A re-serving host double (models the host accept-loop / re-accept, ADR-091 — the piece a full
+    /// `HostSession` gains next): on every (re)connection it re-fetches its control channel, reads the
+    /// controller's re-presented grant (a real host would `validate_grant` here), acknowledges with a
+    /// `StreamConfig`, and stays alive until the channel dies — then re-serves the next re-dial.
+    async fn manual_reserving_host(host_tp: std::sync::Arc<crate::testkit::LoopbackTransport>) {
+        use crate::deps::SessionTransport;
+        let cfg = ras_media::StreamConfig {
+            codec: ras_media::VideoCodec::H264AnnexB,
+            width: 640,
+            height: 480,
+            fps: 30,
+            target_bitrate_bps: 3_000_000,
+            color: ras_media::ColorSpace::Bt709Limited,
+            video_transport: ras_media::VideoTransportKind::PerFrameStream,
+        };
+        loop {
+            let mut control = loop {
+                if let Ok(c) = host_tp.control_channel().await {
+                    break c;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            // Read the controller's grant presentation (AuthEnvelope). A real host re-validates it here.
+            let got_grant = loop {
+                match control.recv().await {
+                    Ok(ras_protocol::ControlMsg::AuthEnvelope { .. }) => break true,
+                    Ok(_) => {}
+                    Err(_) => break false,
+                }
+            };
+            if !got_grant {
+                continue; // lost before the handshake completed → re-serve
+            }
+            // Acknowledge: send the stream config (authorizes this (re)connection).
+            let msg = ras_protocol::ControlMsg::StreamConfig(crate::session::config_to_wire(&cfg));
+            if control.send(msg).await.is_err() {
+                continue;
+            }
+            // Stay alive (ignore feedback / keyframe requests) until the channel dies, then re-serve.
+            while control.recv().await.is_ok() {}
+        }
+    }
+
+    /// The reconnection happy path (ADR-091 / backlog X1): a transport loss suspends the controller,
+    /// its re-dial driver re-establishes the link, re-presents the grant, and the session resumes to
+    /// `Active` — instead of the old freeze-then-terminate. This is the top production ship-blocker.
+    #[tokio::test]
+    async fn controller_redials_and_resumes_after_transport_loss() {
+        let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();
+        let mut cfg = ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32])));
+        cfg.reconnect_window = Duration::from_secs(3);
+        cfg.grant = bytes::Bytes::from_static(&[0xA1, 0xB2, 0xC3]); // a non-empty grant to re-present on re-dial
+        let controller = ControllerSession::new(cfg, ctrl_tp);
+        let host_task = tokio::spawn(manual_reserving_host(host_tp));
+
+        controller.connect().await.unwrap();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Active, 500).await,
+            "controller should reach Active, got {:?}",
+            controller.state()
+        );
+
+        // Sever the link: the controller freezes (Suspended) and starts re-dialing.
+        faults.cut();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Suspended, 500).await,
+            "controller should suspend on transport loss, got {:?}",
+            controller.state()
+        );
+
+        // Heal the link: the re-dial re-establishes it, re-presents the grant, the host re-serves, and
+        // the session resumes to Active — the reconnection ship-blocker fixed.
+        faults.heal();
+        assert!(
+            wait_until(|| controller.state() == SessionState::Active, 2000).await,
+            "controller must RESUME to Active after re-dial, got {:?}",
+            controller.state()
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host_task.abort();
+    }
+
     #[tokio::test]
     async fn controller_suspends_then_terminates_when_transport_drops() {
         let (host_tp, ctrl_tp, faults) = loopback_pair_with_faults();

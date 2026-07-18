@@ -21,7 +21,7 @@ use crate::abr::LatencyFirstAbr;
 use crate::deps::{
     AudioOutput, AuditSink, ControlChannelDyn, ControlConsent, CursorFrame, CursorObserver,
     CursorShape, CursorSink, DenyAllControl, DenyAllFileConsent, DialTarget, FileConsent,
-    FileWriteSink, FrameSink, GrantValidator, SessionAuthContext, SessionTransport,
+    FileWriteSink, FrameSink, GrantValidator, SessionAuthContext, SessionTransport, VideoSourceDyn,
 };
 use crate::event::{
     LifecycleEvent, LifecycleSink, LifecycleStream, QualitySample, SessionId, StopReason,
@@ -105,7 +105,7 @@ fn apply(state: &Mutex<SessionState>, event: SessionEvent) -> Option<SessionStat
     }
 }
 
-fn config_to_wire(c: &StreamConfig) -> StreamConfigWire {
+pub(crate) fn config_to_wire(c: &StreamConfig) -> StreamConfigWire {
     StreamConfigWire {
         codec: c.codec.webcodecs_string(c.width, c.height),
         width: c.width,
@@ -2639,46 +2639,132 @@ async fn controller_control_loop(
                 Ok(_) => {}
                 Err(_) => {
                     // The reliable channel died WITHOUT a clean Bye ⇒ transport loss, not a peer
-                    // close. Freeze video but keep the UI live: Active → Suspended, then honor the
-                    // reconnect window before giving up. (Re-dial itself is deferred to the iroh
-                    // transport; the state/UX contract is exercised now.)
+                    // close. Freeze video but keep the UI live (Active → Suspended), then drive a
+                    // re-dial within the reconnect window (ADR-091). A successful re-dial re-runs the
+                    // handshake — re-presenting the existing grant, which the host re-validates (no new
+                    // auth path, Inv 3) — and resumes with a forced IDR. Window expiry → Terminated.
                     if inner.stop.load(Ordering::SeqCst) {
                         break;
                     }
                     if apply(&inner.state, SessionEvent::TransportLost).is_none() {
                         break; // not in a suspendable state (e.g. still connecting) — just end
                     }
-                    if let Some(sink) = inner
-                        .lifecycle
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone()
-                    {
-                        sink.emit(LifecycleEvent::Suspended { since_ms: 0 });
-                    }
-                    tokio::time::sleep(inner.config.reconnect_window).await;
-                    if inner.stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    // Still suspended (Phase 1 has no re-dial) → window elapsed → Terminated.
-                    if apply(&inner.state, SessionEvent::ReconnectWindowExpired).is_some() {
-                        inner.stop.store(true, Ordering::SeqCst);
-                        if let Some(sink) = inner
-                            .lifecycle
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone()
-                        {
-                            sink.emit(LifecycleEvent::SessionEnded {
-                                reason: StopReason::Timeout,
-                            });
+                    emit_controller_lifecycle(inner, LifecycleEvent::Suspended { since_ms: 0 });
+                    match controller_redial(inner).await {
+                        Some(new_control) => {
+                            control = new_control; // resume the loop over the fresh channel
+                            continue;
+                        }
+                        None => {
+                            // Window expired, session stopped, or the host refused the resume (e.g.
+                            // an expired/revoked grant) → terminate, fail-closed.
+                            if apply(&inner.state, SessionEvent::ReconnectWindowExpired).is_some() {
+                                inner.stop.store(true, Ordering::SeqCst);
+                                emit_controller_lifecycle(
+                                    inner,
+                                    LifecycleEvent::SessionEnded {
+                                        reason: StopReason::Timeout,
+                                    },
+                                );
+                            }
+                            break;
                         }
                     }
-                    break;
                 }
             },
         }
     }
+}
+
+/// Emit a lifecycle event to the controller's attached sink, if any (content-free helper).
+fn emit_controller_lifecycle(inner: &ControllerInner, event: LifecycleEvent) {
+    if let Some(sink) = inner
+        .lifecycle
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        sink.emit(event);
+    }
+}
+
+/// Drive a controller re-dial within the reconnect window (ADR-091). On success the session is back to
+/// `Active`, the video/audio ingest re-fetch their fresh sources, a keyframe is forced (no black screen
+/// on resume), and the re-established control channel is returned. Returns `None` on window expiry, a
+/// stop, or a host that refuses the resume (an expired/revoked grant fails the host's re-validation —
+/// fail-closed). **Security:** this re-runs the ordinary handshake; the grant is re-presented and the
+/// host re-validates it exactly as on first connect — reconnection introduces no new authorization path.
+async fn controller_redial(inner: &ControllerInner) -> Option<Box<dyn ControlChannelDyn>> {
+    // The concrete transport knows its own peer; the target is a placeholder on the loopback path
+    // (mirrors `connect`).
+    let target: DialTarget = EndpointAddr::new(EndpointId([0u8; 32]));
+    if inner.stop.load(Ordering::SeqCst) {
+        return None;
+    }
+    let deadline = tokio::time::Instant::now() + inner.config.reconnect_window;
+    // Re-establish the transport within the window (unsupported/timeout → give up → Terminated).
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    match tokio::time::timeout(remaining, inner.transport.reconnect(&target)).await {
+        Ok(Ok(_peer)) => {}
+        _ => return None,
+    }
+    // Re-fetch the fresh control channel and re-run the handshake: re-present the grant (the host
+    // re-validates it — Inv 3), then wait for the host to re-announce the stream config, which is its
+    // acknowledgement that the resume is authorized. Any failure → terminate (fail-closed). The read is
+    // window-bounded so a silent host cannot hang the re-dial.
+    let Ok(mut control) = inner.transport.control_channel().await else {
+        return None;
+    };
+    if control
+        .send(ControlMsg::AuthEnvelope {
+            payload: inner.config.grant.clone(),
+        })
+        .await
+        .is_err()
+    {
+        return None;
+    }
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let config = match tokio::time::timeout(remaining, async {
+        loop {
+            match control.recv().await {
+                Ok(ControlMsg::StreamConfig(wire)) => return Some(wire_to_config(&wire)),
+                // The host refused the resume (grant expired/revoked) or the link dropped again.
+                Ok(ControlMsg::Bye { .. }) | Err(_) => return None,
+                Ok(_) => {} // Hello / others during re-handshake: ignore
+            }
+        }
+    })
+    .await
+    {
+        Ok(Some(c)) => c,
+        _ => return None, // refused, lost, or timed out → terminate
+    };
+
+    // Resume. Re-configure an attached renderer, move Suspended → Active, re-gate + force an IDR (no
+    // black screen), and let the ingest loops re-fetch their fresh sources on their own.
+    *inner
+        .stream_config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config);
+    if let Some(r) = inner
+        .renderer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        let _ = r.configure(&config);
+    }
+    apply(&inner.state, SessionEvent::TransportRestored); // Suspended → Active
+    emit_controller_lifecycle(inner, LifecycleEvent::Resumed);
+    inner.regate.store(true, Ordering::Relaxed); // gate to the fresh IDR
+    let _ = control
+        .send(ControlMsg::KeyframeRequest(ras_protocol::KeyframeRequest {
+            since_frame: 0,
+            reason: KeyframeReason::DecoderReset,
+        }))
+        .await;
+    Some(control)
 }
 
 /// What the controller does on a dropped-frame notification (design §10 / docs/10 §4 loss handling).
@@ -2702,61 +2788,85 @@ fn loss_action(reason: DropReason) -> LossAction {
     }
 }
 
+/// Re-fetch the video source, retrying until it is available (the transport re-arms it on a
+/// reconnect, ADR-091) or the session stops. `None` = stopped.
+async fn fetch_video_source(inner: &ControllerInner) -> Option<Box<dyn VideoSourceDyn>> {
+    loop {
+        if inner.stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        match inner.transport.video_source().await {
+            Ok(s) => return Some(s),
+            // Not armed yet (pre-connect, or lost and awaiting the driver's re-dial). Brief backoff.
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+        }
+    }
+}
+
 async fn controller_video_loop(inner: &ControllerInner) {
-    let mut source = match inner.transport.video_source().await {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let mut seen_keyframe = false;
-    while !inner.stop.load(Ordering::Relaxed) {
-        match source.next().await {
-            Ok(VideoEvent::Frame(ef)) => {
-                // A freshly-attached renderer asked to re-gate: drop P-frames until the next IDR so its
-                // decoder never sees a frame it can't decode (no black screen on renderer attach).
-                if inner.regate.swap(false, Ordering::Relaxed) {
-                    seen_keyframe = false;
-                }
-                if !seen_keyframe {
-                    if !ef.is_keyframe {
-                        continue; // wait for the first IDR before feeding the sink
+    // Outer loop re-establishes the source across a reconnect: on transport loss the inner loop breaks,
+    // and we re-fetch the fresh source the re-dial armed (gating to its first IDR, so no black screen).
+    'session: loop {
+        let Some(mut source) = fetch_video_source(inner).await else {
+            return;
+        };
+        let mut seen_keyframe = false;
+        while !inner.stop.load(Ordering::Relaxed) {
+            match source.next().await {
+                Ok(VideoEvent::Frame(ef)) => {
+                    // A freshly-attached renderer asked to re-gate: drop P-frames until the next IDR so its
+                    // decoder never sees a frame it can't decode (no black screen on renderer attach).
+                    if inner.regate.swap(false, Ordering::Relaxed) {
+                        seen_keyframe = false;
                     }
-                    seen_keyframe = true;
-                }
-                let fid = ef.frame_id;
-                if let Some(r) = inner
-                    .renderer
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-                {
-                    let _ = r.push(ef);
-                }
-                inner.last_decoded_frame.store(fid, Ordering::Relaxed);
-            }
-            Ok(VideoEvent::FrameDropped { reason, .. }) => {
-                inner.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                // A merely *stale* (superseded) frame needs no recovery — the newer frame decodes
-                // fine, and requesting an IDR would spam the host for nothing. A real gap means the
-                // decoder can no longer use subsequent P-frames: freeze on the last good frame (stop
-                // feeding the renderer via the keyframe re-gate below) and request one fresh IDR;
-                // resume only once it arrives (docs/10 §4 freeze-on-last-good).
-                if loss_action(reason) == LossAction::RecoverWithKeyframe {
-                    seen_keyframe = false; // re-gate: gate out P-frames until the requested IDR
-                                           // Clone the sender out from under the std mutex before awaiting (guards !Send).
-                    let tx = inner
-                        .command_tx
+                    if !seen_keyframe {
+                        if !ef.is_keyframe {
+                            continue; // wait for the first IDR before feeding the sink
+                        }
+                        seen_keyframe = true;
+                    }
+                    let fid = ef.frame_id;
+                    if let Some(r) = inner
+                        .renderer
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone();
-                    if let Some(tx) = tx {
-                        let _ = tx
-                            .send(ControlCommand::Keyframe(KeyframeReason::UnrecoverableLoss))
-                            .await;
+                        .clone()
+                    {
+                        let _ = r.push(ef);
+                    }
+                    inner.last_decoded_frame.store(fid, Ordering::Relaxed);
+                }
+                Ok(VideoEvent::FrameDropped { reason, .. }) => {
+                    inner.frames_dropped.fetch_add(1, Ordering::Relaxed);
+                    // A merely *stale* (superseded) frame needs no recovery — the newer frame decodes
+                    // fine, and requesting an IDR would spam the host for nothing. A real gap means the
+                    // decoder can no longer use subsequent P-frames: freeze on the last good frame (stop
+                    // feeding the renderer via the keyframe re-gate below) and request one fresh IDR;
+                    // resume only once it arrives (docs/10 §4 freeze-on-last-good).
+                    if loss_action(reason) == LossAction::RecoverWithKeyframe {
+                        seen_keyframe = false; // re-gate: gate out P-frames until the requested IDR
+                                               // Clone the sender out from under the std mutex before awaiting (guards !Send).
+                        let tx = inner
+                            .command_tx
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        if let Some(tx) = tx {
+                            let _ = tx
+                                .send(ControlCommand::Keyframe(KeyframeReason::UnrecoverableLoss))
+                                .await;
+                        }
                     }
                 }
+                Err(_) => break, // source died (transport loss) → re-fetch after the re-dial
             }
-            Err(_) => break,
         }
+        // The inner loop exited: either we are stopping, or the transport was lost and the control
+        // loop's re-dial will re-arm a fresh source — loop back and re-fetch it.
+        if inner.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        continue 'session;
     }
 }
 
