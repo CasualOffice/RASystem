@@ -130,6 +130,16 @@ pub fn required_cap(action: &InputAction) -> Option<&'static str> {
 }
 
 /// The capture-geometry layout version a coordinate-bearing action was computed against, if any.
+///
+/// `InputAction` is `#[non_exhaustive]`, so the trailing `_` arm is **forced** by the language — a
+/// compile-exhaustive match is impossible from this crate. The wildcard is fail-*permissive* here (an
+/// unmatched action skips freshness), unlike [`required_cap`]/[`dispatch`] which fail *closed*. That is
+/// still safe: freshness (gate ⑤) runs *before* capability (gate ⑥), and any action this function does
+/// not recognize is `required_cap → DENY_UNKNOWN_ACTION` and thus denied at ⑥ regardless. The one thing
+/// this asymmetry cannot self-defend is a **new, explicitly-capability-mapped** coordinate action added
+/// without a matching arm here — it would inject against a stale layout (a wrong-position click, not an
+/// escalation). **Any `InputAction` carrying a `layout_version` MUST be added to this match.** The
+/// `coordinate_actions_are_freshness_gated` test pins the current coverage against regression.
 fn action_layout_version(action: &InputAction) -> Option<u32> {
     match action {
         InputAction::PointerMove { layout_version, .. }
@@ -927,6 +937,57 @@ mod tests {
         assert_eq!(
             m.authorize_input(&stale, 1001).unwrap_err(),
             ControlError::StaleLayout
+        );
+    }
+
+    /// Pins the freshness-coverage contract of `action_layout_version` against regression: **both**
+    /// coordinate-bearing actions (`PointerMove`, `PointerButton`) are gate-⑤ freshness-checked, while
+    /// display-independent relative motion (`PointerMoveRelative`) is correctly exempt. If a future edit
+    /// drops a coordinate action from `action_layout_version`, its `StaleLayout` assertion here fails.
+    #[test]
+    fn coordinate_actions_are_freshness_gated() {
+        let mut m = mgr();
+        m.set_layout_version(3);
+        let lease = m
+            .issue(
+                [1u8; 32],
+                &full_grant(),
+                &full_grant(),
+                1000,
+                LEASE_DEFAULT_TTL_MS,
+            )
+            .unwrap();
+        let g = m.generation();
+        // A PointerButton computed against layout 0 while current is 3 → stale (coordinate-bearing).
+        let stale_button = InputEnvelope {
+            lease_id: lease.lease_id.0,
+            generation: g,
+            seq: 1,
+            action: InputAction::PointerButton {
+                display_id: 0,
+                nx: 1,
+                ny: 1,
+                button: PointerButton::Left,
+                down: true,
+                layout_version: 0,
+            },
+        };
+        assert_eq!(
+            m.authorize_input(&stale_button, 1001).unwrap_err(),
+            ControlError::StaleLayout,
+            "PointerButton must be freshness-gated"
+        );
+        // A stale layout must NOT block relative motion — it is display-independent (no layout_version).
+        // (The failed button above did not advance last_seq, so seq 1 is still valid here.)
+        let rel = InputEnvelope {
+            lease_id: lease.lease_id.0,
+            generation: g,
+            seq: 1,
+            action: InputAction::PointerMoveRelative { dx: 5, dy: -5 },
+        };
+        assert!(
+            m.authorize_input(&rel, 1002).is_ok(),
+            "relative motion is display-independent and must not be blocked by a stale layout"
         );
     }
 
