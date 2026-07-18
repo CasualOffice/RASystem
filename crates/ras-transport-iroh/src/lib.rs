@@ -722,9 +722,14 @@ impl VideoFrameHeader {
 
 /// Host-side droppable video sender (`PerFrameStream`). Non-blocking: [`send_frame`](Self::send_frame)
 /// hands the frame to a bounded channel drained by a background task that opens **one unidirectional
-/// QUIC stream per frame**. Separate streams never head-of-line-block each other, so a lost/stalled
-/// frame cannot stall a later one or the control channel (the latency invariant). If the path can't
-/// keep up the channel fills and frames are dropped at the source — never queued unbounded.
+/// QUIC stream per frame**. At the QUIC transport layer separate streams never head-of-line-block each
+/// other or the control channel — so a lost/stalled video frame can never stall control or the
+/// emergency-stop path (the load-bearing latency invariant, Inv 4). If the path can't keep up the
+/// channel fills and frames are dropped at the source — never queued unbounded.
+///
+/// Caveat (receive side): [`VideoSource`] currently drains the accepted streams *serially*, so under
+/// packet loss a stalled frame delays the already-arrived frames behind it — a known video-smoothness
+/// limitation (NOT a control/stop regression). See [`VideoSource`] for the deferred concurrent-drain fix.
 pub struct VideoSink {
     tx: mpsc::Sender<EncodedFrame>,
 }
@@ -782,6 +787,17 @@ impl VideoSink {
 /// `frame_id` gap (the host dropped that frame at the source under congestion) surfaces as a
 /// [`VideoEvent::FrameDropped`] *before* the next frame, so `ras-core` can coalesce a run of drops
 /// into one keyframe request instead of freezing. The decoder owns final reorder-by-`frame_id`.
+///
+/// **Known limitation — serial drain (deferred fix).** [`recv`](Self::recv) accepts and fully reads one
+/// stream before touching the next, so QUIC's *transport*-level HOL-freedom between streams is not
+/// carried through at the application layer: under packet loss, frame N's retransmit (~1 RTT) delays the
+/// already-arrived frames behind it, making delivery bursty. This is a *smoothness* cost only — control
+/// and audio ride separate planes (a bidi stream and datagrams), so the stop button and Inv 4 are
+/// unaffected, and for a P-frame codec the decoder must process in order regardless, so display latency
+/// for dependent frames is bounded by the decoder, not this read. The fix (accept-ahead into a bounded
+/// `FuturesUnordered` of per-stream reads, delivered in `frame_id` order) needs real lossy-network tuning
+/// to avoid premature keyframe requests under ordinary jitter, so it is deferred to on-device media
+/// tuning rather than implemented blind against the in-memory tests.
 pub struct VideoSource {
     conn: Connection,
     /// The next in-order `frame_id` we expect; `None` until the first frame establishes the base.
