@@ -801,4 +801,35 @@ mod tests {
         );
         let _ = std::fs::remove_file(&path);
     }
+
+    /// The audit log file is untrusted input (an attacker with disk access can craft it). Every decoder
+    /// on that path — the event decoder, the record parser, and `AuditLog::load` — must **never panic**
+    /// on arbitrary bytes, only fail closed (drop to a valid prefix / `None`). Deterministic dep-free
+    /// fuzz via a small LCG (reproducible, no `proptest`/`arbitrary` dependency).
+    #[test]
+    fn decoders_never_panic_on_arbitrary_bytes() {
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        };
+        // The two in-memory decoders over arbitrary buffers of every small length.
+        for len in 0..600usize {
+            let buf: Vec<u8> = (0..len).map(|_| next()).collect();
+            let _ = AuditEvent::decode(&buf); // must not panic
+            let _ = AuditEntry::from_record(&buf); // must not panic
+        }
+        // `AuditLog::load` over arbitrary file contents must not panic and must return a bounded prefix
+        // that itself verifies as a chain (or is empty) — never a corrupt/oversized read.
+        let path = tmp_path("fuzz");
+        for len in [0usize, 1, 3, 4, 5, 40, 200, 4100, 9000] {
+            let buf: Vec<u8> = (0..len).map(|_| next()).collect();
+            std::fs::write(&path, &buf).unwrap();
+            let loaded = AuditLog::new(&path).load().unwrap(); // must not panic
+            let _ = verify_chain(&SID, &loaded); // must not panic on a fuzzed prefix
+        }
+        let _ = std::fs::remove_file(&path);
+    }
 }

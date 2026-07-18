@@ -434,6 +434,47 @@ mod tests {
         // too short
     }
 
+    /// A connection ticket is **user-pasted, untrusted input**: `from_ticket` must never panic on
+    /// arbitrary strings, only return a typed error. Deterministic dep-free fuzz over arbitrary
+    /// printable strings, every truncation of a valid ticket (each field boundary), and single-byte
+    /// mutations of a valid one.
+    #[test]
+    fn from_ticket_never_panics_on_arbitrary_input() {
+        let mut a = authority(60_000);
+        let good = a.issue(b"dial".to_vec(), 1_000).unwrap().to_ticket();
+
+        // Every prefix of a valid ticket (walks each length/field boundary of the parser).
+        for i in 0..=good.len() {
+            if good.is_char_boundary(i) {
+                let _ = ConnectionTicket::from_ticket(&good[..i]); // must not panic
+            }
+        }
+
+        // Arbitrary printable-ASCII strings, with and without the real prefix.
+        let mut state: u64 = 0xdead_beef_cafe_babe;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (state >> 40) as u8
+        };
+        for len in 0..300usize {
+            let s: String = (0..len).map(|_| (0x20 + (next() % 0x5e)) as char).collect();
+            let _ = ConnectionTicket::from_ticket(&s);
+            let _ = ConnectionTicket::from_ticket(&format!("{TICKET_PREFIX}{s}"));
+        }
+
+        // Single-byte mutations of a valid ticket's bytes (kept when still valid UTF-8).
+        let bytes = good.into_bytes();
+        for i in 0..bytes.len().min(200) {
+            let mut m = bytes.clone();
+            m[i] ^= 0xFF;
+            if let Ok(s) = std::str::from_utf8(&m) {
+                let _ = ConnectionTicket::from_ticket(s); // must not panic
+            }
+        }
+    }
+
     #[test]
     fn nonce_cache_detects_replay() {
         let mut c = NonceCache::new(300_000, 1024);
