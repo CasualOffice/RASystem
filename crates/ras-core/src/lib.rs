@@ -1455,7 +1455,9 @@ mod e2e {
         controller.disconnect(StopReason::UserRequested).await;
 
         let events = audit.events();
-        assert_eq!(events.first(), Some(&AuditEvent::SessionStarted));
+        // Consent (the local user's allow) is the first auditable decision, then the stream comes up.
+        assert_eq!(events.first(), Some(&AuditEvent::ConsentGranted));
+        assert!(events.contains(&AuditEvent::SessionStarted));
         assert!(
             events.contains(&AuditEvent::EmergencyStop {
                 code: ErrorCode::SessionRevoked
@@ -1795,6 +1797,7 @@ mod e2e {
             }
         }
 
+        let audit = Arc::new(RecordingAudit::new([0x55; 16]));
         let (host_tp, ctrl_tp) = loopback_pair();
         let host = HostSession::new(
             HostSessionConfig::new(MonitorId(0)),
@@ -1802,7 +1805,8 @@ mod e2e {
             SyntheticCaptureBackend::new(1280, 720),
             SyntheticEncoder::new(),
             Arc::new(DenyValidator),
-        );
+        )
+        .with_audit_sink(audit.clone());
         // A controller must present its AuthEnvelope for the host to reach the authorize gate; it
         // connects concurrently and is torn down when the host denies.
         let controller = ControllerSession::new(
@@ -1818,6 +1822,10 @@ mod e2e {
             SessionState::Rejected,
             "a denied session must land on the Rejected terminal, never Active"
         );
+        // The refused connection is audited (Inv 10), and never records a SessionStarted.
+        let events = audit.events();
+        assert_eq!(events, vec![crate::audit::AuditEvent::ConsentDenied]);
+        assert!(audit.chain_ok());
         let _ = ctrl.await;
     }
 

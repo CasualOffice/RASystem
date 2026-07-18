@@ -1038,13 +1038,14 @@
   - **Host-loop wiring — NOW LANDED.** An `AuditSink` DI seam (`ras-core::deps`, `with_audit_sink`)
     receives events **synchronously and losslessly** at each security point — deliberately unlike the
     advisory, bounded, **drops-on-full** `LifecycleEvent` stream (an audit that could drop entries would
-    be worthless). The `HostSession` records `SessionStarted` at authorization, `ControlLeaseGranted` /
+    be worthless). The `HostSession` records `ConsentGranted`/`ConsentDenied` at the authorization gate (a
+    **refused** connection is audited too), `SessionStarted` once streaming, `ControlLeaseGranted` /
     `ControlLeaseRevoked`, `InputRejected` (the per-message gate, Inv 15), `ClipboardApplied`/`Rejected`,
     `AudioStarted`/`AudioStopped` (only when `audio.listen` gates the pump on), `EmergencyStop` +
     `SessionEnded` on revoke, and `SessionEnded` on graceful stop — each *before* the equivalent lifecycle
     emit. The sink owns the clock + journal + persistence, so `ras-core` stays clock- and I/O-free.
-    Loopback-tested: recording sinks over a real journal capture the sequence (incl. the revoke and
-    audio-start/stop paths) and the **hash-chain verifies**.
+    Loopback-tested: recording sinks over a real journal capture the sequence (incl. the consent
+    granted/denied, revoke, and audio-start/stop paths) and the **hash-chain verifies**.
   - **Durable persistence — NOW LANDED (append-only file).** `AuditLog` is a thin, separate layer over
     the pure journal: each `AuditEntry` is written as a `u32`-length-prefixed record (`seq ‖ timestamp ‖
     prev_hash ‖ entry_hash ‖ event`, the `ErrorCode` as its stable 2-byte `to_code`). It is **append-only
@@ -1059,8 +1060,8 @@
   - **Scope:** the pure journal + chain + signed checkpoint + the append-only `AuditLog` (in the
     new-dep-light `ras-audit`: `sha2` (RustCrypto, MIT/Apache) + the `ras-identity`/`ras-protocol` seams),
     plus the host-loop `AuditSink` wiring above. Deferred: forward-secure key evolution + Merkle-batched
-    checkpoints (`docs/06 §12`), and the last source points (consent grant/deny, file-push accept/reject)
-    as those subsystems reach the host loop.
+    checkpoints (`docs/06 §12`), and the file-push accept/reject source points (once the file-transfer
+    protocol reaches the host loop — the catalogue/validator landed in ADR-086 but is not yet wired).
   - **Verify:** chain links + verifies; append is deterministic + session-bound; content-tamper / reorder
     / middle-removal each break the chain at the right `seq`; a signed checkpoint round-trips and a
     rewritten journal (shorter "clean" history, tampered head, or an attacker-key signature) fails

@@ -254,8 +254,10 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   prefixed record file** — crash-safe (`load` stops at a torn trailing record, never corrupting the valid
   prefix) and restart-survivable (reload → `verify_chain` + a signed `Checkpoint` catches any rewrite;
   a same-length event swap breaks the chain — tested). No SQLite (avoids a `-sys` dep); added
-  `ErrorCode::to_code`/`from_code` (stable numeric) for the compact round-trippable encoding. Follow-up:
-  Merkle-batched forward-secure checkpoints, remaining source points (consent/file-push).
+  `ErrorCode::to_code`/`from_code` (stable numeric) for the compact round-trippable encoding. **Source
+  points now include consent** (`ConsentGranted`/`ConsentDenied` at the authorization gate — a refused
+  connection is audited too; tested). Follow-up: Merkle-batched forward-secure checkpoints, the file-push
+  source points (once the transfer protocol reaches the host loop).
 - **What exists:**
   - Phase 0: dependency-free crate skeletons under `crates/`; `deny.toml` license gate;
     `.github/workflows/ci.yml`; `proto/casual_ras.proto` placeholder.

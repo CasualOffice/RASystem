@@ -486,6 +486,9 @@ where
                 // per-message gate with it; a lease can only ever be a subset (Phase 3). Also retain
                 // the full set for grant-level, non-lease checks (clipboard push, ADR-076).
                 apply(&inner.state, SessionEvent::Authorized);
+                // The local user allowed this connection (Inv 1) — the first auditable decision (Inv 10),
+                // before `SessionStarted` (recorded once the stream is up).
+                record_audit(inner, ras_audit::AuditEvent::ConsentGranted);
                 *inner
                     .peer_endpoint
                     .lock()
@@ -504,6 +507,8 @@ where
                 ));
             }
             GrantDecision::Denied(code) => {
+                // A refused connection attempt is security-relevant — audit it (Inv 10), content-free.
+                record_audit(inner, ras_audit::AuditEvent::ConsentDenied);
                 apply(&inner.state, SessionEvent::Reject { code });
                 sink.emit(LifecycleEvent::SessionEnded {
                     reason: StopReason::Error(code),
@@ -513,6 +518,7 @@ where
             // Phase-1 no-op never returns these; treat as a denial rather than silently hanging.
             GrantDecision::NeedConsent | GrantDecision::Challenge(_) => {
                 let code = ErrorCode::ConsentDenied;
+                record_audit(inner, ras_audit::AuditEvent::ConsentDenied);
                 apply(&inner.state, SessionEvent::Reject { code });
                 return Err(CoreError::fatal(
                     code,
