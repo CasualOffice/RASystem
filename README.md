@@ -36,12 +36,12 @@ verification on Linux/Windows, session reconnection, and signed distribution. We
 | Connect / view another machine | macOS · Linux · Windows (decode-only, ships everywhere) |
 | Share this screen — macOS | Hardware (ScreenCaptureKit + VideoToolbox) — **on-device verified** |
 | Share this screen — Linux · Windows | Implemented (PipeWire / Windows.Graphics.Capture → OpenH264); **on-device runtime verification pending** (Windows needs hardware the team lacks) |
-| Remote control — full keyboard + mouse | Implemented on all three backends (CGEvent / XTEST / SendInput), complete keymaps; **on-device verification pending** |
+| Remote control — full keyboard + mouse | All three backends (CGEvent / XTEST / SendInput) — complete keymaps, relative-pointer, Unicode text, lock-state sync. **macOS on-device verified**; Linux (X11/Xwayland) + Windows on-device pending (Windows blocked on hardware) |
 | Signed grants · capability leases · per-message enforcement | Implemented — PASETO v4.public grants, host-authoritative capability gate (Inv 15) |
 | Consent · always-visible indicator · emergency stop | Working |
 | Tamper-evident audit (hash-chained, host-signed) | Implemented |
 | Clipboard · file transfer · audio · chat · cursor · multi-monitor | Implemented at code level ([`docs/20`](docs/20_FEATURE_GAPS_AND_ROADMAP.md)) |
-| **Session reconnection** across a network blip / NAT rebind | Implemented — controller re-dials, host re-serves, grant re-validated, video resumes on a keyframe (loopback-tested; iroh re-dial is the on-device step) |
+| **Session reconnection** across a network blip / NAT rebind | Implemented + adversarially hardened — controller re-dials, host re-serves, grant re-validated (never a new auth path), video/control/audio resume on a keyframe; window-bounded both ends so a silent re-dialer can't wedge the host (loopback-tested; iroh re-dial is the on-device step) |
 | Signed/notarized installers · activated auto-update | **Not yet** — alpha builds ship unsigned (ADR-072) |
 | Fraud-friction subsystem | Roadmap |
 
@@ -79,7 +79,9 @@ decision rule enforced throughout the design, not a slogan ([`CLAUDE.md §2`](CL
   to add friction and containment against remote-access scams. It is honest about its limits: it aims
   to **deter** a coached victim and **contain** a remote attacker — it does not claim to "prevent
   scams" or be "tamper-resistant" ([`docs/15`](docs/15_FRAUD_AND_HARM_PREVENTION.md), Invariant 17).
-- **Tamper-evident local audit** and **tiered per-device keys** *(roadmap,
+- **Tamper-evident local audit** *(implemented)* — a per-session SHA-256 hash chain of content-free
+  events, made authentic by a host-signed checkpoint, with crash-safe append-only persistence — plus
+  **tiered per-device keys** *(model landed; TPM-attested Tier ≥1 on the roadmap,
   [`docs/16`](docs/16_ACCESS_AND_ENROLLMENT_MODEL.md))*, built for regulated verticals — healthcare,
   MSPs, enterprise IT.
 
@@ -112,7 +114,8 @@ Unified desktop app (Tauri v2) — one binary, both roles (ADR-062)
         │
         └─ iroh / QUIC (encrypted P2P, relay fallback) — the host is the authorization authority:
              local Allow/Deny consent · always-visible indicator · emergency stop
-             (roadmap: Ed25519 signed grants · capability leases · tamper-evident audit)
+             Ed25519/PASETO signed grants · capability leases · tamper-evident hash-chained audit
+             remote keyboard + mouse injection (CGEvent · XTEST · SendInput)
 ```
 
 The viewer decodes H.264 with **WebCodecs** and renders to canvas. **macOS is the development-lead
@@ -133,10 +136,19 @@ crates/                 # shared Rust core (the future SDK internals)
   ras-media-macos/      # macOS backend: ScreenCaptureKit + VideoToolbox (FFI; unsafe confined here)
   ras-media-scap/       # cross-platform capture (PipeWire / WGC / SCK) via the scap crate
   ras-media-openh264/   # software H.264 encoder (BGRA → I420 → Annex-B) for Linux/Windows
-  ras-transport-iroh/   # concrete iroh endpoint: control + per-frame video + health planes
+  ras-audio-opus/       # Opus audio encoder/decoder (output audio, ADR-077/080)
+  ras-transport-iroh/   # concrete iroh endpoint: control + per-frame video + audio + health planes
   ras-core/             # session state machine + orchestrators + ABR + frame codec + iroh adapter
   ras-host/             # headless host CLI (no-GUI share)
-  ras-{identity,grant,policy,control,audit}/   # subsystem stubs (Phase 2+)
+  ras-identity/         # Ed25519 identities · KeyStore seam · paired-controller registry
+  ras-bootstrap/        # rotating single-use connection tickets + replay/nonce cache
+  ras-grant/            # signed access requests · PASETO v4.public grants · unattended-access model
+  ras-policy/           # capability intersection · signed-catalogue file push
+  ras-control/          # control leases · generations · per-message OS-input gate (Inv 15)
+  ras-input-{macos,linux,windows}/   # OS keyboard/mouse injection (CGEvent · XTEST · SendInput)
+  ras-clipboard/        # cross-platform clipboard write (set-never-paste)
+  ras-files/            # safe file-write backend (O_NOFOLLOW|O_EXCL / CREATE_NEW)
+  ras-audit/            # hash-chained, host-signed, content-free audit journal
 app/                    # unified Tauri v2 desktop app — Share + Connect in one binary
 site/                   # marketing site (GitHub Pages)
 proto/                  # .proto wire source of truth
