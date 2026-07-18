@@ -1048,7 +1048,8 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 /// process alive after `main` closes — so without this, closing the main window would leave the screen
 /// streaming to the viewer with every indicator gone. Called from the window-close / exit event handler,
 /// so the stop is synchronous and in-process (no unawaited-IPC race like the JS `beforeunload` path).
-fn stop_active_share(handle: &tauri::AppHandle) {
+/// Returns `true` if a share was active (and has now been signalled to stop).
+fn stop_active_share(handle: &tauri::AppHandle) -> bool {
     use tauri::Manager;
     let state = handle.state::<AppState>();
     // Take the session out in its own statement so the `MutexGuard` temporary is dropped at the `;`
@@ -1056,6 +1057,9 @@ fn stop_active_share(handle: &tauri::AppHandle) {
     let session = lock(&state.share.session).take();
     if let Some(s) = session {
         let _ = s.stop.send(true);
+        true
+    } else {
+        false
     }
 }
 
@@ -1127,8 +1131,21 @@ fn main() {
                 event: tauri::WindowEvent::CloseRequested { .. },
                 ..
             } if label.as_str() == "main" => {
-                stop_active_share(handle);
-                handle.exit(0);
+                if stop_active_share(handle) {
+                    // A share was live. Let the window close, but keep the process alive briefly so the
+                    // detached `run_share` task can observe the stop and flush its `Bye{Revoked}` + audit
+                    // to the viewer before we exit — the task isn't joined by `exit`, so an immediate
+                    // `exit(0)` would race it and the viewer would see a bare transport drop. The grace is
+                    // well above the host's internal `BYE_FLUSH_GRACE` (~50 ms). Capture stops regardless
+                    // (the stop signal halts the media pump; process exit is the backstop).
+                    let h = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        h.exit(0);
+                    });
+                } else {
+                    handle.exit(0);
+                }
             }
             tauri::RunEvent::ExitRequested { .. } => {
                 stop_active_share(handle);
