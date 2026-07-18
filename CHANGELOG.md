@@ -69,6 +69,14 @@ capabilities implemented at the code level; on-device runtime verification statu
   cache-TTL sizing. Found and verified by an adversarial multi-agent review of the authorization core
   (the other four lenses — grant forgery, endpoint binding/expiry, per-message capability scope,
   unattended/pairing — passed clean).
+- Fixed two **indicator-honesty gaps** (Inv 7) in the app: (1) closing the main window left the detached
+  capture→stream loop running with the in-app indicator + Stop destroyed (the overlay window kept the
+  process alive) — a window-close/exit handler now halts the share deterministically in-process; (2) the
+  indicator lived only in the ordinary minimizable main window — an always-visible "REMOTE VIEWING/CONTROL
+  ACTIVE" badge now renders on the always-on-top overlay covering the shared display, and the main window
+  is non-minimizable during an active share so the Stop control stays reachable. Found by an adversarial
+  multi-agent review of the app integration layer (consent-integrity, secret-hygiene, command-surface,
+  and input-forwarding lenses passed clean).
 - **Never-panic fuzz on every untrusted-input decoder** — control framing, the video/audio wire
   headers, PASETO grants + access requests, the audit log file, and pasted connection tickets.
 
