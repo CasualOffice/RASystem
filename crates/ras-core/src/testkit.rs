@@ -537,6 +537,11 @@ pub struct CountingFrameSink {
 #[derive(Default)]
 struct CountingState {
     configured: AtomicBool,
+    /// Dimensions of the most recent `configure` call — i.e. what the decoder is actually set up for
+    /// (distinct from `last_width`/`last_height`, which track pushed *frame* dims). A mid-stream
+    /// resolution change must update these, or the decoder keeps decoding at the old size.
+    configured_width: AtomicU32,
+    configured_height: AtomicU32,
     pushed: AtomicU64,
     keyframes: AtomicU64,
     last_frame_id: AtomicU64,
@@ -577,6 +582,16 @@ impl CountingFrameSink {
     pub fn is_configured(&self) -> bool {
         self.inner.configured.load(Ordering::Relaxed)
     }
+    /// The width of the most recent `configure` call (what the decoder is actually set up for).
+    #[must_use]
+    pub fn configured_width(&self) -> u32 {
+        self.inner.configured_width.load(Ordering::Relaxed)
+    }
+    /// The height of the most recent `configure` call.
+    #[must_use]
+    pub fn configured_height(&self) -> u32 {
+        self.inner.configured_height.load(Ordering::Relaxed)
+    }
     /// The config width of the most recently pushed frame.
     #[must_use]
     pub fn last_width(&self) -> u32 {
@@ -601,8 +616,14 @@ impl CountingFrameSink {
 }
 
 impl FrameSink for CountingFrameSink {
-    fn configure(&self, _config: &StreamConfig) -> Result<(), CoreError> {
+    fn configure(&self, config: &StreamConfig) -> Result<(), CoreError> {
         self.inner.configured.store(true, Ordering::Relaxed);
+        self.inner
+            .configured_width
+            .store(config.width, Ordering::Relaxed);
+        self.inner
+            .configured_height
+            .store(config.height, Ordering::Relaxed);
         Ok(())
     }
     fn push(&self, frame: EncodedFrame) -> PushResult {

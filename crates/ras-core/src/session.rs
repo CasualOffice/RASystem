@@ -3069,6 +3069,17 @@ async fn controller_video_loop(inner: &ControllerInner) {
             return;
         };
         let mut seen_keyframe = false;
+        // Dimensions the renderer's decoder is currently configured for. A mid-stream resolution /
+        // monitor / DPI change rides its forced IDR as a new `EncodedFrame.config` (ADR-060), and the
+        // decoder must be reconfigured **atomically with that IDR** — else it keeps decoding at the old
+        // size (a torn/stretched render, or a decoder-error black-screen loop). Bitrate/fps changes are
+        // decoder-irrelevant (WebCodecs handles them transparently), so only a width/height change
+        // triggers a reconfigure. Seeded from the handshake config the renderer was already configured with.
+        let mut cur_dims = inner
+            .stream_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map(|c| (c.width, c.height));
         while !inner.stop.load(Ordering::Relaxed) {
             match source.next().await {
                 Ok(VideoEvent::Frame(ef)) => {
@@ -3083,6 +3094,18 @@ async fn controller_video_loop(inner: &ControllerInner) {
                         }
                         seen_keyframe = true;
                     }
+                    // Reconfigure the decoder if the dimensions changed. The host forces an IDR on the
+                    // change and the keyframe gate above guarantees this frame is that IDR, so configuring
+                    // right before pushing it reconfigures + feeds a decodable keyframe in one step.
+                    let dims = (ef.config.width, ef.config.height);
+                    let dims_changed = cur_dims != Some(dims);
+                    if dims_changed {
+                        *inner
+                            .stream_config
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ef.config);
+                        cur_dims = Some(dims);
+                    }
                     let fid = ef.frame_id;
                     if let Some(r) = inner
                         .renderer
@@ -3090,6 +3113,9 @@ async fn controller_video_loop(inner: &ControllerInner) {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone()
                     {
+                        if dims_changed {
+                            let _ = r.configure(&ef.config);
+                        }
                         let _ = r.push(ef);
                     }
                     inner.last_decoded_frame.store(fid, Ordering::Relaxed);

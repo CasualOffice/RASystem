@@ -679,6 +679,19 @@ mod e2e {
             !sink.saw_resize_without_keyframe(),
             "a resolution change must arrive atomically with an IDR"
         );
+        // …and the decoder was actually RECONFIGURED to the new dimensions — not merely fed frames that
+        // carry them. Without this the JS VideoDecoder keeps its original codedWidth/Height and renders
+        // torn/stretched (or error-loops on a strict impl). Regression for the media/transport review.
+        assert!(
+            wait_until(
+                || sink.configured_width() == 1920 && sink.configured_height() == 1080,
+                400
+            )
+            .await,
+            "the decoder must be reconfigured to the new resolution, got {}x{}",
+            sink.configured_width(),
+            sink.configured_height()
+        );
 
         controller.disconnect(StopReason::UserRequested).await;
         host.stop(StopReason::UserRequested).await;
