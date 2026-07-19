@@ -20,7 +20,9 @@ iroh-gossip = "0.101"
 # The shared endpoint identity (a contact's EndpointId is its Ed25519 pubkey). Pinned to the exact
 # version the transport crate uses so there is a single iroh in the tree.
 iroh = "=1.0.2"
-tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "io-util"] }
+# `Stream::next` on the gossip receiver.
+tokio-stream = "0.1"
 # Gossip broadcasts are `bytes::Bytes`; reuse the same crate the rest of the workspace does.
 bytes = "1"
 # Derive the pairwise presence TopicId (domain-separated hash of the two contact keys). Same RustCrypto
@@ -28,7 +30,7 @@ bytes = "1"
 sha2 = "0.10"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }
 
 [lints]
 workspace = true

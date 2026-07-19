@@ -1208,6 +1208,191 @@ body {
   }
 }
 
+/* ── Contacts (address book) ─────────────────────────────────────────────────────────────────── */
+.cards-secondary {
+  display: flex;
+  justify-content: center;
+  margin: 14px 0 4px;
+}
+.card-mini {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid #2a2a34;
+  background: #14141a;
+  color: #e8e8ee;
+  cursor: pointer;
+  text-align: left;
+  max-width: 460px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.card-mini:hover {
+  border-color: #55556a;
+  background: #181820;
+}
+.card-mini-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  border: 1px solid #2a2a34;
+  background: #101017;
+  color: #9ab7ff;
+}
+.card-mini-text {
+  display: flex;
+  flex-direction: column;
+}
+.card-mini-desc {
+  color: #9a9aa8;
+  font-size: 12.5px;
+}
+/* Add-contact form */
+.contact-add {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0 4px;
+}
+.contact-add #contact-input {
+  flex: 2 1 260px;
+}
+.contact-add #contact-label {
+  flex: 1 1 150px;
+}
+.contact-add input {
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid #2a2a34;
+  background: #101017;
+  color: #e8e8ee;
+  font: inherit;
+}
+.contact-add input:focus {
+  border-color: #6ea8ff;
+  outline: none;
+}
+.contact-add button.primary {
+  padding: 9px 18px;
+  border-radius: 9px;
+  border: 1px solid #3a8341;
+  background: #2f6b34;
+  color: #fff;
+  cursor: pointer;
+}
+.contact-add button.primary:hover {
+  background: #367a3d;
+}
+/* List */
+.contacts-list {
+  list-style: none;
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.contacts-empty {
+  color: #9a9aa8;
+  padding: 18px;
+  text-align: center;
+  border: 1px dashed #2a2a34;
+  border-radius: 12px;
+}
+.contact-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #2a2a34;
+  background: #14141a;
+}
+.contact-row.blocked {
+  opacity: 0.55;
+}
+.contact-info {
+  min-width: 0;
+}
+.contact-name {
+  font-weight: 600;
+}
+.contact-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #8a8a98;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.contact-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.contact-actions button {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid #2a2a34;
+  background: #1b1b22;
+  color: #e8e8ee;
+  cursor: pointer;
+  font: inherit;
+}
+.contact-actions button:hover:not(:disabled) {
+  border-color: #55556a;
+}
+.contact-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.contact-actions button.primary {
+  background: #2f6b34;
+  border-color: #3a8341;
+  color: #fff;
+}
+.contact-actions button.danger {
+  color: #ff8a8a;
+}
+
+/* Your own shareable identity on the Contacts screen */
+.my-identity {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #2a2a34;
+  background: #101017;
+  margin: 8px 0 14px;
+}
+.my-identity-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.my-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #9ab7ff;
+  font-size: 13px;
+}
+.my-identity .note {
+  color: #9a9aa8;
+  font-size: 12.5px;
+  margin: 6px 0 10px;
+}
+.my-identity button.primary {
+  padding: 8px 16px;
+  border-radius: 9px;
+  border: 1px solid #3a8341;
+  background: #2f6b34;
+  color: #fff;
+  cursor: pointer;
+}
+.my-identity button.primary:hover {
+  background: #367a3d;
+}
 .foot-sep {
   color: #55556a;
   margin: 0 4px;

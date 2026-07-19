@@ -36,6 +36,20 @@
           <div class="card-cta">Enter a ticket →</div>
         </button>
       </div>
+      <div class="cards-secondary">
+        <button class="card-mini" id="go-contacts">
+          <span class="card-mini-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="22" height="22">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" />
+              <path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
+            </svg>
+          </span>
+          <span class="card-mini-text">
+            <strong>Contacts</strong>
+            <span class="card-mini-desc">Save people once, then connect by name — no ticket to copy.</span>
+          </span>
+        </button>
+      </div>
       <p class="foot-note">Viewing works everywhere. Remote control (macOS host) asks the owner to
         approve, needs macOS input permission, and can be stopped anytime.</p>
       <p class="foot-note update-line">
@@ -45,6 +59,39 @@
           title="Copy app version + a content-free recent-events log to share when reporting an issue">Copy diagnostics</button>
         <span id="update-status"></span>
       </p>
+    </section>
+
+    <!-- ── Contacts (address book) ────────────────────────────────────────────────────────────── -->
+    <section id="contacts-view" class="view" hidden>
+      <header class="bar">
+        <button class="back" data-home>← Back</button>
+        <h2>Contacts</h2>
+      </header>
+      <p class="lead">Save someone once from a ticket they share, then connect to them by name — no
+        ticket to copy each time. They still approve every connection on their machine.</p>
+
+      <div id="my-identity" class="my-identity">
+        <div class="my-identity-head">
+          <strong>Your code</strong>
+          <span id="my-code" class="my-code" title="Your identity — read it aloud to verify">—</span>
+        </div>
+        <p class="note">Send this to someone so they can add you and reach you by name (they still
+          approve each connection). It stays the same across restarts.</p>
+        <button id="copy-my-code" type="button" class="primary">Copy my invite</button>
+      </div>
+
+      <form id="contact-add" class="contact-add" autocomplete="off">
+        <input id="contact-input" type="text" spellcheck="false" autocomplete="off"
+          placeholder="Paste their ticket (CASUALRAS1:…) or 64-char key" />
+        <input id="contact-label" type="text" spellcheck="false" autocomplete="off"
+          placeholder="Name (e.g. Alice's laptop)" maxlength="256" />
+        <button id="contact-add-btn" type="submit" class="primary">Add</button>
+      </form>
+      <p id="contact-add-error" class="status" hidden></p>
+
+      <ul id="contacts-list" class="contacts-list" aria-label="Saved contacts">
+        <li id="contacts-empty" class="contacts-empty">No contacts yet. Add someone above.</li>
+      </ul>
     </section>
 
     <!-- ── Share (host role) ──────────────────────────────────────────────────────────────────── -->

@@ -1,6 +1,6 @@
 [package]
 name = "casual-ras"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 rust-version = "1.90"
 license = "Apache-2.0"
@@ -47,6 +47,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
 ras-core = { path = "../../crates/ras-core", default-features = false }
+# Contacts address book (ADR-092): the durable FileContactBook + the ContactBook gate, so a saved
+# peer can be reached by identity (no ticket) and messages/requests are contacts-only.
+ras-identity = { path = "../../crates/ras-identity" }
+# Contact signaling (ADR-094/095): the SIGNAL_ALPN send/recv + gossip presence runtime.
+ras-signal = { path = "../../crates/ras-signal" }
 ras-media = { path = "../../crates/ras-media" }
 ras-protocol = { path = "../../crates/ras-protocol" }
 ras-transport-iroh = { path = "../../crates/ras-transport-iroh" }
