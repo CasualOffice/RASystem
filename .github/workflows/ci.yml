@@ -19,12 +19,13 @@ jobs:
           components: rustfmt, clippy
       # nasm builds OpenH264's x86 assembly (ras-media-openh264) on x86 runners; a no-op on arm macOS.
       - uses: ilammy/setup-nasm@v1
-      # Linux system deps for ras-media-scap's PipeWire capture path (pipewire + dbus + libclang).
+      # Linux system deps: ras-media-scap PipeWire capture (pipewire + dbus + libclang) and
+      # ras-audio-linux system-audio capture (libpulse — PulseAudio/PipeWire-pulse monitor source).
       - name: Linux capture deps
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libdbus-1-dev libclang-dev pkg-config
+          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libdbus-1-dev libclang-dev pkg-config
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
