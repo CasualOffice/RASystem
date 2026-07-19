@@ -1,0 +1,52 @@
+[package]
+name = "ras-cursor-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# macOS host-side CURSOR-SHAPE capture backend (ADR-073): reads the live system cursor and reports
+# each change as a `ras_core::CursorFrame` over the `ras_core::CursorObserver` seam. The host cursor
+# task then forwards it on the already-built cursor-shape channel (fresh RGBA the first time an id is
+# seen, else a `CursorCached` reference); the controller renders it client-side at zero latency.
+#
+# FFI-bearing platform crate (CONTRIBUTING §5): the workspace `unsafe_code = deny` is relaxed to
+# `allow` HERE ONLY, with `unsafe` confined behind the safe `CursorObserver` trait surface. Uses the
+# pure-Rust `objc2` framework bindings (no Swift bridge) — the same family as `ras-media-macos`. On
+# non-macOS targets the crate compiles to an empty lib so Linux/Windows CI stays green.
+
+[dependencies]
+ras-core = { path = "../ras-core" }
+bytes = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["time"] }
+
+# objc2 framework bindings are macOS-only: on other targets this crate compiles to an empty lib so
+# `cargo build --workspace` stays green on Linux CI.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+  "NSGeometry",
+  "NSData",
+  "NSObject",
+] }
+objc2-app-kit = { version = "0.3", features = [
+  "NSCursor",
+  "NSImage",
+  "NSImageRep",
+  "NSBitmapImageRep",
+  "NSGraphics",
+  "NSGraphicsContext",
+] }
+
+# FFI backend crate: unsafe confined here, wrapped in the safe `CursorObserver` trait surface
+# (CONTRIBUTING §5). Re-declares the workspace lint set with `unsafe_code` relaxed.
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

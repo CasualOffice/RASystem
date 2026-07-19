@@ -1,0 +1,59 @@
+[package]
+name = "ras-audio-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# macOS system-audio capture backend (ADR-077 audio pipeline) behind the `ras-media`
+# `AudioCaptureBackend` trait. Uses ScreenCaptureKit's audio tap (`capturesAudio = true`,
+# `excludesCurrentProcessAudio = true`) so the host streams the machine's *output* audio to the
+# controller while screen-sharing. FFI-bearing platform crate — `unsafe` is re-enabled here only
+# (CONTRIBUTING §5) and confined behind the safe trait surface. Uses the pure-Rust `objc2`
+# bindings (no Swift bridge), the same family `ras-media-macos` adopts.
+#
+# TCC: SCK system-audio capture is gated by the **Screen-Recording** permission (the same grant as
+# video capture). This crate does not — and must not — request it; the app surfaces the prompt.
+
+[dependencies]
+ras-media = { path = "../ras-media" }
+ras-protocol = { path = "../ras-protocol" }
+
+# objc2 framework bindings are macOS-only: on other targets this crate compiles to an empty
+# no-op backend so `cargo build --workspace` stays green on Linux/Windows CI.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSError", "NSObject"] }
+objc2-core-foundation = { version = "0.3", features = ["CFBase"] }
+objc2-screen-capture-kit = { version = "0.3", features = [
+  "SCStream",
+  "SCShareableContent",
+  "SCError",
+  "objc2-core-media",
+  "objc2-core-foundation",
+  "block2",
+  "dispatch2",
+  "std",
+] }
+objc2-core-media = { version = "0.3", features = [
+  "CMSampleBuffer",
+  "CMTime",
+  "CMBase",
+  "CMBlockBuffer",
+  "objc2-core-audio-types",
+] }
+objc2-core-audio-types = { version = "0.3", features = ["CoreAudioBaseTypes"] }
+dispatch2 = "0.3"
+block2 = "0.6"
+
+# FFI backend crate: unsafe confined here, wrapped in the safe `ras-media` trait surface
+# (CONTRIBUTING §5). Re-declares the workspace lint set with `unsafe_code` relaxed.
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
