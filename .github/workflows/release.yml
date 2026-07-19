@@ -34,7 +34,51 @@ permissions:
   contents: write # create the release and upload assets
 
 jobs:
+  # Gate the release on the FULL test suite + lints + license/advisory check before any artifact is
+  # built or published. Previously the release pipeline built + published with no tests run at all (the
+  # parallel `ci.yml` could be red while a tag still shipped). The build matrix below `needs: gate`, so
+  # a failing gate blocks every publish — you can never release from a red tree.
+  gate:
+    name: gate (fmt / clippy / test / deny)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: ilammy/setup-nasm@v1
+      - name: Linux system deps
+        run: |
+          sudo add-apt-repository -y ppa:pipewire-debian/pipewire-upstream
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libpipewire-0.3-dev \
+            libpulse-dev \
+            libdbus-1-dev \
+            libclang-dev \
+            pkg-config
+      - name: workspace fmt
+        run: cargo fmt --all -- --check
+      - name: workspace clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: workspace test
+        run: cargo test --all
+      # The app is out of the workspace (heavy WebView deps), so it's linted here explicitly — otherwise
+      # nothing checks the app's lints/format before it ships (the build only checks that it compiles).
+      - name: app fmt + clippy
+        run: |
+          cargo fmt --manifest-path app/src-tauri/Cargo.toml -- --check
+          cargo clippy --manifest-path app/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: license & advisory gate
+        uses: EmbarkStudios/cargo-deny-action@v2
+
   build:
+    needs: gate
     name: app (${{ matrix.os }})
     strategy:
       fail-fast: false
