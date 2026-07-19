@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 700" width="1120" height="700" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="Representative UI: file transfer. The sender's floating progress card shows a filename, state, percentage and a progress bar mid-transfer; the receiver's Accept/Deny offer modal names the incoming file and its size and warns to only accept expected files.">
+  <defs>
+    <style>
+      .win     { fill:#0b0b0e; }
+      .bar      { fill:#16161c; }
+      .barline  { stroke:#2a2a34; stroke-width:1; }
+      .field    { fill:#0b0b0e; stroke:#33333f; stroke-width:1; }
+      .btn      { fill:#23232c; stroke:#33333f; stroke-width:1; }
+      .btn-green{ fill:#2f6b34; stroke:#3a8341; stroke-width:1; }
+      .btntxt   { font-size:13px; font-weight:600; fill:#e8e8ee; }
+      .btntxt-w { font-size:13px; font-weight:600; fill:#ffffff; }
+      .mono     { font-size:12px; fill:#7c8ea0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+      .screen   { fill:#101017; }
+      .icon     { stroke:#e8e8ee; stroke-width:1.6; fill:none; stroke-linecap:round; stroke-linejoin:round; }
+      .card     { fill:#14141a; stroke:#2a2a34; stroke-width:1; }
+      .fname    { font-size:13px; font-weight:600; fill:#e8e8ee; }
+      .fstate   { font-size:12px; fill:#b9b9c6; }
+      .fpct     { font-size:11px; fill:#9a9aa8; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+      .ficon    { fill:#101017; stroke:#2a2a34; stroke-width:1; }
+      .filico   { stroke:#8b8cf6; stroke-width:1.6; fill:none; stroke-linecap:round; stroke-linejoin:round; }
+      .track    { fill:#23232c; }
+      .overlay  { fill:#000000; fill-opacity:0.6; }
+      .modal    { fill:#17171d; stroke:#33333f; stroke-width:1; }
+      .mtitle   { font-size:16px; font-weight:600; fill:#e8e8ee; }
+      .mname    { font-size:13px; font-weight:600; fill:#e8e8ee; }
+      .msize    { font-size:13px; fill:#9a9aa8; }
+      .mnote    { font-size:13px; fill:#b9b9c6; }
+      .mtimeout { font-size:12px; fill:#7a7a88; }
+    </style>
+  </defs>
+
+  <rect class="win" x="0" y="0" width="1120" height="700" rx="14"/>
+
+  <!-- connect bar (sender/viewer perspective) -->
+  <rect class="bar" x="0" y="0" width="1120" height="52"/>
+  <line class="barline" x1="0" y1="52" x2="1120" y2="52"/>
+  <rect class="btn" x="14" y="10" width="34" height="32" rx="6"/><text x="26" y="31" class="btntxt">&#8592;</text>
+  <rect class="field" x="58" y="10" width="470" height="32" rx="6"/>
+  <text x="72" y="30" class="mono">CASUALRAS1:8f2a1c09b4&#8230;e71d</text>
+  <rect class="btn-green" x="540" y="10" width="86" height="32" rx="6"/><text x="558" y="31" class="btntxt-w">Connect</text>
+  <!-- send file button, active/busy green -->
+  <rect class="btn-green" x="636" y="10" width="108" height="32" rx="6"/>
+  <g transform="translate(650,20)"><path class="icon" d="M6 12V2M6 2 3 5M6 2l3 3" stroke="#ffffff"/><path class="icon" d="M1 12v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1" stroke="#ffffff"/></g>
+  <text x="668" y="31" class="btntxt-w">Send file</text>
+  <rect class="btn" x="1000" y="10" width="106" height="32" rx="6"/><text x="1016" y="31" class="btntxt">Disconnect</text>
+
+  <!-- screen -->
+  <rect class="screen" x="0" y="52" width="1120" height="648"/>
+  <rect x="60" y="110" width="620" height="360" rx="10" fill="#16161c" stroke="#22222c" stroke-width="1"/>
+  <rect x="60" y="110" width="620" height="34" rx="10" fill="#1c1c24"/>
+  <circle cx="82" cy="127" r="5" fill="#33333f"/><circle cx="100" cy="127" r="5" fill="#33333f"/><circle cx="118" cy="127" r="5" fill="#33333f"/>
+  <rect x="86" y="176" width="300" height="14" rx="4" fill="#2a2a34"/>
+  <rect x="86" y="206" width="420" height="10" rx="4" fill="#22222c"/>
+  <rect x="86" y="226" width="360" height="10" rx="4" fill="#22222c"/>
+
+  <!-- ── Sender progress card (bottom-left) ──────────────────── -->
+  <g transform="translate(40,556)">
+    <rect class="card" x="0" y="0" width="320" height="108" rx="12"/>
+    <!-- icon -->
+    <rect class="ficon" x="14" y="14" width="26" height="26" rx="7"/>
+    <g transform="translate(20,20)"><path class="filico" d="M8 0v4h4"/><path class="filico" d="M8 0H2a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V4z"/></g>
+    <text x="50" y="32" class="fname">project-config.zip</text>
+    <text x="298" y="32" class="fstate" text-anchor="end" fill="#9a9aa8">&#215;</text>
+    <!-- meta -->
+    <text x="14" y="66" class="fstate">Sending&#8230;</text>
+    <text x="306" y="66" class="fpct" text-anchor="end">62%</text>
+    <!-- progress track -->
+    <rect class="track" x="14" y="78" width="292" height="6" rx="3"/>
+    <rect x="14" y="78" width="181" height="6" rx="3" fill="#7be0cf"/>
+    <rect x="150" y="78" width="45" height="6" fill="#8b8cf6"/>
+    <rect x="14" y="78" width="181" height="6" rx="3" fill="url(#g1)" fill-opacity="0"/>
+  </g>
+  <!-- gradient for fill -->
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7be0cf"/><stop offset="1" stop-color="#8b8cf6"/>
+    </linearGradient>
+  </defs>
+  <!-- overpaint the fill with the real gradient -->
+  <rect x="54" y="634" width="181" height="6" rx="3" fill="url(#g1)"/>
+
+  <!-- ── Receiver Accept/Deny modal (centered) ───────────────── -->
+  <rect class="overlay" x="0" y="52" width="1120" height="648"/>
+  <g transform="translate(350,220)">
+    <rect class="modal" x="0" y="0" width="420" height="236" rx="12"/>
+    <text x="24" y="42" class="mtitle">The viewer wants to send you a file</text>
+    <text x="24" y="82" class="mname">invoice-2026.pdf</text>
+    <text x="188" y="82" class="msize">2.4 MB</text>
+    <text x="24" y="112" class="mnote">It will be saved to your downloads. Only accept</text>
+    <text x="24" y="132" class="mnote">files you were expecting.</text>
+    <text x="24" y="166" class="mtimeout">Auto-declines in 0:52</text>
+    <!-- actions -->
+    <rect class="btn" x="196" y="184" width="90" height="36" rx="8"/>
+    <text x="241" y="207" class="btntxt" text-anchor="middle">Deny</text>
+    <rect class="btn-green" x="298" y="184" width="98" height="36" rx="8"/>
+    <text x="347" y="207" class="btntxt-w" text-anchor="middle">Accept</text>
+  </g>
+</svg>

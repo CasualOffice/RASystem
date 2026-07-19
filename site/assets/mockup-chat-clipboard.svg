@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 700" width="1120" height="700" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="Representative UI: the Connect (viewer) window with the collapsible in-session chat panel open. Two chat bubbles are shown, a message input with a Send button and a Send-clipboard button, and a blue clipboard-received notice.">
+  <defs>
+    <style>
+      .win     { fill:#0b0b0e; }
+      .bar      { fill:#16161c; }
+      .barline  { stroke:#2a2a34; stroke-width:1; }
+      .field    { fill:#0b0b0e; stroke:#33333f; stroke-width:1; }
+      .btn      { fill:#23232c; stroke:#33333f; stroke-width:1; }
+      .btn-green{ fill:#2f6b34; stroke:#3a8341; stroke-width:1; }
+      .btntxt   { font-size:13px; font-weight:600; fill:#e8e8ee; }
+      .btntxt-w { font-size:13px; font-weight:600; fill:#ffffff; }
+      .mono     { font-size:12px; fill:#7c8ea0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+      .screen   { fill:#101017; }
+      .banner   { fill:#c81e1e; }
+      .bannertxt{ font-size:12px; font-weight:600; fill:#ffffff; }
+      .hud      { fill:#7cfc7c; font-size:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+      .panel    { fill:#14141a; stroke:#2a2a34; stroke-width:1; }
+      .panelhd  { fill:#1b1b22; }
+      .ptitle   { font-size:13px; font-weight:600; fill:#e8e8ee; }
+      .caret    { fill:#9a9aa8; font-size:12px; }
+      .bub-them { fill:#23232c; }
+      .bub-me   { fill:#2f6b34; }
+      .msgtxt   { font-size:12.5px; fill:#e8e8ee; }
+      .msgtxt-w { font-size:12.5px; fill:#ffffff; }
+      .time     { font-size:9.5px; fill:#9a9aa8; }
+      .notice   { fill:#0f2540; stroke:#1a4a7a; stroke-width:1; }
+      .noticetxt{ font-size:12px; fill:#b9d5ff; }
+      .place    { font-size:12.5px; fill:#6a6a78; }
+      .icon     { stroke:#e8e8ee; stroke-width:1.6; fill:none; stroke-linecap:round; stroke-linejoin:round; }
+    </style>
+  </defs>
+
+  <!-- window -->
+  <rect class="win" x="0" y="0" width="1120" height="700" rx="14"/>
+
+  <!-- ── Connect bar ─────────────────────────────────────────── -->
+  <rect class="bar" x="0" y="0" width="1120" height="52"/>
+  <line class="barline" x1="0" y1="52" x2="1120" y2="52"/>
+  <!-- back -->
+  <rect class="btn" x="14" y="10" width="34" height="32" rx="6"/>
+  <text x="26" y="31" class="btntxt">&#8592;</text>
+  <!-- ticket field -->
+  <rect class="field" x="58" y="10" width="470" height="32" rx="6"/>
+  <text x="72" y="30" class="mono">CASUALRAS1:8f2a1c09b4&#8230;e71d</text>
+  <!-- connect (green) -->
+  <rect class="btn-green" x="540" y="10" width="86" height="32" rx="6"/>
+  <text x="558" y="31" class="btntxt-w">Connect</text>
+  <!-- take control -->
+  <rect class="btn" x="636" y="10" width="106" height="32" rx="6"/>
+  <text x="652" y="31" class="btntxt">Take control</text>
+  <!-- send file -->
+  <rect class="btn" x="752" y="10" width="108" height="32" rx="6"/>
+  <g transform="translate(766,20)"><path class="icon" d="M6 12V2M6 2 3 5M6 2l3 3"/><path class="icon" d="M1 12v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1"/></g>
+  <text x="784" y="31" class="btntxt">Send file</text>
+  <!-- disconnect -->
+  <rect class="btn" x="1000" y="10" width="106" height="32" rx="6"/>
+  <text x="1016" y="31" class="btntxt">Disconnect</text>
+
+  <!-- ── Remote screen area ──────────────────────────────────── -->
+  <rect class="screen" x="0" y="52" width="1120" height="648"/>
+  <!-- a faint depiction of a remote desktop being viewed -->
+  <rect x="60" y="110" width="620" height="360" rx="10" fill="#16161c" stroke="#22222c" stroke-width="1"/>
+  <rect x="60" y="110" width="620" height="34" rx="10" fill="#1c1c24"/>
+  <circle cx="82" cy="127" r="5" fill="#33333f"/><circle cx="100" cy="127" r="5" fill="#33333f"/><circle cx="118" cy="127" r="5" fill="#33333f"/>
+  <rect x="86" y="176" width="260" height="14" rx="4" fill="#2a2a34"/>
+  <rect x="86" y="204" width="360" height="10" rx="4" fill="#22222c"/>
+  <rect x="86" y="224" width="320" height="10" rx="4" fill="#22222c"/>
+  <rect x="86" y="244" width="380" height="10" rx="4" fill="#22222c"/>
+  <rect x="440" y="300" width="200" height="120" rx="8" fill="#101018" stroke="#26262f" stroke-width="1"/>
+
+  <!-- HUD -->
+  <rect x="12" y="62" width="240" height="22" rx="6" fill="#000000" fill-opacity="0.55"/>
+  <text x="20" y="77" class="hud">1440x900  60fps  rtt 12ms</text>
+
+  <!-- LIVE banner -->
+  <rect class="banner" x="948" y="62" width="160" height="22" rx="6"/>
+  <text x="964" y="77" class="bannertxt">&#9679; LIVE &#8212; viewing remote</text>
+
+  <!-- ── Chat + clipboard panel (bottom-right, open) ─────────── -->
+  <g transform="translate(772,318)">
+    <rect class="panel" x="0" y="0" width="336" height="360" rx="12"/>
+    <!-- header -->
+    <rect class="panelhd" x="1" y="1" width="334" height="38" rx="11"/>
+    <rect class="panelhd" x="1" y="16" width="334" height="23"/>
+    <circle cx="20" cy="20" r="4" fill="#34c759"/>
+    <text x="34" y="24" class="ptitle">Chat</text>
+    <text x="316" y="24" class="caret" text-anchor="end">&#9662;</text>
+    <line class="barline" x1="1" y1="39" x2="335" y2="39" stroke="#2a2a34"/>
+
+    <!-- message log -->
+    <!-- them bubble -->
+    <rect class="bub-them" x="16" y="56" width="196" height="46" rx="12"/>
+    <rect class="bub-them" x="16" y="92" width="14" height="10"/>
+    <text x="28" y="76" class="msgtxt">Hi! I can see your screen</text>
+    <text x="28" y="92" class="msgtxt">now &#8212; thanks.</text>
+    <text x="204" y="112" class="time" text-anchor="end">10:24</text>
+
+    <!-- me bubble -->
+    <rect class="bub-me" x="124" y="124" width="196" height="44" rx="12"/>
+    <rect class="bub-me" x="306" y="158" width="14" height="10"/>
+    <text x="312" y="144" class="msgtxt-w" text-anchor="end">Great. Sending you the</text>
+    <text x="312" y="160" class="msgtxt-w" text-anchor="end">config now.</text>
+    <text x="312" y="180" class="time" text-anchor="end">10:25</text>
+
+    <!-- clipboard received notice -->
+    <rect class="notice" x="16" y="196" width="304" height="34" rx="8"/>
+    <g transform="translate(28,206)"><rect class="icon" x="2" y="1" width="8" height="4" rx="1" stroke="#8fc4ff"/><path class="icon" d="M3 3H1a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1H9" stroke="#8fc4ff"/></g>
+    <text x="52" y="217" class="noticetxt">Clipboard received (128 chars)</text>
+
+    <!-- input + send -->
+    <rect class="field" x="16" y="248" width="228" height="34" rx="6"/>
+    <text x="28" y="269" class="place">Message&#8230;  (Enter to send)</text>
+    <rect class="btn-green" x="252" y="248" width="68" height="34" rx="6"/>
+    <text x="286" y="269" class="btntxt-w" text-anchor="middle">Send</text>
+
+    <!-- send clipboard -->
+    <rect class="btn" x="16" y="290" width="304" height="32" rx="6"/>
+    <g transform="translate(112,299)"><rect class="icon" x="3" y="1" width="8" height="4" rx="1"/><path class="icon" d="M4 3H1.5a1 1 0 0 0-1 1v9.5a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1H10"/></g>
+    <text x="200" y="311" class="btntxt" text-anchor="middle">Send clipboard</text>
+  </g>
+</svg>

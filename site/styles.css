@@ -918,6 +918,14 @@ svg {
 .muted-line a {
   color: var(--text-2);
 }
+/* Honest framing note under the representative UI mockups. */
+.note-repr {
+  display: inline-block;
+  max-width: 60ch;
+  color: var(--text-3);
+  font-size: 0.86rem;
+  font-style: italic;
+}
 .visually-hidden {
   position: absolute;
   width: 1px;

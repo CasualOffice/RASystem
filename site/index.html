@@ -101,6 +101,7 @@
           <li><a href="#why">Why embed</a></li>
           <li><a href="#consent">Consent</a></li>
           <li><a href="#inside">Inside</a></li>
+          <li><a href="#features">Features</a></li>
           <li><a href="#platforms">Platforms</a></li>
           <li><a href="#roadmap">Roadmap</a></li>
           <li><a href="#faq">FAQ</a></li>
@@ -249,6 +250,40 @@
           <figure class="shot">
             <img src="assets/feature-map.svg" width="1200" height="772" loading="lazy" alt="Feature map. Media: screen capture (macOS hardware, Linux/Windows software), H.264 to WebCodecs, Opus output audio, cursor shapes, multi-monitor, adaptive bitrate. Remote control: keyboard and mouse on macOS, Linux and Windows, control leases, emergency stop, per-message capability gate. Data channels: clipboard set-never-paste, signed-catalogue file transfer, in-session chat. Security: PASETO v4 signed grants, host-issued and endpoint-bound, local consent, hash-chained signed audit, paired-controller registry. Transport: iroh/QUIC encrypted peer-to-peer, separate control, video and audio planes, NAT traversal with relay fallback, hardened session reconnection." />
           </figure>
+        </div>
+      </section>
+
+      <!-- Full feature set — representative UI mockups of the collaboration surfaces -->
+      <section id="features" aria-labelledby="feat-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow">Full feature set</p>
+            <h2 id="feat-title">A complete session, not just a video feed</h2>
+            <p>Beyond viewing, a live session carries in-session chat, clipboard sharing, file transfer and output audio — each opted into by the machine&#8217;s owner, each with an honest, always-visible disclosure. The UI illustrations below represent the shipping app.</p>
+          </div>
+
+          <div class="shots-2">
+            <figure class="shot">
+              <img src="assets/mockup-chat-clipboard.svg" width="1120" height="700" loading="lazy"
+                alt="Representative illustration of the Connect (viewer) window with the collapsible in-session chat panel open in the corner: two chat bubbles, a message input with a Send button, a Send-clipboard button, and a blue notice reading Clipboard received." />
+              <figcaption><strong>Chat &amp; clipboard.</strong> A collapsible session chat with a one-click &#8220;Send clipboard&#8221; &#8212; the receiver only sets the clipboard, never auto-pastes.</figcaption>
+            </figure>
+            <figure class="shot">
+              <img src="assets/mockup-file-transfer.svg" width="1120" height="700" loading="lazy"
+                alt="Representative illustration of file transfer: the sender's floating progress card shows a filename, a Sending state, 62 percent and a progress bar, while the receiver's centered Accept or Deny modal names the incoming file and its size and warns to only accept expected files." />
+              <figcaption><strong>File transfer.</strong> A signed-catalogue push into a host-chosen folder &#8212; the receiver accepts each file by name and size; no browse-anywhere, no controller-supplied paths.</figcaption>
+            </figure>
+          </div>
+
+          <figure class="shot" style="margin-top:22px">
+            <img src="assets/mockup-audio-security.svg" width="1120" height="700" loading="lazy"
+              alt="Representative illustration of the Share (host) screen: a connection ticket, a blue AUDIO SHARED indicator, and two off-by-default opt-in toggles — Allow clipboard sharing (off) and Share system audio (on) — with a consent-first summary noting every capability is off by default, audio stays visibly disclosed, and the host enforces capability scope per message." />
+            <figcaption><strong>Output audio &amp; consent-first security.</strong> The owner opts into clipboard and system audio per session; sharing audio keeps an always-visible &#8220;AUDIO SHARED&#8221; disclosure the interface can&#8217;t suppress.</figcaption>
+          </figure>
+
+          <p class="muted-line" style="text-align:center">
+            <span class="note-repr">These are representative UI illustrations, faithful to the app&#8217;s real design &#8212; real screenshots ship with the first release.</span>
+          </p>
         </div>
       </section>
 
