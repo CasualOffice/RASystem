@@ -21,6 +21,10 @@ cbindgen = "0.27"
 ras-identity = { path = "../ras-identity" }
 ras-transport-iroh = { path = "../ras-transport-iroh" }
 ras-protocol = { path = "../ras-protocol" }
+# Session orchestration for the async surface — `LifecycleEvent`/`LifecycleStream` map to the C event
+# callback. `default-features = false` drops the `insecure-no-auth` AllowAllValidator (a shipping SDK
+# must never link the no-op consent seam), exactly like the app.
+ras-core = { path = "../ras-core", default-features = false }
 # Async runtime for the session-SDK surface: the SDK owns a multi-thread runtime behind an opaque
 # handle and delivers session lifecycle events to a Send-safe C callback (the async FFI foundation).
 tokio = { version = "1", features = ["rt-multi-thread"] }

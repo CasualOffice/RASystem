@@ -3966,6 +3966,7 @@ name = "ras-ffi"
 version = "0.0.1"
 dependencies = [
  "cbindgen",
+ "ras-core",
  "ras-identity",
  "ras-protocol",
  "ras-transport-iroh",

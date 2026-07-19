@@ -35,7 +35,7 @@ pub enum CasualRasEvent {
 pub type CasualRasEventCallback = extern "C" fn(user_data: *mut c_void, event: CasualRasEvent);
 
 /// A callback bound to its `user_data`, made `Send` so it can move into an async task.
-struct SendCallback {
+pub(crate) struct SendCallback {
     cb: CasualRasEventCallback,
     user_data: *mut c_void,
 }
@@ -125,6 +125,52 @@ pub unsafe extern "C" fn casual_ras_runtime_emit_test_event(
     })
 }
 
+/// Map a core [`ras_core::LifecycleEvent`] to the C ABI [`CasualRasEvent`]. Returns `None` for events
+/// the SDK does not surface yet (connecting / quality / pointer / geometry / in-session chat / …) — the
+/// session-connect FFI will grow the mapping as it exposes more.
+///
+/// `dead_code` allowed: exercised by tests today; the session handle (next increment) is its non-test
+/// caller.
+#[allow(dead_code)]
+fn map_lifecycle(ev: &ras_core::LifecycleEvent) -> Option<CasualRasEvent> {
+    use ras_core::LifecycleEvent as L;
+    match ev {
+        // Control channel up ⇒ the session is usable.
+        L::SessionReady { .. } => Some(CasualRasEvent::Connected),
+        L::Suspended { .. } => Some(CasualRasEvent::Suspended),
+        L::Resumed => Some(CasualRasEvent::Resumed),
+        L::SessionEnded { .. } | L::Disconnected { .. } | L::Revoked { .. } => {
+            Some(CasualRasEvent::Ended)
+        }
+        _ => None,
+    }
+}
+
+/// Pump a session's [`ras_core::LifecycleStream`] to the C callback on the runtime until the stream
+/// closes, mapping each core event to a [`CasualRasEvent`]. A final `Ended` is delivered on close if no
+/// terminal event was already sent — so a consumer always sees exactly one end. This is the
+/// event-delivery core the (next-increment) session handle drives; the connect/transport wiring plugs a
+/// real `ControllerSession`'s stream in here.
+#[allow(dead_code)]
+pub(crate) fn spawn_lifecycle_drain(
+    rt: &tokio::runtime::Runtime,
+    mut stream: ras_core::LifecycleStream,
+    cb: SendCallback,
+) {
+    rt.spawn(async move {
+        let mut ended = false;
+        while let Some(ev) = stream.recv().await {
+            if let Some(mapped) = map_lifecycle(&ev) {
+                ended |= mapped == CasualRasEvent::Ended;
+                cb.fire(mapped);
+            }
+        }
+        if !ended {
+            cb.fire(CasualRasEvent::Ended); // stream closed without an explicit terminal event
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -169,5 +215,49 @@ mod tests {
         );
         // Freeing NULL is a safe no-op.
         unsafe { casual_ras_runtime_free(std::ptr::null_mut()) };
+    }
+
+    // The event-delivery core: a synthetic lifecycle stream is mapped + delivered to the C callback,
+    // and a final Ended is synthesized when the stream closes.
+    #[test]
+    fn lifecycle_drain_maps_core_events_to_the_callback() {
+        use ras_core::LifecycleEvent;
+        let mut rt: *mut CasualRasRuntime = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { casual_ras_runtime_new(&mut rt) },
+            CasualRasStatus::Ok
+        );
+        let runtime = unsafe { &*rt };
+
+        let (tx, rx) = std::sync::mpsc::channel::<CasualRasEvent>();
+        let (ltx, lstream) = tokio::sync::mpsc::channel::<LifecycleEvent>(8);
+        let sc = SendCallback {
+            cb: capture_cb,
+            user_data: std::ptr::addr_of!(tx) as *mut c_void,
+        };
+        spawn_lifecycle_drain(&runtime.rt, lstream, sc);
+
+        runtime.rt.block_on(async {
+            ltx.send(LifecycleEvent::Suspended { since_ms: 0 })
+                .await
+                .unwrap();
+            ltx.send(LifecycleEvent::Resumed).await.unwrap();
+        });
+        drop(ltx); // close the stream → a final Ended is synthesized
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            CasualRasEvent::Suspended
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            CasualRasEvent::Resumed
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            CasualRasEvent::Ended
+        );
+
+        unsafe { casual_ras_runtime_free(rt) };
     }
 }
