@@ -339,11 +339,22 @@ async fn connect_to_host(
     let _ = disconnect(state.clone()).await;
 
     let target = EndpointAddr::from_ticket(ticket.trim()).map_err(|e| e.to_string())?;
-    let endpoint = Arc::new(Endpoint::bind().await.map_err(|e| e.to_string())?);
+    // The controller's persistent identity (ADR-092/093): same stable seed drives both the endpoint and
+    // the app-identity keystore, so a host can save THIS machine as a contact and reach it by name too
+    // (bidirectional). `None` ⇒ ephemeral fallback.
+    let id_seed = identity_seed(&app);
+    let endpoint = Arc::new(
+        match id_seed {
+            Some(seed) => Endpoint::bind_with_key(&seed).await,
+            None => Endpoint::bind().await,
+        }
+        .map_err(|e| e.to_string())?,
+    );
     let my_endpoint_id = endpoint.id().0;
-    // The controller's application identity (ephemeral per run in the MVP — persistence + a paired
-    // trusted-controller registry is a later step).
-    let ks = SoftwareKeyStore::generate().map_err(|e| e.to_string())?;
+    let ks = match id_seed {
+        Some(seed) => SoftwareKeyStore::from_seed(seed),
+        None => SoftwareKeyStore::generate().map_err(|e| e.to_string())?,
+    };
 
     // ── Bootstrap phase (casual-ras/bootstrap/1): request access, receive a grant. ──
     let boot_conn = endpoint
@@ -515,6 +526,22 @@ fn contacts_of<'a>(
         .contacts
         .as_ref()
         .ok_or_else(|| "contacts storage is unavailable".to_string())
+}
+
+/// Load (or create) this machine's **persistent Ed25519 identity seed** from the app data dir (ADR-092/
+/// 093). A stable seed ⇒ a stable EndpointId, so a contact who saved this machine reaches it by name
+/// across restarts, and the endpoint id == the contact id == the beacon/signal signing key. Returns
+/// `None` if the data dir is unavailable — the caller then uses an ephemeral identity (a saved contact
+/// would need a fresh ticket, degraded but never broken). The seed file is a raw 32-byte secret written
+/// `0600` (on unix) by `load_or_create`; we read it back so the endpoint's secret key and the keystore's
+/// public key are the same identity. It never crosses an IPC/log boundary (Inv 8).
+fn identity_seed(app: &tauri::AppHandle) -> Option<[u8; 32]> {
+    let dir = app.path().app_data_dir().ok()?;
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("identity.key");
+    ras_core::identity::SoftwareKeyStore::load_or_create(&path).ok()?;
+    let bytes = std::fs::read(&path).ok()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
 }
 
 /// List all saved contacts for the address-book UI.
@@ -1340,7 +1367,15 @@ async fn run_share(
         "share-status",
         "Starting… contacting a relay for a reachable address.",
     );
-    let endpoint = match IrohEndpoint::bind().await {
+    // This machine's persistent identity (ADR-092/093): a stable seed ⇒ a stable EndpointId, so a
+    // contact who saved this machine reaches it by name across restarts. `None` ⇒ the data dir is
+    // unavailable, and we fall back to an ephemeral identity (a saved contact would need a fresh ticket).
+    let id_seed = identity_seed(&app);
+    let bound = match id_seed {
+        Some(seed) => IrohEndpoint::bind_with_key(&seed).await,
+        None => IrohEndpoint::bind().await,
+    };
+    let endpoint = match bound {
         Ok(e) => Arc::new(e),
         Err(_) => {
             let _ = app.emit("share-status", "Failed to bind a network endpoint.");
@@ -1379,19 +1414,22 @@ async fn run_share(
     let _ = app.emit("share-ticket", endpoint.addr().to_ticket());
     let _ = app.emit("share-status", "Waiting for a viewer to connect…");
 
-    // This host's application identity + grant issuer (Phase 2). Ephemeral per share in the MVP; the
-    // issuer's key IS the host id, so the grants it mints verify against the same key the session-phase
-    // validator checks (`GrantSessionValidator` uses `ctx.host_id`). A persistent identity + a
-    // trusted-controller registry is a later step.
+    // This host's application identity + grant issuer (Phase 2). Derived from the SAME persistent seed
+    // as the endpoint (ADR-092/093), so `host_id == host_endpoint_id == the contact id` — one identity.
+    // The issuer's key IS the host id, so the grants it mints verify against the same key the
+    // session-phase validator checks (`GrantSessionValidator` uses `ctx.host_id`).
     use ras_core::grant::{LocalHostGrantIssuer, NonceCache, MAX_REQUEST_TTL_MS};
     use ras_core::identity::{KeyStore, SoftwareKeyStore};
-    let host_ks = match SoftwareKeyStore::generate() {
-        Ok(k) => k,
-        Err(_) => {
-            let _ = app.emit("share-status", "Failed to create a host identity.");
-            let _ = app.emit("share-active", false);
-            return;
-        }
+    let host_ks = match id_seed {
+        Some(seed) => SoftwareKeyStore::from_seed(seed),
+        None => match SoftwareKeyStore::generate() {
+            Ok(k) => k,
+            Err(_) => {
+                let _ = app.emit("share-status", "Failed to create a host identity.");
+                let _ = app.emit("share-active", false);
+                return;
+            }
+        },
     };
     let host_id = host_ks.public_key();
     let host_endpoint_id = endpoint.id().0;

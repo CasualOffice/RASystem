@@ -256,6 +256,19 @@ impl Endpoint {
     /// discovery + default relay preset). Advertising both lets one endpoint accept a bootstrap
     /// connection and a session connection and route them by their negotiated ALPN.
     pub async fn bind() -> Result<Self, TransportError> {
+        Self::bind_inner(None).await
+    }
+
+    /// Bind with a **fixed** Ed25519 secret so this endpoint has a **stable** [`EndpointId`] across app
+    /// runs — the basis for a persistent identity a contact can save once and reach by name (ADR-092/
+    /// 093). `seed` is the raw 32-byte Ed25519 secret; the `EndpointId` is exactly its public half, so it
+    /// equals the public key of a `SoftwareKeyStore::from_seed(seed)` — unifying the endpoint id, the
+    /// contact id, and the beacon/signal signing key into one identity.
+    pub async fn bind_with_key(seed: &[u8; 32]) -> Result<Self, TransportError> {
+        Self::bind_inner(Some(iroh::SecretKey::from_bytes(seed))).await
+    }
+
+    async fn bind_inner(key: Option<iroh::SecretKey>) -> Result<Self, TransportError> {
         // Keep an idle connection alive through the **human consent wait**. iroh's max idle timeout is
         // only 15s (direct) / 30s (relay), and its default sends NO QUIC keep-alive — so while the host
         // user reads the Allow/Deny prompt (which can easily take longer), the connection idles out and
@@ -265,9 +278,13 @@ impl Endpoint {
         let transport = QuicTransportConfig::builder()
             .default_path_keep_alive_interval(std::time::Duration::from_secs(5))
             .build();
-        let inner = IrohEndpoint::builder(presets::N0)
+        let mut builder = IrohEndpoint::builder(presets::N0)
             .alpns(vec![ALPN.to_vec(), BOOTSTRAP_ALPN.to_vec()])
-            .transport_config(transport)
+            .transport_config(transport);
+        if let Some(secret) = key {
+            builder = builder.secret_key(secret);
+        }
+        let inner = builder
             .bind()
             .await
             .map_err(|_| RasError::fatal(ErrorCode::TransportError, "endpoint bind failed"))?;
@@ -1514,6 +1531,21 @@ mod iroh_session_tests {
     /// framed control stream. Also asserts the identity guarantee (Invariant 9): each side sees the
     /// *other's* authenticated `EndpointId` as the connection's remote — the transport proves *who*,
     /// and nothing here grants any authority.
+    /// A persistent identity (ADR-092/093): binding with a fixed seed yields the SAME `EndpointId`
+    /// every time, and it is exactly the seed's Ed25519 public key — so a saved contact reaches the
+    /// same machine across app restarts, and the endpoint id == the contact id == the signing key.
+    #[tokio::test]
+    async fn bind_with_key_yields_a_stable_endpoint_id() {
+        let seed = [42u8; 32];
+        let a = Endpoint::bind_with_key(&seed).await.unwrap();
+        let id_a = a.id();
+        drop(a);
+        let b = Endpoint::bind_with_key(&seed).await.unwrap();
+        assert_eq!(id_a, b.id(), "same seed ⇒ same stable EndpointId");
+        let c = Endpoint::bind_with_key(&[7u8; 32]).await.unwrap();
+        assert_ne!(id_a, c.id(), "a different seed ⇒ a different id");
+    }
+
     #[tokio::test]
     async fn control_round_trips_over_a_real_iroh_connection() {
         let host = Endpoint::bind().await.unwrap();
