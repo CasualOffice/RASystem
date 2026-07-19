@@ -45,6 +45,10 @@ struct AppState {
     session: Mutex<Option<ConnectedSession>>,
     /// The **sharer** side (Share role).
     share: ShareState,
+    /// The local user's durable **contacts** address book (ADR-092): saved peers reachable by identity
+    /// (no ticket), and the deny-by-default gate for messages/requests. `None` only if the data dir
+    /// could not be opened at startup (contacts disabled, everything else still works).
+    contacts: Option<Arc<ras_identity::FileContactBook>>,
 }
 
 /// A connected viewer session: the controller + the iroh endpoint that must outlive it.
@@ -442,6 +446,176 @@ async fn connect_to_host(
         input_seq: std::sync::atomic::AtomicU64::new(0),
     });
     Ok(())
+}
+
+// ─── Contacts (address book + ticketless connect, ADR-092/093) ─────────────────────────────────────
+
+/// A contact as the UI sees it. Content-light (public key + label + timestamps + block flag); no secret.
+#[derive(serde::Serialize)]
+struct ContactDto {
+    /// Hex-encoded Ed25519 public identity (= iroh EndpointId).
+    id: String,
+    /// Grouped Crockford-base32 verification code (shown next to the QR / for a verbal check).
+    code: String,
+    label: String,
+    added_at: u64,
+    last_seen_at: u64,
+    blocked: bool,
+}
+
+impl From<ras_identity::Contact> for ContactDto {
+    fn from(c: ras_identity::Contact) -> Self {
+        ContactDto {
+            id: hex_id(c.id.as_bytes()),
+            code: ras_identity::contact_code(&c.id),
+            label: c.label,
+            added_at: c.added_at,
+            last_seen_at: c.last_seen_at,
+            blocked: c.blocked,
+        }
+    }
+}
+
+/// Lowercase-hex a 32-byte identity.
+fn hex_id(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Parse a contact identity from either a **connection ticket** (`CASUALRAS1:…`, whose id we keep) or a
+/// bare 64-char hex key. Fail-closed on anything else.
+fn parse_contact_id(input: &str) -> Result<[u8; 32], String> {
+    let input = input.trim();
+    if let Ok(addr) = ras_core::transport::EndpointAddr::from_ticket(input) {
+        return Ok(addr.id.0);
+    }
+    if input.len() == 64 {
+        let mut out = [0u8; 32];
+        for (i, chunk) in input.as_bytes().chunks(2).enumerate() {
+            let hi = (chunk[0] as char).to_digit(16);
+            let lo = (chunk[1] as char).to_digit(16);
+            match (hi, lo) {
+                (Some(h), Some(l)) => out[i] = (h as u8) << 4 | l as u8,
+                _ => return Err("not a valid contact code or key".into()),
+            }
+        }
+        return Ok(out);
+    }
+    Err("paste a contact's ticket or its 64-character key".into())
+}
+
+/// Handle to the contacts book, or a stable error if it could not be opened at startup.
+fn contacts_of<'a>(
+    state: &'a State<'_, AppState>,
+) -> Result<&'a Arc<ras_identity::FileContactBook>, String> {
+    state
+        .contacts
+        .as_ref()
+        .ok_or_else(|| "contacts storage is unavailable".to_string())
+}
+
+/// List all saved contacts for the address-book UI.
+#[tauri::command]
+fn list_contacts(state: State<'_, AppState>) -> Result<Vec<ContactDto>, String> {
+    use ras_identity::ContactBook;
+    let mut v: Vec<ContactDto> = contacts_of(&state)?
+        .list()
+        .into_iter()
+        .map(ContactDto::from)
+        .collect();
+    v.sort_by_key(|c| c.label.to_lowercase());
+    Ok(v)
+}
+
+/// Add (or relabel) a contact from a ticket or key + a human label. A re-add preserves the original
+/// pairing age and never silently unblocks (Inv 1). Returns the saved contact.
+#[tauri::command]
+fn add_contact(
+    state: State<'_, AppState>,
+    input: String,
+    label: String,
+) -> Result<ContactDto, String> {
+    use ras_identity::{Contact, ContactBook, ContactId};
+    let id = ContactId::from_bytes(parse_contact_id(&input)?);
+    let label = label.trim();
+    let label = if label.is_empty() {
+        ras_identity::contact_code(&id)
+            .split('-')
+            .next()
+            .unwrap_or("Contact")
+            .to_string()
+    } else {
+        label
+            .chars()
+            .take(ras_identity::MAX_CONTACT_LABEL)
+            .collect()
+    };
+    let now = now_ms();
+    let book = contacts_of(&state)?;
+    book.upsert(Contact {
+        id,
+        label,
+        added_at: now,
+        last_seen_at: now,
+        blocked: false,
+    });
+    book.get(&id)
+        .map(ContactDto::from)
+        .ok_or_else(|| "failed to save contact".into())
+}
+
+/// Remove a contact entirely (kill-switch).
+#[tauri::command]
+fn remove_contact(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    use ras_identity::{ContactBook, ContactId};
+    contacts_of(&state)?.remove(&ContactId::from_bytes(parse_contact_id(&id)?));
+    Ok(())
+}
+
+/// Block a contact: they can no longer be reached, nor deliver a message / access-request (Inv 1).
+#[tauri::command]
+fn set_contact_blocked(
+    state: State<'_, AppState>,
+    id: String,
+    blocked: bool,
+) -> Result<(), String> {
+    use ras_identity::{ContactBook, ContactId};
+    let cid = ContactId::from_bytes(parse_contact_id(&id)?);
+    let book = contacts_of(&state)?;
+    if blocked {
+        book.block(&cid);
+    } else {
+        book.unblock(&cid);
+    }
+    Ok(())
+}
+
+/// Connect to a **saved contact by identity — no ticket** (ADR-093). Builds an id-only target that iroh
+/// discovery resolves when the contact is online, then runs the exact same consent-gated two-phase
+/// connect as a pasted ticket (the host still validates the grant + asks its user to Allow — a contact
+/// removes the ticket step, never the consent, Inv 1). Refuses an unknown or blocked identity
+/// (contacts-only).
+#[tauri::command]
+async fn connect_to_contact(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    on_frame: Channel<InvokeResponseBody>,
+    on_audio: Channel<InvokeResponseBody>,
+) -> Result<(), String> {
+    use ras_identity::{ContactBook, ContactId};
+    let bytes = parse_contact_id(&id)?;
+    let cid = ContactId::from_bytes(bytes);
+    // Contacts-only: never dial an identity the user hasn't saved (or has blocked).
+    if !contacts_of(&state)?.is_active_contact(&cid) {
+        return Err("not a saved contact (or blocked)".into());
+    }
+    // An id-only ticket: no direct addrs / relay — iroh discovery resolves the live address by id.
+    let target = ras_core::transport::EndpointAddr::new(ras_core::transport::EndpointId(bytes));
+    connect_to_host(app, state, target.to_ticket(), on_frame, on_audio).await
 }
 
 /// Forward the viewer's pointer position to the host for its remote-pointer overlay ("look here").
@@ -1474,9 +1648,8 @@ async fn serve_one(
     // Host side of ADR-091 resume: on a transport drop the host re-accepts on the same endpoint and
     // waits for the same peer (by authenticated EndpointId) to re-dial, then resumes. Symmetric to the
     // controller's re-dial above.
-    let transport = Arc::new(
-        IrohSessionTransport::new(endpoint.clone(), session).with_reconnect_host(),
-    );
+    let transport =
+        Arc::new(IrohSessionTransport::new(endpoint.clone(), session).with_reconnect_host());
     let host = HostSession::new(
         // Exclude our own overlay/indicator windows from the shared feed (privacy + no feedback loop).
         HostSessionConfig::new(MonitorId(0))
@@ -1785,6 +1958,11 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             connect_to_host,
+            connect_to_contact,
+            list_contacts,
+            add_contact,
+            remove_contact,
+            set_contact_blocked,
             disconnect,
             send_pointer,
             send_chat,
@@ -1812,12 +1990,24 @@ fn main() {
         ])
         .setup(|app| {
             let consent = Arc::new(LocalConsent::new(app.handle().clone()));
+            // Open the durable contacts book under the app data dir (created if absent). Best-effort:
+            // if the data dir is unavailable the app still runs, contacts just aren't persisted.
+            let contacts = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .and_then(|dir| {
+                    let _ = std::fs::create_dir_all(&dir);
+                    ras_identity::FileContactBook::open(dir.join("contacts.rcb")).ok()
+                })
+                .map(Arc::new);
             app.manage(AppState {
                 session: Mutex::new(None),
                 share: ShareState {
                     session: Mutex::new(None),
                     consent,
                 },
+                contacts,
             });
 
             // Keep the overlay hidden at startup. Do NOT call `set_ignore_cursor_events` here: on
