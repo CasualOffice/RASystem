@@ -3987,6 +3987,7 @@ dependencies = [
  "ras-protocol",
  "sha2 0.10.9",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
