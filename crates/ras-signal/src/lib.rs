@@ -20,6 +20,8 @@
 use ras_identity::{ContactBook, ContactId, KeyStore, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use ras_protocol::{ErrorCode, RasError, Redacted};
 
+pub mod presence;
+
 /// Signaling errors reuse the shared taxonomy.
 pub type SignalError = RasError;
 

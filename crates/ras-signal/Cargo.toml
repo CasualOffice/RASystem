@@ -13,10 +13,22 @@ ras-identity = { path = "../ras-identity" }
 # Shared error taxonomy + the `Redacted` secret wrapper (message bodies are secrets, Inv 8).
 ras-protocol = { path = "../ras-protocol" }
 
-# The iroh-gossip presence engine + the `casual-ras/signal/1` ALPN handler are added in a later
-# increment (they need a live iroh Endpoint). This crate is the **pure, off-device-testable** signed
-# signaling core first — the security heart — mirroring how `ras-grant` keeps `AccessRequest`'s
-# canonical signing pure and separate from the transport.
+# Presence over epidemic broadcast. iroh-gossip 0.101 depends on `iroh ^1`, satisfied by our pinned
+# `=1.0.2` (verified). Gossip carries only tiny SIGNED beacons (≤4 KiB); it never authenticates
+# authorship itself (delivered_from = forwarder), which is why the signed-signal core above exists.
+iroh-gossip = "0.101"
+# The shared endpoint identity (a contact's EndpointId is its Ed25519 pubkey). Pinned to the exact
+# version the transport crate uses so there is a single iroh in the tree.
+iroh = "=1.0.2"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+# Gossip broadcasts are `bytes::Bytes`; reuse the same crate the rest of the workspace does.
+bytes = "1"
+# Derive the pairwise presence TopicId (domain-separated hash of the two contact keys). Same RustCrypto
+# sha2 the audit journal uses (MIT/Apache).
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 [lints]
 workspace = true
