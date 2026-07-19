@@ -34,7 +34,51 @@ permissions:
   contents: write # create the release and upload assets
 
 jobs:
+  # Gate the release on the FULL test suite + lints + license/advisory check before any artifact is
+  # built or published. Previously the release pipeline built + published with no tests run at all (the
+  # parallel `ci.yml` could be red while a tag still shipped). The build matrix below `needs: gate`, so
+  # a failing gate blocks every publish — you can never release from a red tree.
+  gate:
+    name: gate (fmt / clippy / test / deny)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: ilammy/setup-nasm@v1
+      - name: Linux system deps
+        run: |
+          sudo add-apt-repository -y ppa:pipewire-debian/pipewire-upstream
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libpipewire-0.3-dev \
+            libpulse-dev \
+            libdbus-1-dev \
+            libclang-dev \
+            pkg-config
+      - name: workspace fmt
+        run: cargo fmt --all -- --check
+      - name: workspace clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: workspace test
+        run: cargo test --all
+      # The app is out of the workspace (heavy WebView deps), so it's linted here explicitly — otherwise
+      # nothing checks the app's lints/format before it ships (the build only checks that it compiles).
+      - name: app fmt + clippy
+        run: |
+          cargo fmt --manifest-path app/src-tauri/Cargo.toml -- --check
+          cargo clippy --manifest-path app/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: license & advisory gate
+        uses: EmbarkStudios/cargo-deny-action@v2
+
   build:
+    needs: gate
     name: app (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -101,10 +145,18 @@ jobs:
             Alpha build of **Casual RAS** — one desktop app that does both roles:
 
             - **Connect** to another machine and view its screen (with a remote pointer to point at
-              things). Works on macOS, Linux, and Windows.
+              things). Verified on **macOS**; expected to work on **Windows**. **Linux viewing is
+              limited**: the Linux WebView (WebKitGTK) often can't decode the H.264 video stream, in
+              which case the app shows an honest "can't display the shared screen" message rather than
+              a black screen — a native decode fallback is planned.
             - **Share** this machine's screen — it asks you for Allow/Deny before any pixels leave.
-              Works on macOS, Linux and Windows. Linux/Windows sharing is **experimental**: it is
-              built and compile-checked in CI but has not yet been verified on real hardware.
+              **Verified on macOS.** Linux/Windows sharing is **experimental** — built and
+              compile-checked in CI but **not yet verified on real hardware**; Linux control/capture
+              needs an **X11/Xwayland** session (a pure Wayland session is not yet supported).
+
+            > This is an **alpha**. The networked and OS-level paths are extensively unit-tested but
+            > on-device verification across machines/OSes is still in progress — expect rough edges,
+            > and please report what breaks.
 
             **Remote control** is available only when the machine being shared is a **macOS** host,
             and requires a *second*, separate Allow/Deny from that machine's local user before any
@@ -121,3 +173,31 @@ jobs:
             on Windows, "More info → Run anyway" past SmartScreen.
           releaseDraft: true
           prerelease: true
+
+  # Supply-chain artifacts: a CycloneDX SBOM + a full third-party license notices file for the exact
+  # dependency tree shipped in this release, attached to the GitHub release. Runs AFTER `build` (so the
+  # release exists to upload to) and only if the `gate` passed. A failure here never un-publishes the
+  # release — it just flags that the artifacts are missing.
+  sbom:
+    name: SBOM + third-party notices
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install SBOM tools
+        run: cargo install cargo-cyclonedx cargo-bundle-licenses
+      - name: Generate CycloneDX SBOM (the shipped app's full dependency tree)
+        run: cargo cyclonedx --manifest-path app/src-tauri/Cargo.toml --format json
+      - name: Generate third-party license notices
+        working-directory: app/src-tauri
+        run: cargo bundle-licenses -f toml -o "$GITHUB_WORKSPACE/THIRD-PARTY-NOTICES.toml"
+      - name: Attach artifacts to the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release upload "$TAG" \
+            app/src-tauri/casual-ras.cdx.json \
+            THIRD-PARTY-NOTICES.toml \
+            --clobber

@@ -335,6 +335,7 @@ async fn connect_to_host(
     use ras_core::{ControllerSessionConfig, IrohSessionTransport};
     use ras_protocol::{AccessOutcome, BootstrapMsg, PROTOCOL_VERSION};
 
+    log::info!("connect: dialing host (two-phase: bootstrap → grant → session)");
     // Tear down any prior viewer session first.
     let _ = disconnect(state.clone()).await;
 
@@ -398,6 +399,7 @@ async fn connect_to_host(
     let grant = match boot.recv().await.map_err(|e| e.to_string())? {
         BootstrapMsg::AccessDecision(AccessOutcome::Allowed { grant }) => grant,
         BootstrapMsg::AccessDecision(AccessOutcome::Denied { code }) => {
+            log::warn!("connect: host denied access (code {code:?})");
             return Err(format!("access denied ({code})"));
         }
         _ => return Err("unexpected bootstrap decision from host".into()),
@@ -448,6 +450,7 @@ async fn connect_to_host(
     // Drain the lifecycle stream so reconnection (Suspended/Resumed) surfaces in the viewer UI (#22)
     // instead of being parked. The task ends when the stream closes (the session is dropped below on a
     // later disconnect). Emit an initial "connected" so the UI clears any stale banner.
+    log::info!("connect: session live");
     let _ = app.emit("conn-status", "connected");
     tauri::async_runtime::spawn(drain_viewer_lifecycle(events, app));
 
@@ -1101,6 +1104,11 @@ impl LocalConsent {
         );
         *lock(&self.pending) = None;
         let _ = self.app.emit("consent-closed", ());
+        // Content-free security-relevant event (the decision, not the peer's content) — Inv 8.
+        log::info!(
+            "consent: view access {}",
+            if allow { "ALLOWED" } else { "denied" }
+        );
         allow
     }
 }
@@ -1405,6 +1413,7 @@ async fn run_share(
     let endpoint = match bound {
         Ok(e) => Arc::new(e),
         Err(_) => {
+            log::error!("share: endpoint bind failed");
             let _ = app.emit("share-status", "Failed to bind a network endpoint.");
             let _ = app.emit("share-active", false);
             return;
@@ -1431,10 +1440,13 @@ async fn run_share(
         _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => false,
     };
     if !online {
+        log::warn!("share: no relay reachable within 20s — direct-address only (LAN)");
         let _ = app.emit(
             "share-status",
             "No relay reachable — sharing a direct-address code. It will work only if the viewer is on the same network. Check your internet connection or firewall, then try again for remote access.",
         );
+    } else {
+        log::info!("share: online, endpoint reachable");
     }
     // The ticket carries this endpoint's direct socket addresses (known since bind) plus its relay, so
     // it is dialable on a LAN even when the relay never came up.
@@ -1452,6 +1464,7 @@ async fn run_share(
         None => match SoftwareKeyStore::generate() {
             Ok(k) => k,
             Err(_) => {
+                log::error!("share: failed to create host identity");
                 let _ = app.emit("share-status", "Failed to create a host identity.");
                 let _ = app.emit("share-active", false);
                 return;
@@ -1806,6 +1819,7 @@ async fn serve_one(
     }
 
     // Approved: session is Active. Show the indicator + the pointer overlay.
+    log::info!("share: viewer connected — REMOTE VIEWING ACTIVE");
     let _ = app.emit("share-status", "Viewer connected — REMOTE VIEWING ACTIVE.");
     let _ = app.emit("share-viewer", true);
     if let Some(ov) = app.get_webview_window("overlay") {
@@ -1828,6 +1842,7 @@ async fn serve_one(
         tokio::select! {
             _ = stop.changed() => {
                 if *stop.borrow() {
+                    log::info!("share: Stop pressed — halting session (emergency stop path, Inv 4)");
                     host.stop(StopReason::UserRequested).await;
                     break;
                 }
@@ -1943,6 +1958,34 @@ async fn serve_one(
 // **user-initiated** here — no silent background replacement — and applied only on explicit consent,
 // consistent with "the local user is the final owner of the machine" (Inv 1).
 
+/// Return recent diagnostics — app version, OS/arch, and the tail of the **content-free** log file —
+/// for the user to copy and share when reporting an issue. This is what makes the field logging
+/// actionable: on-device, one click yields a shareable trail. Content-free by construction (the log
+/// never holds pixels/keystrokes/clipboard/typed-text/secrets — Inv 8), so this is always safe to copy.
+#[tauri::command]
+fn read_diagnostics(app: tauri::AppHandle) -> Result<String, String> {
+    let mut out = format!(
+        "Casual RAS {} · {} · {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    if let Ok(dir) = app.path().app_log_dir() {
+        match std::fs::read_to_string(dir.join("casual-ras.log")) {
+            // Last ~200 lines is plenty for a recent-events tail (line-based, so never a UTF-8 split).
+            Ok(contents) => {
+                let mut lines: Vec<&str> = contents.lines().collect();
+                let start = lines.len().saturating_sub(200);
+                lines.drain(..start);
+                out.push_str("\n\n--- recent log ---\n");
+                out.push_str(&lines.join("\n"));
+            }
+            Err(_) => out.push_str("\n(no log recorded yet)"),
+        }
+    }
+    Ok(out)
+}
+
 /// Check the configured endpoint for a newer signed release. `Ok(Some(version))` if one is available,
 /// `Ok(None)` if up to date, `Err(msg)` if the updater is not configured / unreachable (surfaced to
 /// the user, never silently swallowed).
@@ -2021,6 +2064,19 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Native OS notifications for inbound requests / chat (see `alert_user`).
         .plugin(tauri_plugin_notification::init())
+        // Field diagnostics: a rotating log file in the OS log dir + stderr. Content-free (Inv 8).
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .max_file_size(2_000_000)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("casual-ras".into()),
+                    }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stderr),
+                ])
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             connect_to_host,
             connect_to_contact,
@@ -2053,8 +2109,14 @@ fn main() {
             respond_file_offer,
             check_for_updates,
             install_update,
+            read_diagnostics,
         ])
         .setup(|app| {
+            log::info!(
+                "Casual RAS {} started on {}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS
+            );
             let consent = Arc::new(LocalConsent::new(app.handle().clone()));
             // Open the durable contacts book under the app data dir (created if absent). Best-effort:
             // if the data dir is unavailable the app still runs, contacts just aren't persisted.

@@ -84,6 +84,25 @@ document.querySelectorAll("[data-home]").forEach((b) =>
   });
 })();
 
+// "Copy diagnostics": app version + a content-free recent-events log tail, to the OS clipboard — so
+// when something breaks on-device the user can paste a useful trail into an issue report (Inv 8: the
+// log holds no secrets/pixels/keystrokes).
+(function () {
+  const btn = document.getElementById("copy-diagnostics");
+  const status = document.getElementById("update-status");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    try {
+      const diag = await invoke("read_diagnostics");
+      await navigator.clipboard.writeText(diag);
+      if (status) status.textContent = "Diagnostics copied to clipboard.";
+    } catch (e) {
+      if (status) status.textContent = "Couldn't copy diagnostics.";
+      console.warn("diagnostics:", e);
+    }
+  });
+})();
+
 // ── Video decode (Connect role) ──────────────────────────────────────────────────────────────────
 const HEADER_LEN = 24;
 const FRAME_MAGIC = 0x52415331; // "RAS1" big-endian — a frame blob
@@ -114,6 +133,11 @@ function fatalError(msg) {
   if (!fatalEl) return;
   fatalTextEl.textContent = msg;
   fatalEl.hidden = false;
+  // Record it in the app log file so an on-device black-screen (e.g. WebKitGTK can't decode H.264)
+  // leaves a trail. The message is a capability/engine string — content-free (Inv 8).
+  try {
+    window.__TAURI__?.log?.error("viewer fatal: " + msg);
+  } catch (_) {}
 }
 function clearFatalError() {
   if (!fatalEl) return;

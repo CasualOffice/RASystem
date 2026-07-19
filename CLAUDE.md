@@ -46,6 +46,21 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
 
 ## 3. Current status
 
+> **⚠️ Verification & production-readiness — read this first (honest baseline).** An evidence-based
+> production-readiness audit (2026-07) rates the project **~2.3/5 — a strong, security-literate ALPHA,
+> not beta or production.** Throughout this status section, **"landed / implemented / done" means
+> off-device-verified** (unit / loopback / compile / `cargo-deny` green) **unless it explicitly says
+> "on-device."** The load-bearing gap is that **almost none of the networked or OS-level paths have
+> been verified on real hardware or a real two-machine network** — OS capture/input, real iroh
+> sessions, audio, the contacts layer. **Windows has never been run at all** (no test hardware; it is
+> CI-compile-gated only). **Linux viewing is limited** (WebKitGTK often can't decode H.264 → honest
+> error) and **Linux host needs X11/Xwayland** (pure Wayland unsupported). Builds are **unsigned**
+> (Gatekeeper/SmartScreen warn), auto-update is **wired but inert** (owner must provision the signing
+> key), and the **SDK — the actual embeddable product (S1) — is not started** (today: two reference
+> apps). Do not describe any networked/OS feature as production-ready or "works on \<OS\>" without an
+> on-device run (Inv 17). Path to production is **quarters, not weeks**, gated first on an **on-device
+> verification campaign** + **Windows hardware**.
+
 - **Real-run hardening pass (2026-07, pre-release `v0.0.2-alpha`).** A deep multi-agent blocker sweep
   of the two-machine path (the environment-only class loopback tests structurally cannot catch) found
   and fixed six defects: (1) **grant lost on the wire** — the host dropped the bootstrap QUIC

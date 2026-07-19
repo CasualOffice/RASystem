@@ -1393,3 +1393,7 @@ body {
 .my-identity button.primary:hover {
   background: #367a3d;
 }
+.foot-sep {
+  color: #55556a;
+  margin: 0 4px;
+}

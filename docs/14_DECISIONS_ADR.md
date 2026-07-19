@@ -1259,6 +1259,39 @@
     durable **mailbox is out of scope** (it needs an always-on node = backend, conflicting with the
     no-backend-until-Phase-9 stance) — deferred, not built.
 
+## SDK (S1 — extract SDKs from the proven crates)
+
+- **ADR-096 · Start the SDK as a `ras-ffi` C ABI over the proven synchronous core · Accepted.**
+  - **Context.** Strategy S1 says: build the reference apps first, then draw the SDK boundary around
+    the proven crates and add a C ABI (`cbindgen`) + N-API. The apps exist; this begins the SDK track
+    (the actual embeddable product — until now there is none, only two reference apps).
+  - **Decision.** A new `crates/ras-ffi` crate (`cdylib` + `staticlib`) exposes a **C ABI**, starting
+    with the **pure, synchronous, already-verified** primitives — identity (generate / load-or-create /
+    public key / sign), the Crockford contact/pairing code, and connection-ticket parsing — because a
+    C ABI over *those* is fully testable off-device, whereas the async session orchestration (a
+    callback/runtime FFI model) is the larger follow-up. `cbindgen` generates `casual_ras.h`.
+  - **ABI conventions (load-bearing for a stable SDK).** Opaque handles (`Box::into_raw`/`from_raw`)
+    with explicit `_free`; **integer status codes** (`0 = OK`) + out-params, never Rust types across
+    the boundary; caller-provided byte/char buffers with capacity checks; **every entry point is
+    `catch_unwind`-guarded** so a Rust panic can never unwind across the FFI boundary (UB) — it becomes
+    an `Internal` status. No secret is ever returned (Inv 8): the identity handle signs + yields the
+    *public* key only, exactly like `KeyStore`.
+  - **Scope / deferred.** This lands the crate + the synchronous surface + header generation + FFI
+    tests. The **session/host/controller SDK** (async, consent callbacks, media), the **N-API** binding,
+    `THIRD-PARTY-NOTICES`/SBOM for the SDK artifact, and a real cross-language integration consumer are
+    the follow-ups. The SDK is Apache-2.0 (ADR-051) so licensees embed it with no copyleft.
+  - **SDK BOUNDARY (load-bearing).** The SDK exposes the **remote-access engine only**: identity,
+    authorization (grants/leases/per-message gate), the session (connect / host / view / control /
+    consent), transport, and media. It **deliberately excludes** contacts, messaging, presence,
+    discovery, and address books — those are **the integrator's product**, not ours: an integrator
+    builds their own contact model / user directory / signaling on top of our primitives. Baking a
+    contacts opinion into the SDK would force integrators to architect around our choices (the wrong
+    place for us to be). `ras-signal` / `ContactBook` / gossip therefore stay **app-only** (the
+    reference implementation) and are **never** part of `ras-ffi`. Corollary: the **webapp/browser
+    controller** (a remote-access controller over WebRTC/WebTransport, ADR-057) **is** in SDK scope —
+    it is the remote-access controller, just on a different transport behind the same `SessionTransport`
+    seam.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
