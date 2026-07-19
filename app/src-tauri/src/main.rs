@@ -90,6 +90,16 @@ async fn drain_viewer_lifecycle(mut events: LifecycleStream, app: tauri::AppHand
             LifecycleEvent::ClipboardApplied { len } => {
                 let _ = app.emit("clipboard-received", len);
             }
+            // The host authorized + consented to our file offer (ADR-086): start streaming chunks. The
+            // UI listens for `file-accepted` to begin `file_chunk`. Content-free.
+            LifecycleEvent::FileTransferAccepted => {
+                let _ = app.emit("file-accepted", ());
+            }
+            // The host refused our file offer (unknown target / capability withheld / unsafe filename /
+            // too large / consent denied): stop streaming. Surface the stable reason code (content-free).
+            LifecycleEvent::FileTransferRejected { code } => {
+                let _ = app.emit("file-rejected", format!("{code:?}"));
+            }
             LifecycleEvent::SessionEnded { .. }
             | LifecycleEvent::Disconnected { .. }
             | LifecycleEvent::Revoked { .. } => {
@@ -115,18 +125,30 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// The Phase-3 default policy **plus the two clipboard capabilities** (ADR-076/079).
-/// `phase3_default_policy()` *withholds* `clipboard.read`/`clipboard.write` (default OFF), which would
-/// make every clipboard push refuse fail-closed. Adding them here only **raises the ceiling** so
-/// clipboard *can* flow: the grant is still `requested ∩ policy ∩ ceiling`, the local Allow/Deny
-/// consent gate still runs, and the host-side per-message capability gate (Inv 15) still enforces every
-/// message. This merely lets consent *be able* to grant clipboard — nothing else about authorization
-/// changes. Used on both ends: the viewer requests it (so its `requested` set includes clipboard) and
-/// the host issues against it (so its ceiling admits clipboard).
-fn capabilities_with_clipboard() -> ras_core::policy::CapabilitySet {
+/// The name of the single file-transfer drop target this app exposes (ADR-086). A controller pushes to
+/// `"drop"`; the required per-target capability is `file.push.drop` (see [`ras_policy::file`]). Kept flat
+/// (no `.`) so the capability namespace stays a single leaf.
+const FILE_DROP_TARGET: &str = "drop";
+
+/// The Phase-3 default policy **plus the two clipboard capabilities and the file-push capability**
+/// (ADR-076/079/086). `phase3_default_policy()` *withholds* `clipboard.read`/`clipboard.write` and
+/// declares no `file.push.*` target (all default OFF), which would make every clipboard/file push refuse
+/// fail-closed. Adding them here only **raises the ceiling** so those flows *can* happen: the grant is
+/// still `requested ∩ policy ∩ ceiling`, the local Allow/Deny consent gate still runs, the per-transfer
+/// file consent still prompts (Inv 1), and the host-side per-message capability gate (Inv 15) still
+/// enforces every message + the pure `authorize_file_push` still validates the leaf filename (the danger
+/// channel stays core-enforced). This merely lets consent *be able* to grant clipboard/file — nothing
+/// else about authorization changes. Used on both ends: the viewer requests it (so its `requested` set
+/// includes them) and the host issues against it (so its ceiling admits them).
+fn capabilities_with_extras() -> ras_core::policy::CapabilitySet {
     let mut policy = ras_core::policy::phase3_default_policy();
     policy.insert(ras_core::policy::CLIPBOARD_READ.to_string());
     policy.insert(ras_core::policy::CLIPBOARD_WRITE.to_string());
+    // The per-target file-push cap (`file.push.drop`). Consent + per-message gate + filename validation
+    // still apply — this only lifts the coarse grant ceiling so a push *can* be authorized at all.
+    policy.insert(ras_core::policy::file::file_push_capability(
+        FILE_DROP_TARGET,
+    ));
     policy
 }
 
@@ -226,7 +248,7 @@ async fn connect_to_host(
         // input and clipboard. This only sets what the controller *may later ask for*; actually
         // injecting/clipboarding still needs the host's ceiling ∩ policy + consent (Invariant 1) — the
         // grant is the coarse gate, the lease/per-message gate the fine one.
-        capabilities_with_clipboard(),
+        capabilities_with_extras(),
         "remote support".to_string(),
         now,
         now + MAX_REQUEST_TTL_MS,
@@ -342,6 +364,56 @@ async fn send_clipboard(state: State<'_, AppState>, text: String) -> Result<(), 
         .and_then(|s| s.host.clone());
     if let Some(h) = host {
         h.send_clipboard_text(text);
+        return Ok(());
+    }
+    Err("no active session".into())
+}
+
+// ─── Connect role: file transfer (push to the host, ADR-086/090) ─────────────────────────────────
+//
+// The controller-side of the signed-catalogue file push. The viewer offers a file to the host's single
+// `"drop"` target (leaf filename + size — **never a path**; the host resolves the destination), then, once
+// the host emits `file-accepted` (its per-transfer consent said Allow), streams the bytes as chunks and
+// signals completion. All the danger-channel safety (filename validation, sandbox resolution, O_NOFOLLOW
+// write, size cap, per-message capability gate) lives host-side in ras-policy/ras-files/ras-core — this
+// side only carries the offer + bytes. Never log file contents (Inv 8); a byte count is fine.
+
+/// Begin a file push to the host's `"drop"` target: offer the leaf `filename` + `size`. The host
+/// authorizes it (catalogue + capability + safe-leaf validation) and prompts its local user (Inv 1),
+/// replying with a `file-accepted` or `file-rejected` event. The UI waits for `file-accepted` before
+/// calling [`file_chunk`]. `filename` is a **leaf name only** — any path is rejected host-side. Err if no
+/// viewer session is live.
+#[tauri::command]
+async fn file_begin(state: State<'_, AppState>, filename: String, size: u64) -> Result<(), String> {
+    let controller = lock(&state.session).as_ref().map(|s| s.controller.clone());
+    if let Some(c) = controller {
+        c.send_file_offer(FILE_DROP_TARGET.to_string(), filename, size);
+        return Ok(());
+    }
+    Err("no active session".into())
+}
+
+/// Stream one chunk of the **accepted** transfer (call only after `file-accepted`). Bytes over
+/// `MAX_FILE_CHUNK` are dropped by ras-core (split them). The host aborts if the running total exceeds the
+/// offered size. Err if no viewer session is live.
+#[tauri::command]
+async fn file_chunk(state: State<'_, AppState>, bytes: Vec<u8>) -> Result<(), String> {
+    let controller = lock(&state.session).as_ref().map(|s| s.controller.clone());
+    if let Some(c) = controller {
+        c.send_file_chunk(bytes::Bytes::from(bytes));
+        return Ok(());
+    }
+    Err("no active session".into())
+}
+
+/// Signal that every chunk of the accepted transfer has been sent; the host finalizes the write iff the
+/// received total equals the offered size (else it aborts — no partial/oversized file). Err if no viewer
+/// session is live.
+#[tauri::command]
+fn file_end(state: State<'_, AppState>) -> Result<(), String> {
+    let controller = lock(&state.session).as_ref().map(|s| s.controller.clone());
+    if let Some(c) = controller {
+        c.send_file_complete();
         return Ok(());
     }
     Err("no active session".into())
@@ -560,6 +632,15 @@ struct LocalConsent {
     /// A separate pending slot for the Phase-3 **control-lease** consent (Invariant 1): requesting OS
     /// input is a distinct, higher-stakes act than viewing, so it re-prompts on its own channel.
     pending_control: Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
+    /// A separate pending slot for a **file-push** transfer consent (ADR-086, Invariant 1): file transfer
+    /// is the danger channel, so each push re-prompts the local user on its own channel — even a
+    /// catalogued, capability-granted push needs a live Allow. One transfer at a time.
+    pending_file: Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
+    /// The `(filename, size)` of the most recently offered file, stashed at the consent prompt so the
+    /// share loop can populate the `file-received` event payload when the corresponding
+    /// `FileTransferAccepted` lifecycle event arrives (the lifecycle event itself is content-free). A
+    /// filename is shown to the user, not a secret (Inv 8).
+    last_file_offer: Mutex<Option<(String, u64)>>,
 }
 
 impl LocalConsent {
@@ -568,6 +649,8 @@ impl LocalConsent {
             app,
             pending: Mutex::new(None),
             pending_control: Mutex::new(None),
+            pending_file: Mutex::new(None),
+            last_file_offer: Mutex::new(None),
         }
     }
 
@@ -581,6 +664,13 @@ impl LocalConsent {
     /// Deliver the local user's decision to a waiting control-consent prompt. Late calls are no-ops.
     fn respond_control(&self, allow: bool) {
         if let Some(tx) = lock(&self.pending_control).take() {
+            let _ = tx.send(allow);
+        }
+    }
+
+    /// Deliver the local user's decision to a waiting file-transfer consent prompt. Late calls are no-ops.
+    fn respond_file(&self, allow: bool) {
+        if let Some(tx) = lock(&self.pending_file).take() {
             let _ = tx.send(allow);
         }
     }
@@ -630,6 +720,109 @@ impl ras_core::ControlConsent for LocalConsent {
     }
 }
 
+/// Per-transfer **file-push** consent (ADR-086, Invariant 1): file transfer is the danger channel, so
+/// even a catalogued, capability-granted push re-prompts the local user before any byte is written. The
+/// request has already passed the pure host-side `authorize_file_push` (catalogue + capability + safe-leaf
+/// filename validation + size cap) by the time this runs — this is the final human gate. Emits
+/// `file-offer` with the leaf filename + size (a filename is shown to the user, not a secret; contents are
+/// never touched here) and blocks until the local user answers. Deny or a 90 s silence ⇒ refuse
+/// (fail-closed).
+#[async_trait::async_trait]
+impl ras_core::FileConsent for LocalConsent {
+    async fn consent_to_file(&self, _target: &str, filename: &str, size: u64) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *lock(&self.pending_file) = Some(tx);
+        // Stash the offer so the share loop can label the later `file-received` event (the accepted-
+        // lifecycle event is content-free). A filename is not a secret (Inv 8).
+        *lock(&self.last_file_offer) = Some((filename.to_string(), size));
+        let _ = self.app.emit(
+            "file-offer",
+            FileOfferPayload {
+                filename: filename.to_string(),
+                size,
+            },
+        );
+        let allow = matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(90), rx).await,
+            Ok(Ok(true))
+        );
+        *lock(&self.pending_file) = None;
+        let _ = self.app.emit("file-offer-closed", ());
+        allow
+    }
+}
+
+/// A `ras_core::FileWriteSink` wrapping [`ras_files::SafeFileWriter`] (ADR-090). The `dest` is
+/// **host-resolved** by ras-policy (a validated leaf inside the sandbox — never a controller path); the
+/// underlying writer opens it with `O_NOFOLLOW | O_CREAT | O_EXCL`, so a symlink or an existing entry is
+/// refused (the TOCTOU / clobber CVE-class defenses). This wrapper only maps `io::Error` → `CoreError`.
+/// One transfer at a time. Never logs file contents (Inv 8).
+#[derive(Default)]
+struct AppFileWriteSink {
+    inner: ras_files::SafeFileWriter,
+}
+
+impl ras_core::FileWriteSink for AppFileWriteSink {
+    // The `io::Error` detail is deliberately dropped: `RasError::context` is a `&'static str`, and a raw
+    // OS error could echo the destination path (Inv 8 hygiene). The stable `InputFailed` code + a static
+    // context is all the host loop needs to abort + emit a content-free rejection.
+    fn open(&self, dest: &std::path::Path, size: u64) -> Result<(), ras_core::CoreError> {
+        self.inner.open(dest, size).map_err(|_| {
+            ras_core::CoreError::fatal(ras_protocol::ErrorCode::InputFailed, "file open failed")
+        })
+    }
+    fn write(&self, data: &[u8]) -> Result<(), ras_core::CoreError> {
+        self.inner.write(data).map_err(|_| {
+            ras_core::CoreError::fatal(ras_protocol::ErrorCode::InputFailed, "file write failed")
+        })
+    }
+    fn finish(&self) -> Result<(), ras_core::CoreError> {
+        self.inner.finish().map_err(|_| {
+            ras_core::CoreError::fatal(ras_protocol::ErrorCode::InputFailed, "file finish failed")
+        })
+    }
+    fn abort(&self) {
+        self.inner.abort();
+    }
+}
+
+/// The received-files sandbox directory for the `"drop"` target: `<home>/CasualRAS-Received`, created if
+/// missing. This is the **host/vendor-chosen** destination (Inv 6 / S7 — never a controller path); the
+/// controller only ever supplies a leaf filename, which ras-policy validates and joins onto this dir.
+/// Falls back to the current dir if no home is resolvable (still host-side, never controller-supplied).
+fn received_files_dir() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let dir = home.join("CasualRAS-Received");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// The single file-push drop-target catalogue this app exposes (ADR-086): one `"drop"` target into
+/// `<home>/CasualRAS-Received`, 500 MiB cap, any extension. The per-target capability is `file.push.drop`
+/// (see [`capabilities_with_extras`]); consent + per-message gate + filename validation still apply.
+fn file_catalogue() -> ras_core::policy::file::DropCatalogue {
+    use ras_core::policy::file::{DropCatalogue, DropTarget};
+    DropCatalogue::new(vec![DropTarget {
+        name: FILE_DROP_TARGET.to_string(),
+        description: "Received files".to_string(),
+        dest_dir: received_files_dir(),
+        max_bytes: 500 * 1024 * 1024,
+        allowed_extensions: None,
+    }])
+}
+
+/// File-offer payload pushed to the webview when a viewer offers a file (host side). The filename is shown
+/// to the local user in the confirmation prompt (a filename is not a secret); no contents are ever
+/// carried (Inv 8).
+#[derive(Clone, serde::Serialize)]
+struct FileOfferPayload {
+    filename: String,
+    size: u64,
+}
+
 /// Pointer position pushed to the overlay window (normalized 0..=65535).
 #[derive(Clone, serde::Serialize)]
 struct PointerPayload {
@@ -670,6 +863,13 @@ fn respond_consent(state: State<'_, AppState>, allow: bool) {
 #[tauri::command]
 fn respond_control_consent(state: State<'_, AppState>, allow: bool) {
     state.share.consent.respond_control(allow);
+}
+
+/// Deliver the local user's Allow/Deny for a pending **file-push** transfer (ADR-086, Invariant 1).
+/// `accept` ⇒ allow the write; deny (or the 90 s timeout) refuses fail-closed and the host aborts.
+#[tauri::command]
+fn respond_file_offer(state: State<'_, AppState>, accept: bool) {
+    state.share.consent.respond_file(accept);
 }
 
 /// Stop the whole share (drop the ticket, stop accepting, end any live viewer). Idempotent.
@@ -778,9 +978,10 @@ async fn run_share(
     };
     let host_id = host_ks.public_key();
     let host_endpoint_id = endpoint.id().0;
-    // Grant ceiling includes clipboard so consent CAN grant it (see `capabilities_with_clipboard`); OS
-    // input, clipboard, etc. are still each subject to the local consent + per-message gate (Inv 15).
-    let issuer = LocalHostGrantIssuer::new(host_ks, capabilities_with_clipboard(), 1);
+    // Grant ceiling includes clipboard + file-push so consent CAN grant them (see
+    // `capabilities_with_extras`); OS input, clipboard, file transfer, etc. are still each subject to the
+    // local consent + per-message gate + (for files) the per-transfer consent and filename validation (Inv 15).
+    let issuer = LocalHostGrantIssuer::new(host_ks, capabilities_with_extras(), 1);
     // Shared replay cache for AccessRequest nonces across bootstrap connections (the accept loop
     // handles one connection at a time, so a `&mut` borrow suffices).
     let mut nonces = NonceCache::new(MAX_REQUEST_TTL_MS, 4096);
@@ -940,7 +1141,7 @@ async fn handle_bootstrap(
         expires_at: now + MAX_REQUEST_TTL_MS,
     };
     match issuer
-        .issue(&request, &capabilities_with_clipboard(), &params)
+        .issue(&request, &capabilities_with_extras(), &params)
         .await
     {
         Ok(grant) => {
@@ -1014,6 +1215,16 @@ async fn serve_one(
         Ok(sink) => host.with_clipboard_sink(Arc::new(sink)),
         Err(_) => host,
     };
+    // File transfer (ADR-086/090): the vendor-declared `"drop"` catalogue (host-chosen sandbox dir + size
+    // cap), the per-transfer local consent prompt (Inv 1 — reuses `LocalConsent`'s `FileConsent` impl), and
+    // the `O_NOFOLLOW|O_EXCL` write backend. All three are needed for a push to land; with `file.push.drop`
+    // in the grant ceiling (see `capabilities_with_extras`), the danger channel stays fully core-enforced:
+    // ras-policy validates the leaf filename + resolves the destination, ras-files refuses symlink/clobber,
+    // and the per-message gate checks the capability (Inv 15). Consent (`LocalConsent`) is `Arc`-shared.
+    let host = host
+        .with_file_catalogue(file_catalogue())
+        .with_file_consent(consent.clone())
+        .with_file_write_sink(Arc::new(AppFileWriteSink::default()));
     // Share the built host session behind `Arc` so the `send_chat`/`send_clipboard` commands can reach
     // it out-of-band (via `ShareControl` in `ShareState`) while this loop also drives it. All the send
     // APIs take `&self`, so the `Arc` clone and the local `host` coexist safely.
@@ -1115,6 +1326,23 @@ async fn serve_one(
                 // ADR-076). Content-free: emit only the byte count (Inv 8).
                 Some(LifecycleEvent::ClipboardApplied { len }) => {
                     let _ = app.emit("clipboard-received", len);
+                }
+                // A viewer's file push was authorized + locally consented (ADR-086); the host is writing it
+                // (O_NOFOLLOW|O_EXCL). The lifecycle event is content-free — label it with the filename+size
+                // stashed at the consent prompt (a filename is shown to the user, not a secret — Inv 8).
+                Some(LifecycleEvent::FileTransferAccepted) => {
+                    let (filename, size) = consent
+                        .last_file_offer
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                        .unwrap_or_default();
+                    let _ = app.emit("file-received", FileOfferPayload { filename, size });
+                }
+                // A viewer's file push was refused (unknown target / capability withheld / unsafe filename /
+                // too large / consent denied / short transfer). Surface the stable reason (content-free).
+                Some(LifecycleEvent::FileTransferRejected { code }) => {
+                    let _ = app.emit("file-rejected", format!("{code:?}"));
                 }
                 Some(LifecycleEvent::SessionEnded { .. })
                 | Some(LifecycleEvent::Revoked { .. })
@@ -1236,6 +1464,9 @@ fn main() {
             send_pointer,
             send_chat,
             send_clipboard,
+            file_begin,
+            file_chunk,
+            file_end,
             request_keyframe,
             request_control,
             is_controlling,
@@ -1248,6 +1479,7 @@ fn main() {
             stop_sharing,
             respond_consent,
             respond_control_consent,
+            respond_file_offer,
             check_for_updates,
             install_update,
         ])

@@ -87,6 +87,37 @@
           </div>
         </div>
       </div>
+
+      <!-- Incoming file offer (receiver side). Same modal vocabulary as the consent cards. -->
+      <div id="file-offer" hidden>
+        <div class="consent-card" role="alertdialog" aria-modal="true"
+          aria-labelledby="file-offer-title" aria-describedby="file-offer-desc">
+          <p id="file-offer-title" class="consent-title">The viewer wants to send you a file</p>
+          <p id="file-offer-desc" class="consent-note">
+            <span id="file-offer-name" class="file-offer-name" title="">file</span>
+            <span id="file-offer-size" class="file-offer-size"></span><br />
+            It will be saved to your downloads. Only accept files you were expecting.
+          </p>
+          <p id="file-offer-timeout" class="file-offer-timeout" aria-live="polite"></p>
+          <div class="consent-actions">
+            <button id="file-offer-deny">Deny</button>
+            <button id="file-offer-accept" class="primary">Accept</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Auto-dismissing notice: a file finished arriving. Mirrors the clipboard notice. -->
+      <div id="file-recv-notice" class="file-recv-notice" hidden role="status" aria-live="polite">
+        <span class="file-recv-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 6 9 17l-5-5" />
+          </svg>
+        </span>
+        <span id="file-recv-text" class="file-recv-text"></span>
+        <button id="file-recv-dismiss" class="file-recv-dismiss" type="button"
+          title="Dismiss" aria-label="Dismiss notice">×</button>
+      </div>
     </section>
 
     <!-- ── Connect (viewer role) ──────────────────────────────────────────────────────────────── -->
@@ -105,6 +136,14 @@
         <label id="macmod" hidden title="Send your ⌘ as Ctrl on the remote — for a Mac keyboard controlling a Windows or Linux host. Off by default; only affects the primary shortcut modifier.">
           <input type="checkbox" id="macmod-cb" /> ⌘→Ctrl
         </label>
+        <button id="send-file" disabled title="Connect a session to send a file">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 16V4M12 4l-4 4M12 4l4 4" /><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+          </svg>
+          <span>Send file</span>
+        </button>
+        <input id="file-picker" type="file" hidden aria-hidden="true" tabindex="-1" />
         <button id="stop" disabled>Disconnect</button>
       </div>
       <canvas id="screen"></canvas>
@@ -128,6 +167,29 @@
       <div id="banner" hidden>● LIVE — viewing remote screen</div>
       <div id="reconnect-banner" hidden>⟳ Connection lost — reconnecting…</div>
       <div id="conn-stats" hidden></div>
+
+      <!-- File-send progress card (sender side). Slides in from the corner; never covers the video. -->
+      <div id="filesend" hidden role="status" aria-live="polite" aria-label="File transfer">
+        <div class="filesend-row">
+          <span class="filesend-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 3v5h5" /><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+            </svg>
+          </span>
+          <span id="filesend-name" class="filesend-name" title="">file</span>
+          <button id="filesend-cancel" type="button" title="Cancel this transfer"
+            aria-label="Cancel transfer">×</button>
+        </div>
+        <div class="filesend-meta">
+          <span id="filesend-state" class="filesend-state">Waiting…</span>
+          <span id="filesend-pct" class="filesend-pct"></span>
+        </div>
+        <div id="filesend-track" class="filesend-track" role="progressbar"
+          aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="filesend-fill" class="filesend-fill"></div>
+        </div>
+      </div>
     </section>
 
     <!-- ── In-session chat + clipboard (shown only while a session is live, both roles) ─────────── -->

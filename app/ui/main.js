@@ -267,6 +267,7 @@ function setLive(isLive) {
   controlBtn.textContent = "Take control";
   if (macMod) macMod.hidden = !isLive;
   chat.setSessionLive(isLive); // chat/clipboard are usable only while the viewer session is live
+  files.setViewerLive(isLive); // the viewer can send a file only while its session is live
 }
 
 async function startSession(ticket) {
@@ -369,11 +370,13 @@ listen("share-viewer", (e) => {
   shareIndicator.className = live ? "indicator live" : "indicator idle";
   // A connected viewer means a live session on the host side — chat/clipboard become usable.
   chat.setSessionLive(live);
+  files.setHostLive(live); // host can receive a file while a viewer is connected
 });
 listen("share-active", (e) => {
   if (!e.payload) {
     shareIndicator.className = "indicator idle";
     chat.setSessionLive(false); // sharing torn down entirely — no session
+    files.setHostLive(false); // no session — dismiss any file offer/notice
   }
 });
 
@@ -1015,4 +1018,350 @@ const chat = (function () {
   });
 
   return { setSessionLive };
+})();
+
+// ── File transfer ────────────────────────────────────────────────────────────────────────────────
+// Two halves over a fixed Rust contract (a file's *contents* are never console.log'd — Inv 8):
+//   Sender (Connect/viewer side):
+//     invoke("file_begin",  { filename, size })     — offer a file; awaits a file-accepted/rejected
+//     invoke("file_chunk",  { bytes: [...u8] })      — one sequential chunk (256 KiB) as a byte array
+//     invoke("file_end")                             — finalize after the last chunk
+//     listen("file-accepted")  / listen("file-rejected")  — the peer's decision on our offer
+//   Receiver (Share/host side):
+//     listen("file-offer", { filename, size })       — an incoming offer to accept/deny
+//     invoke("respond_file_offer", { accept })        — the local user's decision (Inv 1)
+//     listen("file-received", { filename, size })     — a completed transfer landed
+// The "Send file" affordance is live-gated exactly like chat (setSessionLive), and only surfaces on
+// the viewer role — the host receives, it does not push.
+const files = (function () {
+  const CHUNK = 256 * 1024; // 256 KiB per file_chunk invoke
+  const OFFER_TIMEOUT_MS = 60000; // auto-deny an unanswered incoming offer
+  const ACCEPT_TIMEOUT_MS = 60000; // give up if the peer never accepts/rejects our offer
+
+  // Sender controls (Connect bar + progress card).
+  const sendBtn = document.getElementById("send-file");
+  const picker = document.getElementById("file-picker");
+  const card = document.getElementById("filesend");
+  const nameEl = document.getElementById("filesend-name");
+  const stateEl = document.getElementById("filesend-state");
+  const pctEl = document.getElementById("filesend-pct");
+  const trackEl = document.getElementById("filesend-track");
+  const fillEl = document.getElementById("filesend-fill");
+  const cancelBtn = document.getElementById("filesend-cancel");
+
+  // Receiver controls (offer modal + received notice).
+  const offer = document.getElementById("file-offer");
+  const offerName = document.getElementById("file-offer-name");
+  const offerSize = document.getElementById("file-offer-size");
+  const offerTimeout = document.getElementById("file-offer-timeout");
+  const offerAccept = document.getElementById("file-offer-accept");
+  const offerDeny = document.getElementById("file-offer-deny");
+  const recvNotice = document.getElementById("file-recv-notice");
+  const recvText = document.getElementById("file-recv-text");
+  const recvDismiss = document.getElementById("file-recv-dismiss");
+
+  // Defensive: if the markup is absent, expose no-ops so callers never throw.
+  if (!sendBtn || !card || !offer) {
+    return { setViewerLive() {}, setHostLive() {} };
+  }
+
+  const NO_SESSION_HINT = "Connect a session to send a file";
+  const SEND_HINT = "Send a file to the other side";
+
+  let viewerLive = false; // a viewer (Connect) session is up → sending is possible
+  let sending = false; // a transfer is in flight (guards against concurrent sends)
+  let cancelled = false; // the user hit cancel mid-transfer
+  // Promise resolvers for the peer's accept/reject of the current offer.
+  let acceptResolve = null;
+  let acceptReject = null;
+  let acceptTimer = null;
+  // Receiver: countdown + auto-deny timers for an open offer.
+  let offerTimer = null;
+  let offerCountdown = null;
+  let recvTimer = null;
+
+  // Human-readable byte size (1 KB = 1024 B), e.g. "3.4 MB". Never rounds a nonzero size to "0".
+  function fmtSize(bytes) {
+    const b = Number(bytes) || 0;
+    if (b < 1024) return b + " B";
+    const units = ["KB", "MB", "GB", "TB"];
+    let v = b / 1024;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return (v >= 10 || Number.isInteger(v) ? v.toFixed(0) : v.toFixed(1)) + " " + units[i];
+  }
+
+  // ── Sender: progress card presentation ─────────────────────────────────────────────
+  function setCardState(cls) {
+    card.classList.remove("state-wait", "state-ok", "state-err");
+    if (cls) card.classList.add(cls);
+  }
+  function showCard(filename) {
+    nameEl.textContent = filename;
+    nameEl.title = filename;
+    cancelBtn.disabled = false;
+    card.hidden = false;
+  }
+  function setProgress(sent, total) {
+    const pct = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : 0;
+    fillEl.style.width = pct + "%";
+    trackEl.setAttribute("aria-valuenow", String(pct));
+    pctEl.textContent = pct + "%";
+    stateEl.textContent = fmtSize(sent) + " / " + fmtSize(total);
+    stateEl.className = "filesend-state";
+  }
+  function setState(text, kind) {
+    stateEl.textContent = text;
+    stateEl.className = "filesend-state" + (kind ? " " + kind : "");
+  }
+  function hideCardLater(delay) {
+    setTimeout(() => {
+      // Only auto-hide if nothing new started in the meantime.
+      if (!sending) card.hidden = true;
+    }, delay);
+  }
+
+  // ── Sender: the accept/reject wait ─────────────────────────────────────────────────
+  function waitForAccept() {
+    return new Promise((resolve, reject) => {
+      acceptResolve = resolve;
+      acceptReject = reject;
+      acceptTimer = setTimeout(() => {
+        settleAccept(false, "timeout");
+      }, ACCEPT_TIMEOUT_MS);
+    });
+  }
+  function settleAccept(accepted, reason) {
+    if (acceptTimer) {
+      clearTimeout(acceptTimer);
+      acceptTimer = null;
+    }
+    const res = acceptResolve;
+    const rej = acceptReject;
+    acceptResolve = null;
+    acceptReject = null;
+    if (accepted && res) res();
+    else if (!accepted && rej) rej(reason || "declined");
+  }
+
+  listen("file-accepted", () => settleAccept(true));
+  listen("file-rejected", () => settleAccept(false, "declined"));
+
+  // ── Sender: the transfer itself ────────────────────────────────────────────────────
+  async function sendFile(file) {
+    if (sending || !viewerLive) return;
+    sending = true;
+    cancelled = false;
+    setSendBusy(true);
+    showCard(file.name);
+    setCardState("state-wait");
+    setState("Waiting for the other side to accept…", "");
+    pctEl.textContent = "";
+
+    try {
+      await invoke("file_begin", { filename: file.name, size: file.size });
+    } catch (e) {
+      failTransfer("Couldn't start the transfer.");
+      return;
+    }
+
+    // Wait for the peer's decision before reading any bytes.
+    try {
+      await waitForAccept();
+    } catch (reason) {
+      if (reason === "timeout") failTransfer("No response — transfer timed out.");
+      else declineTransfer();
+      return;
+    }
+    if (cancelled) return finishCancel();
+
+    // Accepted → stream the file sequentially in CHUNK-sized slices.
+    setCardState("");
+    setProgress(0, file.size);
+    let offsetBytes = 0;
+    try {
+      while (offsetBytes < file.size) {
+        if (cancelled) return finishCancel();
+        const end = Math.min(offsetBytes + CHUNK, file.size);
+        const buf = await file.slice(offsetBytes, end).arrayBuffer();
+        if (cancelled) return finishCancel();
+        // The Rust side wants a plain byte array (JS number[] / Uint8Array).
+        await invoke("file_chunk", { bytes: Array.from(new Uint8Array(buf)) });
+        offsetBytes = end;
+        setProgress(offsetBytes, file.size);
+      }
+      await invoke("file_end");
+    } catch (e) {
+      // Never surface file contents; a generic, honest message only (Inv 8).
+      failTransfer("Transfer failed — the connection may have dropped.");
+      return;
+    }
+
+    // Success.
+    setCardState("state-ok");
+    setState("Sent ✓", "ok");
+    pctEl.textContent = "100%";
+    cancelBtn.disabled = true;
+    sending = false;
+    setSendBusy(false);
+    hideCardLater(2600);
+  }
+
+  function failTransfer(msg) {
+    // Best-effort tell the host we're aborting, then present the error.
+    try { invoke("file_end"); } catch (_) {}
+    setCardState("state-err");
+    setState(msg, "err");
+    pctEl.textContent = "";
+    cancelBtn.disabled = true;
+    sending = false;
+    setSendBusy(false);
+    hideCardLater(4000);
+  }
+  function declineTransfer() {
+    setCardState("state-err");
+    setState("The other side declined.", "err");
+    pctEl.textContent = "";
+    cancelBtn.disabled = true;
+    sending = false;
+    setSendBusy(false);
+    hideCardLater(3200);
+  }
+  function finishCancel() {
+    try { invoke("file_end"); } catch (_) {}
+    setCardState("state-err");
+    setState("Canceled.", "err");
+    pctEl.textContent = "";
+    cancelBtn.disabled = true;
+    sending = false;
+    setSendBusy(false);
+    hideCardLater(2200);
+  }
+
+  function setSendBusy(busy) {
+    sendBtn.classList.toggle("busy", busy);
+    sendBtn.disabled = busy || !viewerLive;
+    sendBtn.title = viewerLive ? SEND_HINT : NO_SESSION_HINT;
+  }
+
+  // ── Sender: wiring ─────────────────────────────────────────────────────────────────
+  sendBtn.addEventListener("click", () => {
+    if (!viewerLive || sending) return;
+    picker.value = ""; // allow re-picking the same file
+    picker.click();
+  });
+  picker.addEventListener("change", () => {
+    const file = picker.files && picker.files[0];
+    if (file) sendFile(file);
+  });
+  cancelBtn.addEventListener("click", () => {
+    if (!sending) {
+      card.hidden = true; // dismiss a finished/errored card
+      return;
+    }
+    cancelled = true;
+    // If we're still waiting on the peer's accept, unblock that wait too.
+    settleAccept(false, "cancelled");
+  });
+
+  // ── Receiver: incoming offer ───────────────────────────────────────────────────────
+  function clearOfferTimers() {
+    if (offerTimer) { clearTimeout(offerTimer); offerTimer = null; }
+    if (offerCountdown) { clearInterval(offerCountdown); offerCountdown = null; }
+  }
+  function respondOffer(accept) {
+    clearOfferTimers();
+    offer.hidden = true;
+    try { invoke("respond_file_offer", { accept }); } catch (_) {}
+  }
+  function openOffer(filename, size) {
+    clearOfferTimers();
+    offerName.textContent = filename;
+    offerName.title = filename;
+    offerSize.textContent = "· " + fmtSize(size);
+    offer.hidden = false;
+    // Focus the safe default (Deny) so a stray Enter doesn't auto-accept.
+    setTimeout(() => offerDeny.focus(), 60);
+    // Countdown → auto-deny if the local user doesn't answer.
+    let left = Math.round(OFFER_TIMEOUT_MS / 1000);
+    offerTimeout.textContent = "Auto-declines in " + left + "s if no response.";
+    offerCountdown = setInterval(() => {
+      left -= 1;
+      offerTimeout.textContent =
+        left > 0 ? "Auto-declines in " + left + "s if no response." : "Declining…";
+    }, 1000);
+    offerTimer = setTimeout(() => respondOffer(false), OFFER_TIMEOUT_MS);
+  }
+  offerAccept.addEventListener("click", () => respondOffer(true));
+  offerDeny.addEventListener("click", () => respondOffer(false));
+  // Esc denies (the safe default) while the modal is open.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !offer.hidden) respondOffer(false);
+  });
+
+  listen("file-offer", (e) => {
+    const p = e.payload || {};
+    const filename = typeof p.filename === "string" ? p.filename : "file";
+    const size = Number(p.size) || 0;
+    openOffer(filename, size);
+  });
+
+  // ── Receiver: completed transfer notice ────────────────────────────────────────────
+  function showRecvNotice(filename, size) {
+    recvText.textContent = "Received " + filename + " · " + fmtSize(size);
+    recvText.title = filename;
+    recvNotice.classList.remove("fading");
+    recvNotice.hidden = false;
+    if (recvTimer) clearTimeout(recvTimer);
+    recvTimer = setTimeout(() => {
+      recvNotice.classList.add("fading");
+      recvTimer = setTimeout(() => {
+        recvNotice.hidden = true;
+        recvNotice.classList.remove("fading");
+      }, 320);
+    }, 4000);
+  }
+  function hideRecvNotice() {
+    if (recvTimer) { clearTimeout(recvTimer); recvTimer = null; }
+    recvNotice.hidden = true;
+    recvNotice.classList.remove("fading");
+  }
+  recvDismiss.addEventListener("click", hideRecvNotice);
+  listen("file-received", (e) => {
+    const p = e.payload || {};
+    const filename = typeof p.filename === "string" ? p.filename : "file";
+    const size = Number(p.size) || 0;
+    showRecvNotice(filename, size);
+  });
+
+  // ── Session lifecycle ──────────────────────────────────────────────────────────────
+  // The viewer role can *send*; the host role can *receive*. Ending a session tears down any
+  // in-flight transfer/prompt for that role so nothing lingers.
+  function setViewerLive(isLive) {
+    viewerLive = !!isLive;
+    setSendBusy(sending);
+    if (!viewerLive) {
+      // A dropped viewer session cancels an in-flight send and clears the card.
+      if (sending) {
+        cancelled = true;
+        settleAccept(false, "cancelled");
+      }
+      sending = false;
+      setSendBusy(false);
+      card.hidden = true;
+    }
+  }
+  function setHostLive(isLive) {
+    if (!isLive) {
+      // Host session ended — dismiss any open offer / notice.
+      clearOfferTimers();
+      offer.hidden = true;
+      hideRecvNotice();
+    }
+  }
+
+  return { setViewerLive, setHostLive };
 })();

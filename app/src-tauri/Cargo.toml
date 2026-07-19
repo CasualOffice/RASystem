@@ -41,6 +41,13 @@ ras-transport-iroh = { path = "../../crates/ras-transport-iroh" }
 # Cross-platform OS-clipboard write backend for the Share role (ADR-079). Sets the host clipboard on a
 # capability-gated push; never pastes (ADR-076). Inert until clipboard.write is granted (default OFF).
 ras-clipboard = { path = "../../crates/ras-clipboard" }
+# Safe file-write backend for the signed-catalogue file transfer (ADR-090). Opens each accepted
+# transfer's host-resolved destination with O_NOFOLLOW|O_CREAT|O_EXCL (refuses a symlink or an existing
+# entry). The app wraps it in a `ras_core::FileWriteSink`. Inert until a `file.push.*` cap is granted.
+ras-files = { path = "../../crates/ras-files" }
+# The controller streams accepted file bytes as `bytes::Bytes` chunks (ADR-090). Same crate ras-core
+# uses on the wire, so no extra version surface.
+bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 # Per-platform sharing backends (ADR-063). macOS uses the zero-copy hardware path
