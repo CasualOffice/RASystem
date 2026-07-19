@@ -39,9 +39,12 @@ pub enum CasualRasStatus {
 
 /// Run an FFI body, converting a panic into [`CasualRasStatus::Internal`] so it never unwinds across
 /// the C boundary (which would be undefined behaviour).
-fn guard(f: impl FnOnce() -> CasualRasStatus) -> CasualRasStatus {
+pub(crate) fn guard(f: impl FnOnce() -> CasualRasStatus) -> CasualRasStatus {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(CasualRasStatus::Internal)
 }
+
+/// Async runtime + session-event callback ABI (the async SDK foundation).
+mod runtime;
 
 /// The library version as a static, NUL-terminated C string. **Do not free** the returned pointer.
 #[no_mangle]

@@ -21,6 +21,9 @@ cbindgen = "0.27"
 ras-identity = { path = "../ras-identity" }
 ras-transport-iroh = { path = "../ras-transport-iroh" }
 ras-protocol = { path = "../ras-protocol" }
+# Async runtime for the session-SDK surface: the SDK owns a multi-thread runtime behind an opaque
+# handle and delivers session lifecycle events to a Send-safe C callback (the async FFI foundation).
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 # This is the FFI boundary crate (CONTRIBUTING §5): the workspace's `unsafe_code = deny` is relaxed to
 # `allow` HERE ONLY — a C ABI is inherently `unsafe`/`no_mangle`. `unsafe` is confined to this crate.

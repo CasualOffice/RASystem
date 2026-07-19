@@ -3969,6 +3969,7 @@ dependencies = [
  "ras-identity",
  "ras-protocol",
  "ras-transport-iroh",
+ "tokio",
 ]
 
 [[package]]
