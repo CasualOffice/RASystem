@@ -104,6 +104,8 @@ async fn drain_viewer_lifecycle(mut events: LifecycleStream, app: tauri::AppHand
             | LifecycleEvent::Disconnected { .. }
             | LifecycleEvent::Revoked { .. } => {
                 let _ = app.emit("conn-status", "ended");
+                // Audio (if it was flowing) stops with the session — clear the "AUDIO SHARED" indicator.
+                let _ = app.emit("audio-inactive", ());
                 break;
             }
             _ => {}
@@ -149,6 +151,11 @@ fn capabilities_with_extras() -> ras_core::policy::CapabilitySet {
     policy.insert(ras_core::policy::file::file_push_capability(
         FILE_DROP_TARGET,
     ));
+    // Output audio (`audio.listen`, ADR-077) — recognized-but-withheld by `phase3_default_policy`, so it
+    // must be added to the ceiling for a grant to be *able* to carry it. It is only actually consented when
+    // the host opted in (see `consented_capabilities`), and the audio pump is gated host-side on the
+    // granted capability + the transport's audio plane (Inv 15) — this only lifts the ceiling.
+    policy.insert(ras_core::policy::AUDIO_LISTEN.to_string());
     policy
 }
 
@@ -160,7 +167,16 @@ fn capabilities_with_extras() -> ras_core::policy::CapabilitySet {
 /// NO second gate: the capability alone authorizes a controller→host clipboard write (the RustDesk /
 /// Reverse-RDP injection class ADR-076 severs). So clipboard must reflect a real, disclosed choice, not
 /// ride silently on a view-Allow (Inv 1 the user's actual choice, Inv 2 not defaulted-on, Inv 7 honest).
-fn consented_capabilities(clipboard_allowed: bool) -> ras_core::policy::CapabilitySet {
+///
+/// **Audio is included only when `audio_allowed` is true** — same reasoning as clipboard (ADR-077).
+/// Output audio (host system audio → viewer) has no second per-message gate the way input/file do, so its
+/// `audio.listen` capability alone authorizes the host to be heard. It must reflect a real, disclosed
+/// opt-in (the "AUDIO SHARED" indicator, Inv 7), not ride silently on a view-Allow. When withheld the host
+/// never fetches an audio sink and the `ras-core` audio pump never runs (Inv 15).
+fn consented_capabilities(
+    clipboard_allowed: bool,
+    audio_allowed: bool,
+) -> ras_core::policy::CapabilitySet {
     let mut caps = ras_core::policy::phase3_default_policy();
     caps.insert(ras_core::policy::file::file_push_capability(
         FILE_DROP_TARGET,
@@ -168,6 +184,9 @@ fn consented_capabilities(clipboard_allowed: bool) -> ras_core::policy::Capabili
     if clipboard_allowed {
         caps.insert(ras_core::policy::CLIPBOARD_READ.to_string());
         caps.insert(ras_core::policy::CLIPBOARD_WRITE.to_string());
+    }
+    if audio_allowed {
+        caps.insert(ras_core::policy::AUDIO_LISTEN.to_string());
     }
     caps
 }
@@ -210,6 +229,43 @@ impl FrameSink for ChannelFrameSink {
     }
 }
 
+/// Magic for one output-audio blob on the audio channel (`"RAU1"` big-endian, sent little-endian). A
+/// self-describing header lets the webview configure its WebCodecs `AudioDecoder` from the first packet
+/// without a separate config message. Distinct from the video channel's `RAS1`/`RCFG`.
+const AUDIO_MAGIC: u32 = u32::from_be_bytes(*b"RAU1");
+
+/// An [`ras_core::AudioOutput`] forwarding each received Opus packet to the webview over a binary Tauri
+/// channel for WebCodecs playback (ADR-077). `push` is sync + non-blocking (a closed channel just drops —
+/// audio is best-effort, never fatal). No audio content is ever logged (Inv 8). Emits an `audio-active`
+/// event on the first packet so the UI can show the "AUDIO SHARED"/playing indicator.
+struct AppAudioOutput {
+    channel: Channel<InvokeResponseBody>,
+    app: tauri::AppHandle,
+    /// Set on the first packet — flips the UI indicator on exactly once, best-effort.
+    active: std::sync::atomic::AtomicBool,
+}
+
+impl ras_core::AudioOutput for AppAudioOutput {
+    fn push(&self, packet: ras_media::EncodedAudio) {
+        // First packet ⇒ audio is now flowing: light the "AUDIO SHARED" indicator (best-effort, once).
+        if !self.active.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let _ = self.app.emit("audio-active", ());
+        }
+        // Self-describing blob: [ magic "RAU1" | sample_rate:u32-le | channels:u8 | seq:u64-le | opus ].
+        // The webview parses this to configure its `AudioDecoder` and order/gap-detect packets. Opus has no
+        // keyframes, so any packet is independently decodable once the decoder is warmed.
+        let cfg = packet.config;
+        let opus = &packet.data;
+        let mut blob = Vec::with_capacity(4 + 4 + 1 + 8 + opus.len());
+        blob.extend_from_slice(&AUDIO_MAGIC.to_le_bytes());
+        blob.extend_from_slice(&cfg.sample_rate_hz.to_le_bytes());
+        blob.push(cfg.channels);
+        blob.extend_from_slice(&packet.seq.to_le_bytes());
+        blob.extend_from_slice(opus);
+        let _ = self.channel.send(InvokeResponseBody::Raw(blob));
+    }
+}
+
 /// Dial a host's **connection ticket** over iroh and render its screen. Works on any platform (the
 /// viewer only decodes).
 ///
@@ -224,6 +280,7 @@ async fn connect_to_host(
     state: State<'_, AppState>,
     ticket: String,
     on_frame: Channel<InvokeResponseBody>,
+    on_audio: Channel<InvokeResponseBody>,
 ) -> Result<(), String> {
     use ras_core::grant::{fresh_id, AccessRequest, MAX_REQUEST_TTL_MS};
     use ras_core::identity::SoftwareKeyStore;
@@ -311,6 +368,17 @@ async fn connect_to_host(
     if let Ok(sink) = ras_clipboard::ArboardClipboardSink::new() {
         controller.attach_clipboard_sink(Arc::new(sink));
     }
+
+    // Attach the output-audio sink (ADR-077): each Opus packet the host sends (only if it granted
+    // `audio.listen`, gated host-side, Inv 15) is forwarded to the webview over `on_audio` for WebCodecs
+    // playback. Harmless when no audio is granted — the output simply never receives a packet. Emits
+    // `audio-active` on the first packet so the UI can show the "AUDIO SHARED" indicator (Inv 7). Contents
+    // are never logged (Inv 8); audio is live-only, never recorded (Inv 12).
+    controller.attach_audio_output(Arc::new(AppAudioOutput {
+        channel: on_audio,
+        app: app.clone(),
+        active: std::sync::atomic::AtomicBool::new(false),
+    }));
 
     // Drain the lifecycle stream so reconnection (Suspended/Resumed) surfaces in the viewer UI (#22)
     // instead of being parked. The task ends when the stream closes (the session is dropped below on a
@@ -667,6 +735,14 @@ struct LocalConsent {
     /// view-Allow would silently authorize controller→host clipboard writes (Inv 1/2/7, ADR-076). Set
     /// on the Share screen before a viewer connects (the grant's capabilities are fixed at issue time).
     clipboard_allowed: std::sync::atomic::AtomicBool,
+    /// Whether the local user has opted in to **output-audio sharing** (host system audio → viewer,
+    /// ADR-077). Default **false**. Output audio is display-side only (no mic, live-only, never recorded —
+    /// Inv 12) and is always disclosed by an Inv-7 "AUDIO SHARED" indicator, but it is kept opt-in and
+    /// consistent with the clipboard toggle: the `audio.listen` capability is placed in the issued grant's
+    /// `consented` set only when this is true. With it withheld the host never fetches an audio sink and no
+    /// audio is captured or sent (the `ras-core` audio pump is gated on the granted capability, Inv 15).
+    /// Set on the Share screen before a viewer connects (the grant's capabilities are fixed at issue time).
+    audio_allowed: std::sync::atomic::AtomicBool,
 }
 
 impl LocalConsent {
@@ -678,6 +754,7 @@ impl LocalConsent {
             pending_file: Mutex::new(None),
             last_file_offer: Mutex::new(None),
             clipboard_allowed: std::sync::atomic::AtomicBool::new(false),
+            audio_allowed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -691,6 +768,18 @@ impl LocalConsent {
     /// viewer to connect (an already-issued grant's capabilities are immutable).
     fn set_clipboard_allowed(&self, allowed: bool) {
         self.clipboard_allowed
+            .store(allowed, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the local user has opted in to output-audio sharing (default false).
+    fn audio_allowed(&self) -> bool {
+        self.audio_allowed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Set the output-audio-sharing opt-in (from the Share-screen toggle). Takes effect for the next
+    /// viewer to connect (an already-issued grant's capabilities are immutable).
+    fn set_audio_allowed(&self, allowed: bool) {
+        self.audio_allowed
             .store(allowed, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -918,6 +1007,16 @@ fn respond_file_offer(state: State<'_, AppState>, accept: bool) {
 #[tauri::command]
 fn set_clipboard_allowed(state: State<'_, AppState>, allowed: bool) {
     state.share.consent.set_clipboard_allowed(allowed);
+}
+
+/// Opt in/out of **output-audio sharing** with a connecting viewer (Share screen toggle, default OFF,
+/// ADR-077). Output audio (host system audio → viewer) has no per-message consent gate, so its
+/// `audio.listen` capability is only placed in a viewer's grant when this is on (Inv 1/7 — always
+/// disclosed by the "AUDIO SHARED" indicator; no mic, live-only, never recorded — Inv 12). Set it BEFORE
+/// a viewer connects — a grant's capabilities are fixed at issue time.
+#[tauri::command]
+fn set_audio_allowed(state: State<'_, AppState>, allowed: bool) {
+    state.share.consent.set_audio_allowed(allowed);
 }
 
 /// Stop the whole share (drop the ticket, stop accepting, end any live viewer). Idempotent.
@@ -1196,7 +1295,7 @@ async fn handle_bootstrap(
     match issuer
         .issue(
             &request,
-            &consented_capabilities(consent.clipboard_allowed()),
+            &consented_capabilities(consent.clipboard_allowed(), consent.audio_allowed()),
             &params,
         )
         .await
@@ -1282,6 +1381,31 @@ async fn serve_one(
         .with_file_catalogue(file_catalogue())
         .with_file_consent(consent.clone())
         .with_file_write_sink(Arc::new(AppFileWriteSink::default()));
+    // Output-audio pipeline (ADR-077): a per-OS `AudioCaptureBackend` (host system audio — no mic) +
+    // the shared `OpusEncoder`. `ras-core` runs the audio pump **only if** the grant carries
+    // `audio.listen` (Inv 15) AND the transport has an audio plane (iroh does) — so this stays inert
+    // unless the host opted in on the Share screen (default OFF). No audio content is ever logged (Inv 8);
+    // audio is live-only, never recorded (Inv 12), and disclosed by an "AUDIO SHARED" indicator when active.
+    #[cfg(target_os = "macos")]
+    let audio_capture = ras_audio_macos::MacAudioCapture::new();
+    #[cfg(target_os = "linux")]
+    let audio_capture = ras_audio_linux::LinuxAudioCapture::new();
+    #[cfg(target_os = "windows")]
+    let audio_capture = ras_audio_windows::WindowsAudioCapture::new();
+    let host = host.with_audio(
+        Box::new(audio_capture),
+        Box::new(ras_audio_opus::OpusEncoder::new()),
+    );
+    // Host-cursor-shape observer (ADR-073): the live OS cursor shape is streamed to the viewer so it draws
+    // the real cursor client-side at zero latency. Display data, never input (outside Inv 6); always safe to
+    // wire (no capability, no consent gate). The viewer-side render is a separate follow-up — this just
+    // feeds the observer so the capture pipeline has it.
+    #[cfg(target_os = "macos")]
+    let host = host.with_cursor_observer(Box::new(ras_cursor_macos::MacCursorObserver::new()));
+    #[cfg(target_os = "linux")]
+    let host = host.with_cursor_observer(Box::new(ras_cursor_linux::X11CursorObserver::new()));
+    #[cfg(target_os = "windows")]
+    let host = host.with_cursor_observer(Box::new(ras_cursor_windows::WinCursorObserver::new()));
     // Share the built host session behind `Arc` so the `send_chat`/`send_clipboard` commands can reach
     // it out-of-band (via `ShareControl` in `ShareState`) while this loop also drives it. All the send
     // APIs take `&self`, so the `Arc` clone and the local `host` coexist safely.
@@ -1536,6 +1660,7 @@ fn main() {
             stop_sharing,
             respond_consent,
             set_clipboard_allowed,
+            set_audio_allowed,
             respond_control_consent,
             respond_file_offer,
             check_for_updates,

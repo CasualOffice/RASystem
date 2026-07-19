@@ -49,6 +49,9 @@
       <header class="bar">
         <button class="back" data-home>← Back</button>
         <h2>Share this screen</h2>
+        <div id="share-audio-indicator" class="indicator audio" role="status" aria-live="polite" hidden>
+          🔊 AUDIO SHARED
+        </div>
         <div id="share-indicator" class="indicator idle">● IDLE</div>
       </header>
       <p class="lead">Send this connection ticket to the person who will view your screen:</p>
@@ -63,6 +66,14 @@
           <strong>Allow clipboard sharing</strong>
           <span class="note">Off by default. When on, the viewer can read and set your clipboard for the
             session. Set this before the viewer connects.</span>
+        </span>
+      </label>
+      <label class="optrow" for="share-audio-cb">
+        <input type="checkbox" id="share-audio-cb" />
+        <span>
+          <strong>Share system audio</strong>
+          <span class="note">Off by default. When on, the viewer will hear this machine's audio, and a
+            shared-audio indicator stays visible while it plays.</span>
         </span>
       </label>
       <div class="row">
@@ -153,6 +164,17 @@
           <span>Send file</span>
         </button>
         <input id="file-picker" type="file" hidden aria-hidden="true" tabindex="-1" />
+        <button id="audio-btn" hidden aria-pressed="true" title="Audio from the shared machine">
+          <svg class="audio-ico-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 9v6h4l5 4V5L8 9H4z" /><path d="M16 8.5a4 4 0 0 1 0 7" /><path d="M18.5 6a7 7 0 0 1 0 12" />
+          </svg>
+          <svg class="audio-ico-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 9v6h4l5 4V5L8 9H4z" /><path d="M22 9l-6 6M16 9l6 6" />
+          </svg>
+          <span class="audio-label">Audio</span>
+        </button>
         <button id="stop" disabled>Disconnect</button>
       </div>
       <canvas id="screen"></canvas>

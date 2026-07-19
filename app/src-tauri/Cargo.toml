@@ -48,6 +48,11 @@ ras-files = { path = "../../crates/ras-files" }
 # The controller streams accepted file bytes as `bytes::Bytes` chunks (ADR-090). Same crate ras-core
 # uses on the wire, so no extra version surface.
 bytes = "1"
+# Opus audio encoder for the Share role's output-audio pipeline (ADR-077/080). Cross-platform (vendored
+# libopus). The host feeds it a per-OS `AudioCaptureBackend` via `HostSession::with_audio`; the pump only
+# runs if the grant carries `audio.listen` AND the transport has an audio plane (both true here), so it is
+# inert unless the host opted in on the Share screen (default OFF).
+ras-audio-opus = { path = "../../crates/ras-audio-opus" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 # Per-platform sharing backends (ADR-063). macOS uses the zero-copy hardware path
@@ -58,6 +63,11 @@ ras-media-macos = { path = "../../crates/ras-media-macos" }
 # Phase-3 OS-input backend: the Share role feeds the viewer's input to CGEvent through this. macOS-only
 # (the parallel Windows/Linux backends are later).
 ras-input-macos = { path = "../../crates/ras-input-macos" }
+# Output-audio capture (ADR-077) + host-cursor-shape capture (ADR-073) backends for macOS. Fed to
+# `HostSession::with_audio` / `with_cursor_observer`; both inert until their gate opens (audio needs the
+# `audio.listen` grant + audio plane; the cursor observer is display-only, always safe to wire).
+ras-audio-macos = { path = "../../crates/ras-audio-macos" }
+ras-cursor-macos = { path = "../../crates/ras-cursor-macos" }
 # Read each Tauri window's NSWindow.windowNumber (the CGWindowID) so we can exclude our own
 # overlay/indicator windows from the shared capture. Pure-Rust objc2, no Swift bridge.
 objc2 = "0.6"
@@ -70,11 +80,19 @@ ras-media-openh264 = { path = "../../crates/ras-media-openh264" }
 # Phase-3 OS-input backend for Linux (ADR-070): XTEST over pure-Rust x11rb. Feeds the viewer's input
 # to the X server on X11/Xwayland sessions.
 ras-input-linux = { path = "../../crates/ras-input-linux" }
+# Output-audio capture (ADR-077) + host-cursor-shape capture (ADR-073) backends for Linux (PipeWire /
+# X11 XFixes). Same wiring as macOS; audio inert until `audio.listen` is granted.
+ras-audio-linux = { path = "../../crates/ras-audio-linux" }
+ras-cursor-linux = { path = "../../crates/ras-cursor-linux" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Phase-3 OS-input backend for Windows (ADR-071): SendInput over windows-rs. In-session, no UIAccess
 # (Inv 14). CI-compile-gated until Windows hardware/runner is available.
 ras-input-windows = { path = "../../crates/ras-input-windows" }
+# Output-audio capture (ADR-077, WASAPI loopback) + host-cursor-shape capture (ADR-073) backends for
+# Windows. Same wiring as macOS; audio inert until `audio.listen` is granted.
+ras-audio-windows = { path = "../../crates/ras-audio-windows" }
+ras-cursor-windows = { path = "../../crates/ras-cursor-windows" }
 
 [lints.clippy]
 unwrap_used = "warn"

@@ -199,6 +199,234 @@ function onFrame(bytes) {
   }
 }
 
+// ── Output-audio playback (Connect role) ─────────────────────────────────────────────────────────
+// The host may transmit its system audio as Opus, one packet per Tauri Channel message. Each blob is:
+//   magic ASCII "RAU1" (4) | sampleRate:u32 LE (4) | channels:u8 (1) | seq:u64 LE (8) | Opus bytes …
+// (18-byte header, then the raw Opus packet). We decode with a WebCodecs AudioDecoder configured on the
+// first packet, then play each decoded AudioData through one AudioContext, scheduling buffers back-to-
+// back on a running clock. If we fall behind (packet loss / a stall), we re-snap the cursor to `now` so
+// latency never grows unbounded — priority #2 (latency) over gapless fidelity. Audio CONTENT (the PCM /
+// Opus bytes) is never logged (Inv 8). Playback defaults ON; a mute toggle + a "click to enable" gesture
+// affordance handle autoplay policy.
+const AUDIO_MAGIC = 0x52415531; // "RAU1" big-endian
+const AUDIO_HEADER_LEN = 17; // 4 magic + 4 sampleRate + 1 channels + 8 seq
+
+const audioPlayer = (function () {
+  const btn = document.getElementById("audio-btn");
+
+  let ctx = null; // one AudioContext for the session
+  let decoder = null; // WebCodecs AudioDecoder
+  let cfg = null; // { sampleRate, channels } from the first packet
+  let nextStartTime = 0; // playback clock cursor (AudioContext time)
+  let muted = false; // user chose to silence (decode still runs, output gated by gain)
+  let gain = null; // master gain node — the mute point (never touches decoder state)
+  let started = false; // we've received at least one packet
+  let needsGesture = false; // AudioContext is suspended and needs a user gesture to resume
+  let firstSeq = null; // seq of the first packet, so timestamps start near zero
+
+  // ── Button presentation ─────────────────────────────────────────────────────────────
+  function refreshBtn() {
+    if (!btn) return;
+    btn.hidden = !started;
+    btn.classList.toggle("muted", muted);
+    btn.classList.toggle("playing", !muted && !needsGesture);
+    btn.classList.toggle("needs-gesture", needsGesture);
+    btn.setAttribute("aria-pressed", muted ? "false" : "true");
+    const label = btn.querySelector(".audio-label");
+    if (needsGesture) {
+      if (label) label.textContent = "Enable audio";
+      btn.title = "Click to enable audio from the shared machine";
+      btn.setAttribute("aria-label", "Click to enable audio");
+    } else if (muted) {
+      if (label) label.textContent = "Muted";
+      btn.title = "Audio muted — click to unmute";
+      btn.setAttribute("aria-label", "Unmute shared audio");
+    } else {
+      if (label) label.textContent = "Audio";
+      btn.title = "Audio playing — click to mute";
+      btn.setAttribute("aria-label", "Mute shared audio");
+    }
+  }
+
+  function applyGain() {
+    if (gain && ctx) gain.gain.setValueAtTime(muted ? 0 : 1, ctx.currentTime);
+  }
+
+  // ── AudioContext / graph ────────────────────────────────────────────────────────────
+  function ensureContext(sampleRate) {
+    if (ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    // Match the source rate so no resampling is needed on the copy path (Chrome/Safari honor the hint).
+    try {
+      ctx = new AC({ sampleRate, latencyHint: "interactive" });
+    } catch (_) {
+      ctx = new AC();
+    }
+    gain = ctx.createGain();
+    gain.gain.value = muted ? 0 : 1;
+    gain.connect(ctx.destination);
+    nextStartTime = 0;
+    // Autoplay policy: a fresh context may be suspended until a user gesture. Reflect that in the button.
+    needsGesture = ctx.state === "suspended";
+    if (needsGesture) tryResume();
+  }
+
+  function tryResume() {
+    if (!ctx) return;
+    ctx.resume().then(
+      () => {
+        needsGesture = ctx.state === "suspended";
+        refreshBtn();
+      },
+      () => {
+        needsGesture = true;
+        refreshBtn();
+      },
+    );
+  }
+
+  // ── Decoder ───────────────────────────────────────────────────────────────────────
+  function buildDecoder() {
+    const dec = new AudioDecoder({
+      output: (audioData) => {
+        try { playAudioData(audioData); } finally { audioData.close(); }
+      },
+      error: () => {
+        // Reset the decoder and re-configure on the next packet; never log audio state (Inv 8).
+        resetDecoder();
+      },
+    });
+    dec.configure({
+      codec: "opus",
+      sampleRate: cfg.sampleRate,
+      numberOfChannels: cfg.channels,
+    });
+    return dec;
+  }
+
+  function resetDecoder() {
+    try { decoder && decoder.close(); } catch (_) {}
+    decoder = null;
+    // cfg is kept; the next packet re-derives it (and rebuilds) if it changed.
+  }
+
+  // ── Copy a decoded AudioData into an AudioBuffer and schedule it back-to-back ─────────
+  function playAudioData(audioData) {
+    if (!ctx) return;
+    const channels = audioData.numberOfChannels;
+    const frames = audioData.numberOfFrames;
+    const rate = audioData.sampleRate || cfg.sampleRate;
+    if (!frames || !channels) return;
+
+    const buffer = ctx.createBuffer(channels, frames, rate);
+    for (let ch = 0; ch < channels; ch++) {
+      const plane = new Float32Array(frames);
+      // f32-planar is the WebCodecs default output for Opus; copy per channel into the AudioBuffer.
+      audioData.copyTo(plane, { planeIndex: ch, format: "f32-planar" });
+      buffer.copyToChannel(plane, ch);
+    }
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(gain);
+
+    const now = ctx.currentTime;
+    // If our cursor has fallen behind (underrun / first packet), re-snap to now with a tiny lead so we
+    // don't schedule in the past and don't accumulate latency. Otherwise chain seamlessly.
+    if (nextStartTime < now + 0.01) nextStartTime = now + 0.02;
+    src.start(nextStartTime);
+    nextStartTime += buffer.duration;
+  }
+
+  // ── Ingest one Opus packet from the Rust audio Channel ───────────────────────────────
+  function onPacket(bytes, sampleRate, channels, seq) {
+    if (!("AudioDecoder" in window)) return; // no WebCodecs audio in this webview — silent, video unaffected
+    if (firstSeq === null) firstSeq = seq;
+
+    // (Re)configure on the first packet or if the stream's format changed mid-session.
+    if (!cfg || cfg.sampleRate !== sampleRate || cfg.channels !== channels) {
+      cfg = { sampleRate, channels };
+      ensureContext(sampleRate);
+      resetDecoder();
+    }
+    if (!ctx) return;
+    if (!decoder || decoder.state !== "configured") {
+      try { decoder = buildDecoder(); } catch (_) { return; }
+    }
+
+    if (!started) {
+      started = true;
+      refreshBtn();
+    }
+
+    // Opus packets are self-contained ("key"); timestamp derived from seq at the stream's frame duration.
+    // Opus @ 20 ms → each packet advances the presentation clock; µs = (seq - firstSeq) * 20000. This is
+    // only a decode-order hint (we schedule on the AudioContext clock, not these timestamps).
+    const tsUs = Number(seq - firstSeq) * 20000;
+    try {
+      decoder.decode(
+        new EncodedAudioChunk({
+          type: "key",
+          timestamp: tsUs >= 0 ? tsUs : 0,
+          data: bytes,
+        }),
+      );
+    } catch (_) {
+      resetDecoder();
+    }
+  }
+
+  // ── Mute / gesture button ───────────────────────────────────────────────────────────
+  if (btn) {
+    btn.addEventListener("click", () => {
+      if (needsGesture) {
+        // The click IS the gesture — resume the context, then leave audio unmuted.
+        tryResume();
+        return;
+      }
+      muted = !muted;
+      applyGain();
+      refreshBtn();
+    });
+  }
+
+  // ── Public API ──────────────────────────────────────────────────────────────────────
+  return {
+    // Called for every audio Channel message. Parses the RAU1 header and feeds the decoder.
+    handle(msg) {
+      const raw = toBytes(msg);
+      if (raw.byteLength < AUDIO_HEADER_LEN) return;
+      const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+      if (dv.getUint32(0, true) !== AUDIO_MAGIC) return; // not an RAU1 packet — drop
+      const sampleRate = dv.getUint32(4, true);
+      const channels = raw[8];
+      const seq = dv.getBigUint64(9, true);
+      const opus = raw.subarray(AUDIO_HEADER_LEN);
+      if (!sampleRate || !channels || opus.byteLength === 0) return;
+      onPacket(opus, sampleRate, channels, seq);
+    },
+    // Tear everything down on session end (Inv 8: no audio state lingering after a session).
+    reset() {
+      try { decoder && decoder.close(); } catch (_) {}
+      decoder = null;
+      if (ctx) {
+        try { ctx.close(); } catch (_) {}
+      }
+      ctx = null;
+      gain = null;
+      cfg = null;
+      firstSeq = null;
+      nextStartTime = 0;
+      started = false;
+      needsGesture = false;
+      // Keep the user's mute preference across reconnects within the app run; but hide the control until
+      // audio flows again.
+      refreshBtn();
+    },
+  };
+})();
+
 // ── Connect (viewer) session lifecycle ───────────────────────────────────────────────────────────
 const ticketInput = document.getElementById("ticket");
 const connectBtn = document.getElementById("connect");
@@ -253,6 +481,28 @@ if (shareClipboardCb) {
   });
 }
 
+// System-audio-sharing opt-in (Share role, default OFF). Like the clipboard toggle this is a host-side
+// authorization choice (Inv 1): the viewer only hears this machine when the owner ticks it. The Rust
+// side gates the audio grant on it. Independent of a live viewer — the host opts in ahead of time, and
+// the `audio-active` / `audio-inactive` events (below) drive the always-visible "AUDIO SHARED"
+// disclosure (Inv 7) only once audio is actually flowing.
+const shareAudioCb = document.getElementById("share-audio-cb");
+if (shareAudioCb) {
+  shareAudioCb.addEventListener("change", () => {
+    invoke("set_audio_allowed", { allowed: shareAudioCb.checked }).catch(() => {});
+  });
+}
+// The "🔊 AUDIO SHARED" indicator is honest and unsuppressable: it is visible on the Share view exactly
+// while host audio is being transmitted (share-viewer live AND audio opted-in, as decided host-side and
+// signalled by audio-active). audio-inactive hides it. It never hides while audio flows (Inv 7).
+const shareAudioIndicator = document.getElementById("share-audio-indicator");
+listen("audio-active", () => {
+  if (shareAudioIndicator) shareAudioIndicator.hidden = false;
+});
+listen("audio-inactive", () => {
+  if (shareAudioIndicator) shareAudioIndicator.hidden = true;
+});
+
 let active = false; // a viewer session is live
 
 function resetState() {
@@ -265,6 +515,7 @@ function resetState() {
   gaps = 0;
   t0 = performance.now();
   annotations.clear();
+  audioPlayer.reset(); // close the AudioDecoder + AudioContext; no audio state lingers (Inv 8)
 }
 
 function setLive(isLive) {
@@ -273,6 +524,7 @@ function setLive(isLive) {
   if (!isLive) {
     reconnectBanner.hidden = true; // clear the reconnecting banner when the session ends
     connStats.hidden = true; // and the connection-stats readout
+    audioPlayer.reset(); // stop + hide audio on any session end (incl. a host-initiated end)
   }
   connectBtn.disabled = isLive;
   ticketInput.disabled = isLive;
@@ -294,9 +546,11 @@ async function startSession(ticket) {
   resetState();
   const channel = new Channel();
   channel.onmessage = onMessage;
+  const onAudio = new Channel();
+  onAudio.onmessage = (msg) => audioPlayer.handle(msg);
   hud.textContent = "connecting…";
   try {
-    await invoke("connect_to_host", { ticket, onFrame: channel });
+    await invoke("connect_to_host", { ticket, onFrame: channel, onAudio });
   } catch (e) {
     hud.textContent = "connect failed: " + e;
     setLive(false);
