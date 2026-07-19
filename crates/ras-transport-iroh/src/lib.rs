@@ -11,7 +11,7 @@ use core::time::Duration;
 use std::sync::Mutex;
 
 use bytes::{Bytes, BytesMut};
-use iroh::endpoint::{presets, Connection, RecvStream, SendStream, VarInt};
+use iroh::endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream, VarInt};
 use iroh::{
     Endpoint as IrohEndpoint, EndpointAddr as IrohEndpointAddr, EndpointId as IrohEndpointId,
 };
@@ -256,8 +256,18 @@ impl Endpoint {
     /// discovery + default relay preset). Advertising both lets one endpoint accept a bootstrap
     /// connection and a session connection and route them by their negotiated ALPN.
     pub async fn bind() -> Result<Self, TransportError> {
+        // Keep an idle connection alive through the **human consent wait**. iroh's max idle timeout is
+        // only 15s (direct) / 30s (relay), and its default sends NO QUIC keep-alive — so while the host
+        // user reads the Allow/Deny prompt (which can easily take longer), the connection idles out and
+        // the grant exchange fails with "bootstrap read failed" on BOTH ends. A 5s keep-alive (iroh's
+        // maximum) sends PINGs that reset the idle timer before it can fire, so an idle-but-live
+        // connection survives the full consent window (and any other user-in-the-loop pause).
+        let transport = QuicTransportConfig::builder()
+            .default_path_keep_alive_interval(std::time::Duration::from_secs(5))
+            .build();
         let inner = IrohEndpoint::builder(presets::N0)
             .alpns(vec![ALPN.to_vec(), BOOTSTRAP_ALPN.to_vec()])
+            .transport_config(transport)
             .bind()
             .await
             .map_err(|_| RasError::fatal(ErrorCode::TransportError, "endpoint bind failed"))?;
