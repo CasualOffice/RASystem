@@ -70,10 +70,27 @@ mod imp {
         }
     }
 
+    /// Why the capture thread stopped before delivering a first frame. `start` maps this to a
+    /// typed, content-free `MediaError` instead of a bare startup timeout, so a declined portal is
+    /// distinguishable from a slow-but-alive one.
+    #[derive(Clone, Copy)]
+    enum StartupFailure {
+        /// Building the OS capturer failed *or panicked* — on Linux this is the
+        /// xdg-desktop-portal picker being declined/cancelled or the portal being unavailable
+        /// (scap's `LinuxCapturer::new` `expect`s the portal call, so a decline unwinds here).
+        Declined,
+        /// scap returned a clean `CapturerBuildError` (unsupported / permission not granted).
+        Unavailable,
+    }
+
     /// Shared latest-frame slot between the capture thread and the pump.
     struct Shared {
         slot: Mutex<Option<Buf>>,
         cv: Condvar,
+        /// Set by the capture thread if it fails to *build* the capturer before any frame. Read by
+        /// `start` after the first-frame wait to produce a precise error. `None` = no build failure
+        /// observed (either frames are flowing, or startup genuinely timed out).
+        startup_failure: Mutex<Option<StartupFailure>>,
     }
 
     struct Running {
@@ -218,6 +235,7 @@ mod imp {
             let shared = Arc::new(Shared {
                 slot: Mutex::new(None),
                 cv: Condvar::new(),
+                startup_failure: Mutex::new(None),
             });
             let stop = Arc::new(AtomicBool::new(false));
             let fps = opts.target_fps.max(1);
@@ -252,10 +270,23 @@ mod imp {
                     Ok(self.config)
                 }
                 None => {
+                    // Prefer the capture thread's specific reason (declined / unavailable) over a
+                    // bare timeout. This is what turns a portal decline from a process abort into a
+                    // clean, surfaced error.
+                    let reason = *shared
+                        .startup_failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     self.stop();
-                    Err(cap_fatal(
-                        "no frame within the startup window (capture declined?)",
-                    ))
+                    Err(match reason {
+                        Some(StartupFailure::Declined) => {
+                            cap_fatal("screen sharing was declined or is unavailable")
+                        }
+                        Some(StartupFailure::Unavailable) => {
+                            cap_fatal("screen capture not supported or permission not granted")
+                        }
+                        None => cap_fatal("no frame within the startup window"),
+                    })
                 }
             }
         }
@@ -297,6 +328,16 @@ mod imp {
         }
     }
 
+    /// Record why startup failed and wake any `start` waiter so it fails fast (instead of hitting
+    /// the full startup timeout) with a precise, content-free error.
+    fn record_startup_failure(shared: &Arc<Shared>, reason: StartupFailure) {
+        *shared
+            .startup_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
+        shared.cv.notify_all();
+    }
+
     /// Wait up to `timeout` for a frame to appear in the slot, and take it.
     fn wait_for_frame(shared: &Arc<Shared>, timeout: Duration) -> Option<Buf> {
         let mut slot = shared
@@ -327,15 +368,38 @@ mod imp {
             output_resolution: Resolution::Captured,
             excluded_targets: None,
         };
-        let mut capturer = match Capturer::build(options) {
-            Ok(c) => c,
+        // `Capturer::build` can *panic* rather than return `Err` when the OS capturer setup fails —
+        // notably on Linux, where scap's `LinuxCapturer::new` `expect`s the xdg-desktop-portal call,
+        // so a user declining/cancelling the screen-selection dialog (or an unavailable portal)
+        // unwinds here. That unwind happens on *this* thread (`Capturer::build` runs synchronously
+        // on the caller), so `catch_unwind` contains it and we can fail closed instead of the panic
+        // propagating to the thread boundary and aborting the Share. scap's own `is_supported`/
+        // `has_permission` gates are hard-coded `true` on Linux, so they can't pre-empt this — the
+        // panic guard is the only reliable defense on the portal path.
+        let build =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Capturer::build(options)));
+        let mut capturer = match build {
+            Ok(Ok(c)) => c,
+            Ok(Err(_)) => {
+                // Clean build error (unsupported / permission not granted).
+                record_startup_failure(&shared, StartupFailure::Unavailable);
+                return;
+            }
             Err(_) => {
-                // Wake any startup waiter so `start` fails fast instead of hitting the full timeout.
-                shared.cv.notify_all();
+                // Panic during build (declined/cancelled/unavailable portal). The unwind payload is
+                // not logged — it could carry OS strings; Inv 8 keeps content out of logs.
+                record_startup_failure(&shared, StartupFailure::Declined);
                 return;
             }
         };
-        capturer.start_capture();
+        // `start_capture` can also panic (e.g. scap's engine `expect`s on start). Contain it on this
+        // thread and fail closed rather than aborting the process.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| capturer.start_capture()))
+            .is_err()
+        {
+            record_startup_failure(&shared, StartupFailure::Declined);
+            return;
+        }
         let start = Instant::now();
         while !stop.load(Ordering::SeqCst) {
             match capturer.get_next_frame() {
@@ -358,7 +422,9 @@ mod imp {
                 Err(_) => break, // channel closed
             }
         }
-        capturer.stop_capture();
+        // Teardown: scap's `stop_capture` can `expect`/`join` internally (Linux joins the pipewire
+        // thread). Contain any unwind so shutdown never aborts the process.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| capturer.stop_capture()));
     }
 }
 

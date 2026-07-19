@@ -1411,12 +1411,27 @@ async fn cursor_pump(
     }
 }
 
+/// Result of an off-loop control-lease consent prompt, delivered back to the control loop for the
+/// post-consent lease-issuance work. Carries the originally requested set (the issuance re-clamps
+/// against it and the grant, Inv 15) and the local user's consented subset (empty ⇒ denied, Inv 1).
+struct ControlConsentResult {
+    requested: CapabilitySet,
+    consented: CapabilitySet,
+}
+
 async fn host_control_loop<C, E>(
     control: &mut Box<dyn ControlChannelDyn>,
     inner: &HostInner<C, E>,
     mut bye_rx: mpsc::Receiver<ErrorCode>,
     mut outbound_rx: mpsc::Receiver<ControlMsg>,
 ) {
+    // Off-loop control-consent channel (fixes the head-of-line block): a `ControlRequest` spawns the
+    // (up-to-90 s) local Allow/Deny prompt onto its own task and delivers the result here, so the loop
+    // keeps servicing KeyframeRequest / Input / Bye / everything else while a prompt is pending. Depth 1
+    // + `pending_consent` enforces the single-outstanding-prompt rule (Inv 5 — one lease model): a second
+    // request while one is pending is refused fail-closed rather than stacking prompts.
+    let (consent_tx, mut consent_rx) = mpsc::channel::<ControlConsentResult>(1);
+    let mut pending_consent = false;
     loop {
         tokio::select! {
             // A local teardown asked us to notify the controller and exit. Emergency revoke uses
@@ -1437,6 +1452,46 @@ async fn host_control_loop<C, E>(
                     if control.send(msg).await.is_err() { break; }
                 }
                 None => break,
+            },
+            // An off-loop control-consent prompt resolved (see the `ControlRequest` arm). Do the
+            // post-consent lease work ON the loop: clamp to grant ∩ policy ∩ consent (Inv 15) and issue
+            // — but only if a stop/teardown did NOT land while the prompt was pending (Inv 4, re-checked
+            // inside `host_finish_control_request`). `None` = the consent task's sender dropped (teardown)
+            // → nothing to do. Clearing `pending_consent` re-arms the single-prompt slot.
+            res = consent_rx.recv() => {
+                pending_consent = false;
+                if let Some(ControlConsentResult { requested, consented }) = res {
+                    match host_finish_control_request(inner, &requested, &consented) {
+                        Ok(lease) => {
+                            let _ = control
+                                .send(ControlMsg::ControlGranted {
+                                    lease_id: lease.lease_id.0,
+                                    generation: lease.generation,
+                                    capabilities: lease.capabilities.iter().cloned().collect(),
+                                    expires_at: lease.expires_at,
+                                    signature: bytes::Bytes::new(),
+                                })
+                                .await;
+                            record_audit(
+                                inner,
+                                ras_audit::AuditEvent::ControlLeaseGranted {
+                                    generation: lease.generation,
+                                },
+                            );
+                            emit_lifecycle(
+                                inner,
+                                LifecycleEvent::ControlLeaseGranted {
+                                    generation: lease.generation,
+                                },
+                            );
+                        }
+                        Err(code) => {
+                            let _ = control.send(ControlMsg::ControlRevoked { code }).await;
+                            record_audit(inner, ras_audit::AuditEvent::ControlLeaseRevoked { code });
+                            emit_lifecycle(inner, LifecycleEvent::ControlLeaseEnded { code });
+                        }
+                    }
+                }
             },
             msg = control.recv() => match msg {
             Ok(ControlMsg::KeyframeRequest(_)) => {
@@ -1471,36 +1526,40 @@ async fn host_control_loop<C, E>(
             // authority (Inv 15) — `LeaseManager::issue` re-clamps against the seeded grant caps.
             Ok(ControlMsg::ControlRequest { capabilities }) => {
                 let requested: CapabilitySet = capabilities.into_iter().collect();
-                let decision = host_handle_control_request(inner, &requested).await;
-                match decision {
-                    Ok(lease) => {
-                        let _ = control
-                            .send(ControlMsg::ControlGranted {
-                                lease_id: lease.lease_id.0,
-                                generation: lease.generation,
-                                capabilities: lease.capabilities.iter().cloned().collect(),
-                                expires_at: lease.expires_at,
-                                signature: bytes::Bytes::new(),
-                            })
-                            .await;
-                        record_audit(
-                            inner,
-                            ras_audit::AuditEvent::ControlLeaseGranted {
-                                generation: lease.generation,
-                            },
-                        );
-                        emit_lifecycle(
-                            inner,
-                            LifecycleEvent::ControlLeaseGranted {
-                                generation: lease.generation,
-                            },
-                        );
+                // Single-outstanding-prompt (Inv 5): a second request while one is pending is refused
+                // fail-closed — never stack two 90 s prompts. The synchronous pre-check (no backend / no
+                // OS permission / stopping) also refuses fail-closed without prompting.
+                let refuse = if pending_consent {
+                    Some(ErrorCode::CapabilityDenied)
+                } else {
+                    match host_precheck_control_request(inner) {
+                        Ok(consent) => {
+                            // Spawn the local Allow/Deny prompt OFF the loop so it never head-of-line-
+                            // blocks KeyframeRequest / Input / Bye / etc. (the bug fix). The result comes
+                            // back on `consent_rx`; only THEN is a lease issued (Inv 1 — no lease before
+                            // the real consent Allow). No `inner`/lock is captured — the task is `'static`.
+                            let consent_tx = consent_tx.clone();
+                            let requested = requested.clone();
+                            tokio::spawn(async move {
+                                let consented = consent.consent_to_control(&requested).await;
+                                // Loop gone (teardown/abort) ⇒ drop the result; no lease is issued.
+                                let _ = consent_tx
+                                    .send(ControlConsentResult {
+                                        requested,
+                                        consented,
+                                    })
+                                    .await;
+                            });
+                            pending_consent = true;
+                            None
+                        }
+                        Err(code) => Some(code),
                     }
-                    Err(code) => {
-                        let _ = control.send(ControlMsg::ControlRevoked { code }).await;
-                        record_audit(inner, ras_audit::AuditEvent::ControlLeaseRevoked { code });
-                        emit_lifecycle(inner, LifecycleEvent::ControlLeaseEnded { code });
-                    }
+                };
+                if let Some(code) = refuse {
+                    let _ = control.send(ControlMsg::ControlRevoked { code }).await;
+                    record_audit(inner, ras_audit::AuditEvent::ControlLeaseRevoked { code });
+                    emit_lifecycle(inner, LifecycleEvent::ControlLeaseEnded { code });
                 }
             }
             // One OS-input event. The per-message gate (Inv 15 / ADR-041) runs against the host's own
@@ -1737,12 +1796,13 @@ fn record_audit<C, E>(inner: &HostInner<C, E>, event: ras_audit::AuditEvent) {
     }
 }
 
-/// Handle a `ControlRequest`: fail-closed if this host cannot inject, else local consent (Inv 1) then
-/// issue a lease clamped to grant ∩ policy ∩ consent. Consent is awaited **outside** any lock.
-async fn host_handle_control_request<C, E>(
+/// Pre-consent half of a `ControlRequest` (Inv 1): fail-closed if this host cannot inject, else return
+/// the [`ControlConsent`] seam to prompt the local user with. Runs entirely synchronously (no `.await`)
+/// so it can execute inline on the control loop without blocking it; the prompt itself is awaited
+/// **off-loop** (see [`host_control_loop`]). Returns `Err(code)` to refuse without prompting.
+fn host_precheck_control_request<C, E>(
     inner: &HostInner<C, E>,
-    requested: &CapabilitySet,
-) -> Result<ras_control::ControlLease, ErrorCode> {
+) -> Result<Arc<dyn ControlConsent>, ErrorCode> {
     // A session that is stopping (emergency or graceful) must never mint a fresh lease.
     if inner.stop.load(Ordering::SeqCst) {
         return Err(ErrorCode::SessionRevoked);
@@ -1756,13 +1816,23 @@ async fn host_handle_control_request<C, E>(
     if !sink.is_some_and(|s| s.input_permitted()) {
         return Err(ErrorCode::CapabilityDenied);
     }
-    // Local consent (Invariant 1). Clone the Arc out of the lock, then await with no lock held.
-    let consent = inner
+    // Local consent (Invariant 1). Clone the Arc out of the lock; the caller awaits it off-loop.
+    Ok(inner
         .control_consent
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    let consented = consent.consent_to_control(requested).await;
+        .clone())
+}
+
+/// Post-consent half of a `ControlRequest`: given the local user's consented subset (empty ⇒ denied),
+/// clamp to grant ∩ policy ∩ consent and issue the lease. Runs on the control loop once the off-loop
+/// consent prompt resolves — the `stop` re-check below is the Inv-4 backstop for a stop/teardown that
+/// landed *during* the (possibly up to 90 s) prompt.
+fn host_finish_control_request<C, E>(
+    inner: &HostInner<C, E>,
+    requested: &CapabilitySet,
+    consented: &CapabilitySet,
+) -> Result<ras_control::ControlLease, ErrorCode> {
     if consented.is_empty() {
         return Err(ErrorCode::ConsentDenied);
     }
@@ -1797,7 +1867,7 @@ async fn host_handle_control_request<C, E>(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     match guard.as_mut() {
         Some(lm) => lm
-            .issue(holder, requested, &consented, now, LEASE_DEFAULT_TTL_MS)
+            .issue(holder, requested, consented, now, LEASE_DEFAULT_TTL_MS)
             .map_err(ras_control::ControlError::code),
         None => Err(ErrorCode::Internal),
     }

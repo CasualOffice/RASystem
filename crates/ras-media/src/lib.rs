@@ -69,26 +69,31 @@ pub struct StreamConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VideoCodec {
-    /// H.264 Annex-B, Main profile, CABAC, no B-frames. Default.
+    /// H.264 Annex-B, Constrained Baseline, no B-frames. Default.
     H264AnnexB,
 }
 
 impl VideoCodec {
-    /// Derive the fully-qualified WebCodecs codec string (e.g. `"avc1.4D401F"`) from the codec plus
+    /// Derive the fully-qualified WebCodecs codec string (e.g. `"avc1.42E01F"`) from the codec plus
     /// the H.264 level implied by the frame dimensions. This projection lives only at the Tauri/JS
     /// boundary (the wire/in-memory type stays the enum).
     ///
     /// Format is `avc1.PPCCLL` — profile_idc, constraint-set flags, level_idc, each two hex digits.
-    /// We emit Main profile (`0x4D`) with constraint byte `0x40` (matches the desktop-encoder
-    /// output), and pick the smallest level whose `MaxFS` (macroblocks/frame, Table A-1 of the
-    /// H.264 spec) covers `ceil(w/16)·ceil(h/16)`. Level, not bitrate/fps, is what the decoder needs
-    /// to size its buffers; dimensions are the load-bearing input.
+    /// We emit **Constrained Baseline** (`0x42`, constraint byte `0xE0`) because that is what the
+    /// backends actually produce: the macOS VideoToolbox path is
+    /// `kVTProfileLevel_H264_Baseline_AutoLevel` and the OpenH264 software path is Constrained
+    /// Baseline. Advertising Main (`0x4D`) — as an earlier version did — makes stricter WebCodecs
+    /// engines (WebView2 on Windows, WebKitGTK on Linux) reject `isConfigSupported`/`configure` for a
+    /// stream that is really Baseline, producing a permanent black screen. Baseline is also the most
+    /// universally-decodable profile. We then pick the smallest level whose `MaxFS` (macroblocks/
+    /// frame, Table A-1 of the H.264 spec) covers `ceil(w/16)·ceil(h/16)`. Level, not bitrate/fps, is
+    /// what the decoder needs to size its buffers; dimensions are the load-bearing input.
     #[must_use]
     pub fn webcodecs_string(self, width: u32, height: u32) -> String {
         match self {
             VideoCodec::H264AnnexB => {
                 let mbs = width.div_ceil(16) as u64 * height.div_ceil(16) as u64;
-                format!("avc1.4D40{:02X}", h264_level_idc_for_mbs(mbs))
+                format!("avc1.42E0{:02X}", h264_level_idc_for_mbs(mbs))
             }
         }
     }
@@ -436,20 +441,20 @@ mod tests {
 
     #[test]
     fn webcodecs_string_matches_level_by_dimensions() {
-        // 720p → 3600 MBs → level 3.1 (0x1F): the canonical "avc1.4D401F".
+        // 720p → 3600 MBs → level 3.1 (0x1F): the canonical Constrained-Baseline "avc1.42E01F".
         assert_eq!(
             VideoCodec::H264AnnexB.webcodecs_string(1280, 720),
-            "avc1.4D401F"
+            "avc1.42E01F"
         );
         // 1080p → 8160 MBs → level 4.0 (0x28).
         assert_eq!(
             VideoCodec::H264AnnexB.webcodecs_string(1920, 1080),
-            "avc1.4D4028"
+            "avc1.42E028"
         );
         // 4K → 32400 MBs → level 5.1 (0x33).
         assert_eq!(
             VideoCodec::H264AnnexB.webcodecs_string(3840, 2160),
-            "avc1.4D4033"
+            "avc1.42E033"
         );
     }
 

@@ -952,6 +952,231 @@ mod e2e {
         controller.disconnect(StopReason::UserRequested).await;
     }
 
+    /// Regression: a slow control-lease consent prompt (the real app blocks up to 90 s waiting for the
+    /// host user to click Allow/Deny) must NOT head-of-line-block the host control loop. While the
+    /// prompt is pending, other inbound control messages (here a `ChatMessage`) must still be serviced;
+    /// the lease is still granted only AFTER consent resolves (Inv 1 — consent-before-lease preserved).
+    #[tokio::test]
+    async fn a_slow_control_consent_does_not_block_other_control_messages() {
+        use crate::deps::{ControlConsent, GrantDecision, GrantValidator, SessionAuthContext};
+        use ras_control::OsInputSink;
+        use ras_policy::CapabilitySet;
+        use ras_protocol::PointerButton;
+
+        // A consent seam that deliberately stalls ~300 ms before Allowing — models the real (up-to-90 s)
+        // local prompt. If the loop awaited this inline, the chat below would not surface until it
+        // resolved; the fix moves it off-loop so the chat surfaces during the delay.
+        struct SlowAllowControl;
+        #[async_trait::async_trait]
+        impl ControlConsent for SlowAllowControl {
+            async fn consent_to_control(&self, requested: &CapabilitySet) -> CapabilitySet {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                requested.clone()
+            }
+        }
+
+        // Minimal input sink: only `input_permitted()` matters for the pre-check to pass.
+        struct PermitSink;
+        impl OsInputSink for PermitSink {
+            fn pointer_move(&self, _d: u32, _x: f32, _y: f32) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn pointer_button(
+                &self,
+                _d: u32,
+                _x: f32,
+                _y: f32,
+                _b: PointerButton,
+                _down: bool,
+            ) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn pointer_wheel(&self, _dx: i16, _dy: i16) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn key(&self, _u: u16, _down: bool, _m: u8) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn text(&self, _s: &str) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn release_all(&self) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn input_permitted(&self) -> bool {
+                true
+            }
+        }
+
+        struct Phase3Validator;
+        #[async_trait::async_trait]
+        impl GrantValidator for Phase3Validator {
+            async fn authorize(
+                &self,
+                _ctx: &SessionAuthContext,
+            ) -> Result<GrantDecision, crate::CoreError> {
+                Ok(GrantDecision::Authorized(
+                    ras_policy::phase3_default_policy(),
+                ))
+            }
+        }
+
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(Phase3Validator),
+        )
+        .with_input_sink(Arc::new(PermitSink))
+        .with_control_consent(Arc::new(SlowAllowControl));
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let mut host_events = host_r.unwrap();
+        let _ctrl_events = ctrl_r.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        // Kick off the (slow) consent prompt, then IMMEDIATELY send a chat. If the loop were blocked on
+        // the consent await, this chat would not surface until ~300 ms later (with the lease). It must
+        // surface promptly instead — proving the loop keeps servicing control while consent is pending.
+        controller.request_control(vec!["pointer.move".into(), "pointer.click".into()]);
+        controller.send_chat("ping".into());
+
+        // The chat must surface well before the 300 ms consent resolves — assert it within 150 ms.
+        let mut saw_chat = false;
+        for _ in 0..15 {
+            while let Ok(ev) = host_events.try_recv() {
+                if let LifecycleEvent::ChatMessage { .. } = ev {
+                    saw_chat = true;
+                }
+            }
+            if saw_chat {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            saw_chat,
+            "a chat sent while a control-consent prompt is pending must be serviced (no HOL block)"
+        );
+        assert!(
+            controller.current_lease().is_none(),
+            "no lease may exist before the (still-pending) consent resolves (Inv 1)"
+        );
+
+        // Once consent resolves, the lease IS granted — consent-before-lease is preserved.
+        assert!(
+            wait_until(|| controller.current_lease().is_some(), 800).await,
+            "the lease must be granted after the slow consent finally Allows (Inv 1)"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
+    /// Regression (Inv 4): an emergency stop that lands WHILE a control-consent prompt is pending must
+    /// win — the eventual consent Allow must never resurrect a lease on a stopped session. The off-loop
+    /// consent future may resolve after the stop; the post-consent `stop` re-check is the backstop.
+    #[tokio::test]
+    async fn a_stop_during_pending_consent_denies_the_eventual_lease() {
+        use crate::deps::{ControlConsent, GrantDecision, GrantValidator, SessionAuthContext};
+        use ras_control::OsInputSink;
+        use ras_policy::CapabilitySet;
+        use ras_protocol::PointerButton;
+
+        struct SlowAllowControl;
+        #[async_trait::async_trait]
+        impl ControlConsent for SlowAllowControl {
+            async fn consent_to_control(&self, requested: &CapabilitySet) -> CapabilitySet {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                requested.clone()
+            }
+        }
+        struct PermitSink;
+        impl OsInputSink for PermitSink {
+            fn pointer_move(&self, _d: u32, _x: f32, _y: f32) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn pointer_button(
+                &self,
+                _d: u32,
+                _x: f32,
+                _y: f32,
+                _b: PointerButton,
+                _down: bool,
+            ) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn pointer_wheel(&self, _dx: i16, _dy: i16) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn key(&self, _u: u16, _down: bool, _m: u8) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn text(&self, _s: &str) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn release_all(&self) -> Result<(), crate::CoreError> {
+                Ok(())
+            }
+            fn input_permitted(&self) -> bool {
+                true
+            }
+        }
+        struct Phase3Validator;
+        #[async_trait::async_trait]
+        impl GrantValidator for Phase3Validator {
+            async fn authorize(
+                &self,
+                _ctx: &SessionAuthContext,
+            ) -> Result<GrantDecision, crate::CoreError> {
+                Ok(GrantDecision::Authorized(
+                    ras_policy::phase3_default_policy(),
+                ))
+            }
+        }
+
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(Phase3Validator),
+        )
+        .with_input_sink(Arc::new(PermitSink))
+        .with_control_consent(Arc::new(SlowAllowControl));
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let _host_events = host_r.unwrap();
+        let _ctrl_events = ctrl_r.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        controller.request_control(vec!["pointer.move".into(), "pointer.click".into()]);
+        // Let the prompt start, then emergency-stop while it is still pending (~300 ms).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        host.emergency_stop(ras_protocol::ErrorCode::SessionRevoked)
+            .await;
+
+        // Give the consent future time to resolve (post-stop) and confirm it never grants a lease.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            controller.current_lease().is_none(),
+            "a stop during a pending consent must deny the eventual lease (Inv 4)"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+    }
+
     /// Re-issuing the OS-input lease while one is already active (a re-request or a transfer) must flush
     /// the prior holder's held keys FIRST, so no key/modifier crosses the lease boundary (Inv 4). The
     /// generation bump alone only stales the old holder's *wire* input — it cannot lift a key already

@@ -31,6 +31,11 @@ tauri = { version = "2.11", features = [] }
 # key before applying — the FREE update-integrity layer, independent of the deferred paid OS
 # code-signing/notarization (ADR-072). Inert until a signing key is provisioned (see the runbook).
 tauri-plugin-updater = "2"
+# Native OS notifications (industry-standard UX): raise a system notification + bring the app to
+# focus when a viewer requests access / control / a file, or a chat arrives, so the local user (who
+# owns the machine — Invariant 1) is never unaware of an inbound request. Notification bodies are
+# content-free (no chat text, no secrets — Invariant 8).
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
@@ -89,6 +94,16 @@ ras-cursor-linux = { path = "../../crates/ras-cursor-linux" }
 # Phase-3 OS-input backend for Windows (ADR-071): SendInput over windows-rs. In-session, no UIAccess
 # (Inv 14). CI-compile-gated until Windows hardware/runner is available.
 ras-input-windows = { path = "../../crates/ras-input-windows" }
+# Exclude our own windows from OS screen capture on Windows (SetWindowDisplayAffinity /
+# WDA_EXCLUDEFROMCAPTURE, Win10 2004+) — the "secure window" affinity password managers use. Pinned
+# to the same windows-rs the rest of the workspace uses (ras-input/cursor/files-windows all on 0.58).
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# Version-stable way to recover the raw HWND from a Tauri window without coupling to Tauri's internal
+# windows-rs version (Tauri implements raw-window-handle 0.6).
+raw-window-handle = "0.6"
 # Output-audio capture (ADR-077, WASAPI loopback) + host-cursor-shape capture (ADR-073) backends for
 # Windows. Same wiring as macOS; audio inert until `audio.listen` is granted.
 ras-audio-windows = { path = "../../crates/ras-audio-windows" }

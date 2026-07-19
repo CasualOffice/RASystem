@@ -86,6 +86,8 @@ const FLAG_KEYFRAME = 0x01;
 const canvas = document.getElementById("screen");
 const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
 const hud = document.getElementById("hud");
+const fatalEl = document.getElementById("fatal-error");
+const fatalTextEl = document.getElementById("fatal-error-text");
 
 let decoder = null;
 let sawKeyframe = false;
@@ -94,6 +96,24 @@ let received = 0;
 let lastId = null;
 let gaps = 0;
 let t0 = performance.now();
+// Consecutive decoder errors since the last successfully-decoded frame. Caps the reconfigure retry
+// loop so an unsupported-but-valid codec can't silently re-arm forever (permanent black canvas).
+let decErrors = 0;
+const MAX_DEC_RETRIES = 3;
+
+// Persistent, honest capability message (Inv 8: engine capability only, never stream content). Shown
+// when the video (or audio) can't be decoded on this webview engine; cleared when a fresh session
+// starts. Does not touch the always-visible LIVE indicator (Inv 7).
+function fatalError(msg) {
+  if (!fatalEl) return;
+  fatalTextEl.textContent = msg;
+  fatalEl.hidden = false;
+}
+function clearFatalError() {
+  if (!fatalEl) return;
+  fatalEl.hidden = true;
+  fatalTextEl.textContent = "";
+}
 
 function toBytes(msg) {
   if (msg instanceof ArrayBuffer) return new Uint8Array(msg);
@@ -101,6 +121,10 @@ function toBytes(msg) {
   if (Array.isArray(msg)) return Uint8Array.from(msg);
   throw new Error("unexpected channel payload type");
 }
+
+const FATAL_VIDEO_MSG =
+  "This system's browser engine can't decode the video (H.264/WebCodecs is unavailable in " +
+  "WebKitGTK on Linux). The macOS and Windows viewers work; Linux viewing is not yet supported.";
 
 function buildDecoder(cfg) {
   canvas.width = cfg.width;
@@ -111,12 +135,25 @@ function buildDecoder(cfg) {
       ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
       frame.close();
       decoded++;
+      decErrors = 0; // a real frame decoded → the codec works; reset the retry cap
     },
     error: (e) => {
-      hud.textContent = "decoder error → resetting: " + e.message;
+      // Cap the reconfigure retries: an unsupported-but-valid codec fires this async error on every
+      // configure(), so re-arming unconditionally is an infinite silent loop → permanent black canvas.
+      // After MAX_DEC_RETRIES consecutive failures with no decoded frame, stop and tell the user
+      // honestly (Inv 8: no stream content — engine capability only).
+      decErrors++;
+      if (decErrors > MAX_DEC_RETRIES) {
+        try { dec.close(); } catch (_) {}
+        if (decoder === dec) decoder = null;
+        hud.textContent = "video decode unavailable on this engine";
+        fatalError(FATAL_VIDEO_MSG);
+        return;
+      }
+      hud.textContent = `decoder error → resetting (${decErrors}/${MAX_DEC_RETRIES}): ` + e.message;
       sawKeyframe = false;
       try { dec.reset(); } catch (_) {}
-      dec.configure(decoderConfig(cfg));
+      try { dec.configure(decoderConfig(cfg)); } catch (_) {}
       invoke("request_keyframe");
     },
   });
@@ -124,21 +161,58 @@ function buildDecoder(cfg) {
   return dec;
 }
 
+// Codec string for the WebCodecs config. IMPORTANT: the Rust side (ras-media
+// VideoCodec::webcodecs_string, crates/ras-media/src/lib.rs) sends a MAIN-profile string
+// ("avc1.4D40LL", profile_idc 0x4D) in the RCFG blob, but the actual encoders (VideoToolbox /
+// OpenH264) emit a BASELINE Annex-B stream (profile_idc 0x42). Chromium-family engines can reject a
+// Main-profile config for a Baseline stream, so here — JS-side only, per the edit scope — we override
+// the profile+constraint bytes to Baseline (0x42E0) while preserving the level byte the Rust side
+// chose. FLAG FOR HUMAN: the correct long-term fix is to make Rust emit the Baseline string (or derive
+// it from the SPS); this JS override is the minimal safe patch that keeps the two in agreement.
+function baselineCodec(codec) {
+  // Expect "avc1.PPCCLL" (8 hex chars after the dot). Keep the level (last 2), force Baseline+constraints.
+  const m = /^avc1\.[0-9A-Fa-f]{6}$/.exec(codec || "");
+  if (!m) return codec; // unknown shape — pass through unchanged
+  const level = codec.slice(-2);
+  return "avc1.42E0" + level;
+}
+
 function decoderConfig(cfg) {
-  // No `description` ⇒ Annex-B input (our encoder re-sends SPS/PPS in-band on every IDR).
+  // No `description` ⇒ Annex-B input (our encoder re-sends SPS/PPS in-band on every IDR — the
+  // Chromium annexb path). The codec string is coerced to Baseline to match the emitted stream.
   return {
-    codec: cfg.codec,
+    codec: baselineCodec(cfg.codec),
     codedWidth: cfg.width,
     codedHeight: cfg.height,
     optimizeForLatency: true,
   };
 }
 
-function onConfig(bytes) {
+async function onConfig(bytes) {
   const json = new TextDecoder().decode(bytes.subarray(4));
   const cfg = JSON.parse(json);
+  const config = decoderConfig(cfg);
+
+  // Real support gate (WebCodecs spec): configure() with an unsupported-but-valid codec does NOT throw
+  // synchronously — it fires the async error callback later. Prechecking here surfaces an honest,
+  // persistent message instead of a silent reconfigure loop. Feature-detect isConfigSupported itself,
+  // since some engines expose VideoDecoder without the static method.
+  try {
+    if (typeof VideoDecoder.isConfigSupported === "function") {
+      const { supported } = await VideoDecoder.isConfigSupported(config);
+      if (!supported) {
+        hud.textContent = "video decode unavailable on this engine";
+        fatalError(FATAL_VIDEO_MSG);
+        return;
+      }
+    }
+  } catch (_) {
+    // isConfigSupported threw (unusual) — fall through to configure(), which the retry cap still bounds.
+  }
+
+  decErrors = 0;
   decoder = buildDecoder(cfg);
-  hud.textContent = `viewing ${cfg.width}×${cfg.height} @ ${cfg.fps} · ${cfg.codec}`;
+  hud.textContent = `viewing ${cfg.width}×${cfg.height} @ ${cfg.fps} · ${config.codec}`;
   // Infinite-GOP: the lone startup IDR may predate this decoder. Ask for a fresh one now, and keep
   // asking until we actually decode a frame (covers the startup race + a dropped first keyframe).
   invoke("request_keyframe");
@@ -152,7 +226,11 @@ function onMessage(msg) {
   const bytes = toBytes(msg);
   if (bytes.byteLength < 4) return;
   const magic = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true);
-  if (magic === CONFIG_MAGIC) return onConfig(bytes);
+  // onConfig is async (it awaits the codec-support gate). Catch here so a bad config blob can never
+  // become an unhandled promise rejection.
+  if (magic === CONFIG_MAGIC) return void onConfig(bytes).catch((e) => {
+    hud.textContent = "bad stream config: " + (e && e.message ? e.message : e);
+  });
   if (magic === FRAME_MAGIC) return onFrame(bytes);
   // otherwise: desync/garbage — drop
 }
@@ -223,6 +301,13 @@ const audioPlayer = (function () {
   let started = false; // we've received at least one packet
   let needsGesture = false; // AudioContext is suspended and needs a user gesture to resume
   let firstSeq = null; // seq of the first packet, so timestamps start near zero
+  // Codec support: null = not yet probed, true = usable, false = this engine has no Opus AudioDecoder.
+  // When false we never build the decoder or show the audio button (video is unaffected). A cap on
+  // consecutive decoder errors stops an infinite reset/retry loop (mirrors the video path).
+  let opusSupported = null;
+  let audioErrors = 0;
+  const MAX_AUDIO_RETRIES = 3;
+  let noticedUnsupported = false; // HUD the honest "no audio on this engine" note only once
 
   // ── Button presentation ─────────────────────────────────────────────────────────────
   function refreshBtn() {
@@ -290,10 +375,20 @@ const audioPlayer = (function () {
   function buildDecoder() {
     const dec = new AudioDecoder({
       output: (audioData) => {
+        audioErrors = 0; // a packet decoded → the codec works; reset the retry cap
         try { playAudioData(audioData); } finally { audioData.close(); }
       },
       error: () => {
-        // Reset the decoder and re-configure on the next packet; never log audio state (Inv 8).
+        // Cap the reset/retry loop: an unusable Opus decoder fires this on every packet, and blindly
+        // rebuilding is an infinite loop. After MAX_AUDIO_RETRIES, give up on audio for this session
+        // (video is unaffected). Never log audio state (Inv 8).
+        audioErrors++;
+        if (audioErrors > MAX_AUDIO_RETRIES) {
+          opusSupported = false;
+          resetDecoder();
+          hideAudioUnsupported();
+          return;
+        }
         resetDecoder();
       },
     });
@@ -303,6 +398,34 @@ const audioPlayer = (function () {
       numberOfChannels: cfg.channels,
     });
     return dec;
+  }
+
+  // Audio is unavailable on this engine: hide the button and note it honestly, once. Content-free.
+  function hideAudioUnsupported() {
+    if (btn) btn.hidden = true;
+    if (!noticedUnsupported) {
+      noticedUnsupported = true;
+      // eslint-disable-next-line no-console
+      console.info("shared audio unavailable: this webview engine has no usable Opus decoder");
+    }
+  }
+
+  // Probe Opus support asynchronously on the first packet's format. Feature-detects isConfigSupported
+  // (some engines expose AudioDecoder without it — then we optimistically try, still capped by the
+  // error retry limit above).
+  async function probeOpus(sampleRate, channels) {
+    const config = { codec: "opus", sampleRate, numberOfChannels: channels };
+    try {
+      if (typeof AudioDecoder.isConfigSupported === "function") {
+        const { supported } = await AudioDecoder.isConfigSupported(config);
+        opusSupported = !!supported;
+      } else {
+        opusSupported = true; // no probe available — try, capped by MAX_AUDIO_RETRIES
+      }
+    } catch (_) {
+      opusSupported = true; // probe threw — try, capped by MAX_AUDIO_RETRIES
+    }
+    if (opusSupported === false) hideAudioUnsupported();
   }
 
   function resetDecoder() {
@@ -342,6 +465,7 @@ const audioPlayer = (function () {
   // ── Ingest one Opus packet from the Rust audio Channel ───────────────────────────────
   function onPacket(bytes, sampleRate, channels, seq) {
     if (!("AudioDecoder" in window)) return; // no WebCodecs audio in this webview — silent, video unaffected
+    if (opusSupported === false) return; // probed unusable — drop silently, video unaffected
     if (firstSeq === null) firstSeq = seq;
 
     // (Re)configure on the first packet or if the stream's format changed mid-session.
@@ -349,6 +473,16 @@ const audioPlayer = (function () {
       cfg = { sampleRate, channels };
       ensureContext(sampleRate);
       resetDecoder();
+      opusSupported = null; // re-probe for the new format
+      audioErrors = 0;
+    }
+    if (opusSupported === null) {
+      // First packet (or a format change): kick off the async support probe and drop this packet.
+      // The next packet proceeds once opusSupported resolves (Opus packets are self-contained, so a
+      // dropped leading packet is a harmless PLC-covered glitch — priority #2, latency over fidelity).
+      opusSupported = false; // provisional "don't re-kick"; probeOpus resets it to the real verdict
+      probeOpus(sampleRate, channels).then(() => {}, () => {});
+      return;
     }
     if (!ctx) return;
     if (!decoder || decoder.state !== "configured") {
@@ -420,6 +554,9 @@ const audioPlayer = (function () {
       nextStartTime = 0;
       started = false;
       needsGesture = false;
+      opusSupported = null; // re-probe support on the next session
+      audioErrors = 0;
+      noticedUnsupported = false;
       // Keep the user's mute preference across reconnects within the app run; but hide the control until
       // audio flows again.
       refreshBtn();
@@ -513,7 +650,9 @@ function resetState() {
   received = 0;
   lastId = null;
   gaps = 0;
+  decErrors = 0;
   t0 = performance.now();
+  clearFatalError(); // a fresh session clears any stale "engine can't decode" message
   annotations.clear();
   audioPlayer.reset(); // close the AudioDecoder + AudioContext; no audio state lingers (Inv 8)
 }

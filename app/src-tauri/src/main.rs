@@ -30,6 +30,8 @@ use ras_media::{EncodedFrame, StreamConfig};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager, State};
 
+mod secure_window;
+
 /// Framing magic for the one-shot stream-config message (`"RCFG"` big-endian, sent little-endian).
 /// Distinguishes the JSON config blob from the `RAS1` frame blobs on the same channel.
 const CONFIG_MAGIC: u32 = u32::from_be_bytes(*b"RCFG");
@@ -84,6 +86,14 @@ async fn drain_viewer_lifecycle(mut events: LifecycleStream, app: tauri::AppHand
             // boundary — the only place the redacted text is read; it is never logged (Inv 8).
             LifecycleEvent::ChatMessage { text } => {
                 let _ = app.emit("chat-message", text.reveal().to_string());
+                // Gentle attention only (no focus steal) + a content-free notification — never the
+                // message text (Inv 8).
+                alert_user(
+                    &app,
+                    false,
+                    "Casual RAS — new message",
+                    "You have a new chat message.",
+                );
             }
             // The host pushed clipboard and we set it on this viewer's OS clipboard (host→controller,
             // ADR-076). Content-free: emit only the byte count (Inv 8).
@@ -115,6 +125,39 @@ async fn drain_viewer_lifecycle(mut events: LifecycleStream, app: tauri::AppHand
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Bring the app to the local user's attention for an inbound event (industry-standard "someone is
+/// requesting…" UX). The local user owns every authorization decision (Invariant 1), so a request
+/// must never sit unnoticed behind another window.
+///
+/// - `demand = true` (access / control / file requests — a decision is needed *now*): raise, show
+///   and focus the main window and flag it Critical (dock bounce / taskbar flash), plus a system
+///   notification.
+/// - `demand = false` (a chat message — informational): a gentle attention flag + notification, with
+///   **no focus steal** (norm: don't yank the user out of what they're doing for a chat line).
+///
+/// `title`/`body` are **content-free** (Invariant 8): never chat text, clipboard, typed text, keys,
+/// or pixels. A filename may appear (a filename is shown to the user by design, not a secret).
+fn alert_user(app: &tauri::AppHandle, demand: bool, title: &str, body: &str) {
+    if let Some(win) = app.get_webview_window("main") {
+        if demand {
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+            let _ = win.request_user_attention(Some(tauri::UserAttentionType::Critical));
+        } else {
+            let _ = win.request_user_attention(Some(tauri::UserAttentionType::Informational));
+        }
+    }
+    notify(app, title, body);
+}
+
+/// Best-effort native system notification. No-ops (never errors) if notification permission was not
+/// granted. Bodies must be content-free (Invariant 8).
+fn notify(app: &tauri::AppHandle, title: &str, body: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
 }
 
 /// Wall-clock ms since the Unix epoch, for the Phase-2 authorization timestamps (request/grant
@@ -349,7 +392,14 @@ async fn connect_to_host(
 
     // ── Session phase (casual-ras/1): present the grant, then render. ──
     let session = endpoint.connect(&target).await.map_err(|e| e.to_string())?;
-    let transport = Arc::new(IrohSessionTransport::new(endpoint.clone(), session));
+    // Enable ADR-091 resume over real iroh: on a transport drop the controller re-dials this same
+    // target on the session ALPN and re-presents the grant (host re-validates it through the unchanged
+    // validator), so a WiFi hiccup / NAT rebind / relay switch resumes the session instead of killing
+    // it. Without this the resume path is dead code over iroh (MAJOR real-run blocker).
+    let transport = Arc::new(
+        IrohSessionTransport::new(endpoint.clone(), session)
+            .with_reconnect_controller(target.clone()),
+    );
     let controller = Arc::new(ControllerSession::new(
         ControllerSessionConfig::new(target).with_grant(grant),
         transport,
@@ -811,6 +861,12 @@ impl LocalConsent {
         let (tx, rx) = tokio::sync::oneshot::channel();
         *lock(&self.pending) = Some(tx);
         let _ = self.app.emit("consent-request", peer_short);
+        alert_user(
+            &self.app,
+            true,
+            "Casual RAS — access request",
+            "A viewer is asking to see this screen. Open Casual RAS to Allow or Deny.",
+        );
         let allow = matches!(
             tokio::time::timeout(std::time::Duration::from_secs(90), rx).await,
             Ok(Ok(true))
@@ -835,6 +891,12 @@ impl ras_core::ControlConsent for LocalConsent {
         // Surface the human-readable requested caps so the panel can list what input is being asked for.
         let caps: Vec<String> = requested.iter().cloned().collect();
         let _ = self.app.emit("control-consent-request", caps);
+        alert_user(
+            &self.app,
+            true,
+            "Casual RAS — remote control request",
+            "A viewer is asking to control this machine (keyboard & mouse). Open Casual RAS to Allow or Deny.",
+        );
         let allow = matches!(
             tokio::time::timeout(std::time::Duration::from_secs(90), rx).await,
             Ok(Ok(true))
@@ -870,6 +932,13 @@ impl ras_core::FileConsent for LocalConsent {
                 filename: filename.to_string(),
                 size,
             },
+        );
+        // A filename is shown to the user by design (not a secret, Inv 8); file contents never are.
+        alert_user(
+            &self.app,
+            true,
+            "Casual RAS — incoming file",
+            &format!("A viewer wants to send \"{filename}\" ({size} bytes). Open Casual RAS to Allow or Deny."),
         );
         let allow = matches!(
             tokio::time::timeout(std::time::Duration::from_secs(90), rx).await,
@@ -1105,7 +1174,34 @@ async fn run_share(
             return;
         }
     };
-    endpoint.online().await;
+    // Wait for relay connectivity, but NEVER hang forever. `endpoint.online()` returns only once a
+    // home relay reports connected; on a machine that can't reach one (offline, captive portal,
+    // corporate firewall blocking relay UDP/hosts, or the relay is down) it loops indefinitely — and
+    // because this sits before the accept loop's stop-select, Stop couldn't break it either. That
+    // wedges the Share with no ticket and no error (a real-run-only blocker: loopback/direct-dial
+    // tests skip `online()` entirely). Bound the wait, keep Stop responsive throughout, and fall back
+    // to a direct-address ticket so a same-network viewer can still dial even with no relay.
+    let online = tokio::select! {
+        _ = endpoint.online() => true,
+        _ = stop.changed() => {
+            // Stop pressed while still contacting a relay — tear down cleanly instead of parking.
+            if let Some(ov) = app.get_webview_window("overlay") {
+                let _ = ov.hide();
+            }
+            let _ = app.emit("share-active", false);
+            let _ = app.emit("share-status", "Sharing stopped.");
+            return;
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => false,
+    };
+    if !online {
+        let _ = app.emit(
+            "share-status",
+            "No relay reachable — sharing a direct-address code. It will work only if the viewer is on the same network. Check your internet connection or firewall, then try again for remote access.",
+        );
+    }
+    // The ticket carries this endpoint's direct socket addresses (known since bind) plus its relay, so
+    // it is dialable on a LAN even when the relay never came up.
     let _ = app.emit("share-ticket", endpoint.addr().to_ticket());
     let _ = app.emit("share-status", "Waiting for a viewer to connect…");
 
@@ -1133,6 +1229,14 @@ async fn run_share(
     // handles one connection at a time, so a `&mut` borrow suffices).
     let mut nonces = NonceCache::new(MAX_REQUEST_TTL_MS, 4096);
 
+    // Holds the most recent bootstrap connection AFTER its grant was sent, keeping the QUIC link
+    // alive so the grant is reliably delivered/retransmitted. It is released (dropped) only when the
+    // next connection is accepted — by which point the controller has already dialed the session
+    // ALPN with that grant, proving delivery. Without this the connection dropped the instant the
+    // grant was sent, discarding un-acked bytes on a real link (the "bootstrap read failed after
+    // Allow" real-run blocker).
+    let mut pending_bootstrap: Option<ras_transport_iroh::Session> = None;
+
     loop {
         if *stop.borrow() {
             break;
@@ -1141,11 +1245,15 @@ async fn run_share(
             _ = stop.changed() => { if *stop.borrow() { break } else { continue } },
             a = endpoint.accept() => a,
         };
+        // A new connection arrived: the previously-held bootstrap has done its job (the controller is
+        // dialing now, so its grant is delivered). `.take()` both reads the slot and drops the old
+        // connection, closing the QUIC link cleanly before we handle the new one.
+        drop(pending_bootstrap.take());
         match accepted {
             // Route by negotiated ALPN: a bootstrap connection runs consent + issuance; a session
             // connection presents the resulting grant and streams frames.
             Ok(Some(session)) if session.is_bootstrap() => {
-                handle_bootstrap(
+                pending_bootstrap = handle_bootstrap(
                     &app,
                     session,
                     host_id,
@@ -1210,6 +1318,14 @@ fn host_excluded_windows(_app: &tauri::AppHandle) -> Vec<ras_media::WindowId> {
 /// replay, capability recognition), get local consent (Invariant 1), and — only on Allow — issue a
 /// PASETO grant bound to this controller's endpoint. Every failure sends a content-free `Denied`
 /// reason and returns; no session/pixels are involved here.
+///
+/// Returns `Some(session)` only when a grant was actually sent, so the caller can KEEP the bootstrap
+/// connection alive until delivery is proven (see the accept loop). Returns `None` on any denial or
+/// error (nothing to keep alive — the connection is dropped immediately). This is the fix for the
+/// real-run-only blocker where dropping the connection right after `boot.send(grant)` let QUIC
+/// discard the still-un-acked grant bytes on a non-zero-RTT link, so the controller never received
+/// the grant and the connect failed right after the local user clicked Allow. Zero-RTT loopback
+/// always delivered before the drop, so tests never saw it.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn handle_bootstrap(
     app: &tauri::AppHandle,
@@ -1219,7 +1335,7 @@ async fn handle_bootstrap(
     issuer: &ras_core::grant::LocalHostGrantIssuer<ras_core::identity::SoftwareKeyStore>,
     nonces: &mut ras_core::grant::NonceCache,
     consent: &Arc<LocalConsent>,
-) {
+) -> Option<ras_transport_iroh::Session> {
     use ras_core::grant::{
         fresh_id, validate_access_request, AccessRequest, SessionGrantIssuer, SessionParams,
         MAX_REQUEST_TTL_MS,
@@ -1229,7 +1345,7 @@ async fn handle_bootstrap(
     // The controller's transport-authenticated endpoint — the identity the grant is bound to.
     let peer_endpoint = session.remote().0;
     let Ok(mut boot) = session.bootstrap().await else {
-        return;
+        return None;
     };
 
     // Small helper: send a content-free denial and stop.
@@ -1240,27 +1356,27 @@ async fn handle_bootstrap(
                     code: $code,
                 }))
                 .await;
-            return;
+            return None;
         }};
     }
 
     // ClientHello → HostHello (advertise our identity + Tier 0).
     match boot.recv().await {
         Ok(BootstrapMsg::ClientHello { .. }) => {}
-        _ => return,
+        _ => return None,
     }
     if boot
         .send(BootstrapMsg::HostHello { host_id, tier: 0 })
         .await
         .is_err()
     {
-        return;
+        return None;
     }
 
     // AccessRequest (opaque, signed) → decode + validate.
     let canonical = match boot.recv().await {
         Ok(BootstrapMsg::AccessRequest { canonical }) => canonical,
-        _ => return,
+        _ => return None,
     };
     let request = match AccessRequest::decode(&canonical) {
         Ok(r) => r,
@@ -1301,11 +1417,21 @@ async fn handle_bootstrap(
         .await
     {
         Ok(grant) => {
-            let _ = boot
+            if boot
                 .send(BootstrapMsg::AccessDecision(AccessOutcome::Allowed {
                     grant,
                 }))
-                .await;
+                .await
+                .is_err()
+            {
+                return None;
+            }
+            // Grant sent. Finish the send stream (drop `boot`), but hand the still-open connection
+            // back to the accept loop so QUIC keeps the link up and retransmits the grant until the
+            // controller has it (proven when its session-ALPN dial arrives). Dropping the connection
+            // here instead would discard un-acked grant bytes on a real-RTT link.
+            drop(boot);
+            Some(session)
         }
         Err(e) => deny!(boot, e.code),
     }
@@ -1345,7 +1471,12 @@ async fn serve_one(
     let input_sink = Arc::new(ras_input_windows::SendInputSink::new());
 
     let (capture, encoder) = make_backends();
-    let transport = Arc::new(IrohSessionTransport::new(endpoint.clone(), session));
+    // Host side of ADR-091 resume: on a transport drop the host re-accepts on the same endpoint and
+    // waits for the same peer (by authenticated EndpointId) to re-dial, then resumes. Symmetric to the
+    // controller's re-dial above.
+    let transport = Arc::new(
+        IrohSessionTransport::new(endpoint.clone(), session).with_reconnect_host(),
+    );
     let host = HostSession::new(
         // Exclude our own overlay/indicator windows from the shared feed (privacy + no feedback loop).
         HostSessionConfig::new(MonitorId(0))
@@ -1507,6 +1638,12 @@ async fn serve_one(
                 // boundary — the only place the redacted text is read; it is never logged (Inv 8).
                 Some(LifecycleEvent::ChatMessage { text }) => {
                     let _ = app.emit("chat-message", text.reveal().to_string());
+                    alert_user(
+                        app,
+                        false,
+                        "Casual RAS — new message",
+                        "You have a new chat message.",
+                    );
                 }
                 // The viewer pushed clipboard and we set it on the host's OS clipboard (controller→host,
                 // ADR-076). Content-free: emit only the byte count (Inv 8).
@@ -1644,6 +1781,8 @@ fn main() {
         // harmless when no key/endpoint is provisioned — `check_for_updates` just reports "not
         // configured".
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Native OS notifications for inbound requests / chat (see `alert_user`).
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             connect_to_host,
             disconnect,
@@ -1687,6 +1826,27 @@ fn main() {
             // instead set right after the overlay is shown (see the Share path), when it is realized.
             if let Some(ov) = app.get_webview_window("overlay") {
                 let _ = ov.hide();
+            }
+
+            // "Secure window": keep our own windows out of any screen capture / recording (macOS +
+            // Windows; Linux no-op). The consent dialog, in-session chat, clipboard preview, a
+            // pairing code, and — on the Connect side — the remote screen feed itself must not leak
+            // into a recording or the shared stream. Invariant 7 holds: this hides the windows from
+            // capture, NOT from the local user's own screen, so the "REMOTE … ACTIVE" indicator and
+            // Stop control stay visible to the human. Uses the native window handle (no GTK
+            // realization requirement), so it is safe to call before the windows are shown.
+            for label in ["main", "overlay"] {
+                if let Some(w) = app.get_webview_window(label) {
+                    secure_window::exclude_from_capture(&w);
+                }
+            }
+
+            // Ask for notification permission once, up front, so the first inbound request can raise
+            // a system notification (see `alert_user`). Best-effort — a denied/undecided state just
+            // means notifications are skipped; the in-app prompt + window focus still fire.
+            {
+                use tauri_plugin_notification::NotificationExt;
+                let _ = app.handle().notification().request_permission();
             }
             Ok(())
         })

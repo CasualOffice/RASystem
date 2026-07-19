@@ -195,6 +195,20 @@
         <button id="clearannot" title="Clear all annotations">Clear</button>
       </div>
       <div id="hud">Paste a ticket and press Connect.</div>
+      <!-- Honest fatal-error surface (persistent, not a flicker): shown when this webview engine cannot
+           decode the shared stream (e.g. H.264/WebCodecs is unavailable in WebKitGTK on Linux). It is a
+           capability message only — it never carries stream content (Inv 8). Styled inline because the
+           CSP permits inline styles ('style-src unsafe-inline') but not inline scripts/handlers. -->
+      <div id="fatal-error" hidden role="alert" aria-live="assertive"
+        style="position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); max-width:560px;
+               padding:18px 20px; border-radius:12px; background:rgba(30,10,10,0.92);
+               border:1px solid rgba(200,60,60,0.6); color:#f2dede; text-align:center;
+               font:14px/1.5 ui-sans-serif, system-ui, sans-serif; z-index:50;">
+        <div style="font-weight:600; font-size:15px; margin-bottom:6px; color:#ff9a9a;">
+          Can't display the shared screen
+        </div>
+        <div id="fatal-error-text"></div>
+      </div>
       <div id="banner" hidden>● LIVE — viewing remote screen</div>
       <div id="reconnect-banner" hidden>⟳ Connection lost — reconnecting…</div>
       <div id="conn-stats" hidden></div>

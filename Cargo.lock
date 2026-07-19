@@ -3632,7 +3632,7 @@ dependencies = [
 
 [[package]]
 name = "ras-audio-linux"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "libpulse-binding",
  "libpulse-simple-binding",
@@ -3642,7 +3642,7 @@ dependencies = [
 
 [[package]]
 name = "ras-audio-macos"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "block2",
  "dispatch2",
@@ -3658,7 +3658,7 @@ dependencies = [
 
 [[package]]
 name = "ras-audio-opus"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "audiopus",
  "bytes",
@@ -3668,7 +3668,7 @@ dependencies = [
 
 [[package]]
 name = "ras-audio-windows"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "ras-media",
  "ras-protocol",
@@ -3677,7 +3677,7 @@ dependencies = [
 
 [[package]]
 name = "ras-audit"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "ras-identity",
  "ras-protocol",
@@ -3686,7 +3686,7 @@ dependencies = [
 
 [[package]]
 name = "ras-bootstrap"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "getrandom 0.2.17",
  "ras-identity",
@@ -3695,7 +3695,7 @@ dependencies = [
 
 [[package]]
 name = "ras-clipboard"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "arboard",
  "ras-control",
@@ -3704,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "ras-control"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "getrandom 0.2.17",
  "ras-policy",
@@ -3713,7 +3713,7 @@ dependencies = [
 
 [[package]]
 name = "ras-core"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3731,7 +3731,7 @@ dependencies = [
 
 [[package]]
 name = "ras-cursor-linux"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3742,7 +3742,7 @@ dependencies = [
 
 [[package]]
 name = "ras-cursor-macos"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3755,7 +3755,7 @@ dependencies = [
 
 [[package]]
 name = "ras-cursor-windows"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3766,7 +3766,7 @@ dependencies = [
 
 [[package]]
 name = "ras-files"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "windows 0.58.0",
@@ -3774,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "ras-grant"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3789,7 +3789,7 @@ dependencies = [
 
 [[package]]
 name = "ras-host"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "ras-core",
  "ras-media",
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "ras-identity"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
@@ -3809,7 +3809,7 @@ dependencies = [
 
 [[package]]
 name = "ras-input-linux"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "ras-control",
  "ras-protocol",
@@ -3818,7 +3818,7 @@ dependencies = [
 
 [[package]]
 name = "ras-input-macos"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "core-graphics",
  "ras-control",
@@ -3827,7 +3827,7 @@ dependencies = [
 
 [[package]]
 name = "ras-input-windows"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "ras-control",
  "ras-protocol",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "ras-media"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "ras-protocol",
@@ -3844,7 +3844,7 @@ dependencies = [
 
 [[package]]
 name = "ras-media-macos"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "block2",
  "bytes",
@@ -3862,7 +3862,7 @@ dependencies = [
 
 [[package]]
 name = "ras-media-openh264"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "openh264",
@@ -3873,7 +3873,7 @@ dependencies = [
 
 [[package]]
 name = "ras-media-scap"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "ras-media",
  "ras-protocol",
@@ -3883,14 +3883,14 @@ dependencies = [
 
 [[package]]
 name = "ras-policy"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "ras-protocol"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "proptest",
@@ -3901,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "ras-transport-iroh"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "iroh",
