@@ -8,3 +8,6 @@ dist/
 # Per-release supply-chain artifacts (generated + attached to the GitHub release, not committed)
 THIRD-PARTY-NOTICES.toml
 *.cdx.json
+
+# Generated C header (cbindgen produces it at build; shipped in the SDK package, not committed here)
+crates/ras-ffi/include/

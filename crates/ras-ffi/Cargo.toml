@@ -1,0 +1,33 @@
+[package]
+name = "ras-ffi"
+description = "Casual RAS C ABI (SDK, S1): a stable, panic-safe C interface over the proven synchronous core — identity, signing, contact codes, ticket parsing (ADR-096)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# The SDK artifact: a C-callable dynamic + static library. `lib` stays so the crate's own tests can
+# link it and cbindgen can read its API.
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+# Generate `casual_ras.h` from the annotated Rust API at build time (no external `cbindgen` CLI needed).
+cbindgen = "0.27"
+
+[dependencies]
+# The proven, synchronous core the first ABI surface wraps.
+ras-identity = { path = "../ras-identity" }
+ras-transport-iroh = { path = "../ras-transport-iroh" }
+ras-protocol = { path = "../ras-protocol" }
+
+# This is the FFI boundary crate (CONTRIBUTING §5): the workspace's `unsafe_code = deny` is relaxed to
+# `allow` HERE ONLY — a C ABI is inherently `unsafe`/`no_mangle`. `unsafe` is confined to this crate.
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
