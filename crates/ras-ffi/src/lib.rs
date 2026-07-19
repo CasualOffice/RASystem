@@ -243,6 +243,79 @@ pub unsafe extern "C" fn casual_ras_ticket_endpoint_id(
     })
 }
 
+/// Verify a 64-byte Ed25519 signature (`sig`) over `msg_len` bytes at `msg` against the 32-byte public
+/// key `pubkey`. Returns [`CasualRasStatus::Ok`] if valid, [`CasualRasStatus::InvalidArgument`] if it
+/// does not verify (or the key is malformed). The counterpart of `casual_ras_identity_sign`.
+///
+/// # Safety
+/// `pubkey` points to 32 readable bytes; `sig` to 64 readable bytes; `msg` to `msg_len` readable bytes
+/// (may be NULL iff `msg_len == 0`).
+#[no_mangle]
+pub unsafe extern "C" fn casual_ras_verify(
+    pubkey: *const u8,
+    msg: *const u8,
+    msg_len: usize,
+    sig: *const u8,
+) -> c_int {
+    guard(|| {
+        if pubkey.is_null() || sig.is_null() || (msg.is_null() && msg_len != 0) {
+            return CasualRasStatus::NullArgument;
+        }
+        let mut pk = [0u8; PUBLIC_KEY_LEN];
+        let mut signature = [0u8; SIGNATURE_LEN];
+        // SAFETY: caller guarantees 32 + 64 readable bytes respectively.
+        unsafe {
+            std::ptr::copy_nonoverlapping(pubkey, pk.as_mut_ptr(), PUBLIC_KEY_LEN);
+            std::ptr::copy_nonoverlapping(sig, signature.as_mut_ptr(), SIGNATURE_LEN);
+        }
+        let bytes = if msg_len == 0 {
+            &[][..]
+        } else {
+            // SAFETY: caller guarantees `msg_len` readable bytes.
+            unsafe { std::slice::from_raw_parts(msg, msg_len) }
+        };
+        match ras_identity::verify(&pk, bytes, &signature) {
+            Ok(()) => CasualRasStatus::Ok,
+            Err(_) => CasualRasStatus::InvalidArgument,
+        }
+    })
+}
+
+/// Build an id-only connection **ticket** (`CASUALRAS1:…`) for the 32-byte endpoint identity `id32`,
+/// writing the NUL-terminated string into `out` (a caller buffer of `out_cap` bytes). The counterpart
+/// of [`casual_ras_ticket_endpoint_id`]; returns [`CasualRasStatus::InvalidArgument`] if `out_cap` is
+/// too small.
+///
+/// # Safety
+/// `id32` points to 32 readable bytes; `out` to `out_cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn casual_ras_ticket_from_endpoint_id(
+    id32: *const u8,
+    out: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    guard(|| {
+        if id32.is_null() || out.is_null() {
+            return CasualRasStatus::NullArgument;
+        }
+        // SAFETY: caller guarantees 32 readable bytes.
+        let mut id = [0u8; PUBLIC_KEY_LEN];
+        unsafe { std::ptr::copy_nonoverlapping(id32, id.as_mut_ptr(), PUBLIC_KEY_LEN) };
+        let ticket =
+            ras_transport_iroh::EndpointAddr::new(ras_transport_iroh::EndpointId(id)).to_ticket();
+        let bytes = ticket.as_bytes();
+        if bytes.len() + 1 > out_cap {
+            return CasualRasStatus::InvalidArgument;
+        }
+        // SAFETY: verified `out_cap >= bytes.len() + 1`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), bytes.len());
+            *out.add(bytes.len()) = 0;
+        }
+        CasualRasStatus::Ok
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -336,6 +409,54 @@ mod tests {
         let bad = CString::new("NOT-A-TICKET").unwrap();
         assert_eq!(
             unsafe { casual_ras_ticket_endpoint_id(bad.as_ptr(), out.as_mut_ptr()) },
+            CasualRasStatus::InvalidArgument as c_int
+        );
+    }
+
+    #[test]
+    fn verify_accepts_a_real_signature_and_rejects_a_tampered_one() {
+        let mut id: *mut CasualRasIdentity = std::ptr::null_mut();
+        unsafe { casual_ras_identity_generate(&mut id) };
+        let mut pk = [0u8; PUBLIC_KEY_LEN];
+        unsafe { casual_ras_identity_public_key(id, pk.as_mut_ptr()) };
+        let msg = b"verify me";
+        let mut sig = [0u8; SIGNATURE_LEN];
+        unsafe { casual_ras_identity_sign(id, msg.as_ptr(), msg.len(), sig.as_mut_ptr()) };
+
+        assert_eq!(
+            unsafe { casual_ras_verify(pk.as_ptr(), msg.as_ptr(), msg.len(), sig.as_ptr()) },
+            CasualRasStatus::Ok as c_int
+        );
+        sig[0] ^= 0xff; // tamper
+        assert_eq!(
+            unsafe { casual_ras_verify(pk.as_ptr(), msg.as_ptr(), msg.len(), sig.as_ptr()) },
+            CasualRasStatus::InvalidArgument as c_int
+        );
+        unsafe { casual_ras_identity_free(id) };
+    }
+
+    #[test]
+    fn ticket_build_round_trips_through_parse() {
+        let id = [0x11u8; PUBLIC_KEY_LEN];
+        let mut buf = vec![0i8; 256];
+        assert_eq!(
+            unsafe { casual_ras_ticket_from_endpoint_id(id.as_ptr(), buf.as_mut_ptr(), buf.len()) },
+            CasualRasStatus::Ok as c_int
+        );
+        // Parse the built ticket back — same id (build ⇄ parse are inverses).
+        let mut out = [0u8; PUBLIC_KEY_LEN];
+        assert_eq!(
+            unsafe { casual_ras_ticket_endpoint_id(buf.as_ptr(), out.as_mut_ptr()) },
+            CasualRasStatus::Ok as c_int
+        );
+        assert_eq!(out, id);
+
+        // Too-small buffer refused, not overflowed.
+        let mut tiny = vec![0i8; 8];
+        assert_eq!(
+            unsafe {
+                casual_ras_ticket_from_endpoint_id(id.as_ptr(), tiny.as_mut_ptr(), tiny.len())
+            },
             CasualRasStatus::InvalidArgument as c_int
         );
     }
