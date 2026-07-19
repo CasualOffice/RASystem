@@ -46,6 +46,33 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
 
 ## 3. Current status
 
+- **Real-run hardening pass (2026-07, pre-release `v0.0.2-alpha`).** A deep multi-agent blocker sweep
+  of the two-machine path (the environment-only class loopback tests structurally cannot catch) found
+  and fixed six defects: (1) **grant lost on the wire** — the host dropped the bootstrap QUIC
+  connection the instant it sent the grant, discarding un-acked bytes on a real-RTT link; now the
+  connection is held until the controller's session dial proves delivery; (2) **Share hung forever**
+  at `endpoint.online()` with no reachable relay — now bounded + Stop-cancellable + falls back to a
+  direct-address ticket; (3) **Linux viewer black screen** — no WebCodecs `isConfigSupported` gate +
+  an infinite silent reconfigure loop, now gated with an honest fatal error + retry cap, plus the root
+  cause fixed (the codec string advertised H.264 **Main** but every backend encodes **Constrained
+  Baseline** — `ras_media::VideoCodec::webcodecs_string` now emits `avc1.42E0xx`, which also unblocks
+  strict WebView2/Windows engines); (4) **scap portal-decline panic** aborted Linux Share — now a
+  clean typed error via `catch_unwind`; (5) **iroh `reconnect` was dead code** — `IrohSessionTransport`
+  now implements ADR-091 resume with endpoint-identity continuity (re-dial/re-accept the same
+  authenticated peer, grant re-validated by the unchanged validator, Inv 3/9) and it is **activated at
+  both app transport sites**, so a WiFi/NAT blip resumes instead of terminating; (6) **control-lease
+  consent HOL-blocked the host control loop** — the up-to-90 s "Take control" prompt froze keyframes/
+  input/Bye; the consent await is now off the `select!` loop (spawned, result delivered on a channel),
+  Inv 1/4/5/15 preserved (stop-during-pending-consent denies the eventual lease). Two **industry-
+  standard UX** features shipped alongside: **focus + native notifications** on every inbound request
+  (access/control/file → raise+focus+notify; chat → gentle notify, no message text, Inv 8), and a
+  **"secure window"** flag excluding Casual RAS's own windows from screen capture/recording (macOS
+  `NSWindowSharingNone`, Windows `WDA_EXCLUDEFROMCAPTURE`, Linux no-op), preserving the always-visible
+  local indicator (Inv 7). Full gate green (fmt / clippy `-D warnings` workspace+app / `test --all` /
+  `cargo-deny` workspace+app / app builds on macOS). **Still on-device only:** the true two-machine
+  live drop→resume round-trip (reconnect logic is unit-verified over two local iroh endpoints but the
+  same-peer re-dial fights iroh connection pooling in a hermetic test), and the Linux/Windows
+  secure-window + notification paths (compile-gated in CI, no on-device run).
 - **Phase 0 complete — Milestone M0 reached.** The design doc set is done and the Cargo workspace
   skeleton builds clean. **Phases 1 and 2 are implemented and green (M1 media/transport landed, M3
   authorization reached);** the design gates (`docs/design/phase-1-design.md`, `phase-2-design.md`)
