@@ -402,6 +402,43 @@ body {
   font-size: 12px;
 }
 
+/* Opt-in row (e.g. "Allow clipboard sharing") — a bordered, clickable label matching the app's panels. */
+.optrow {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  border: 1px solid #2a2a34;
+  border-radius: 10px;
+  background: #16161d;
+  cursor: pointer;
+}
+.optrow:hover {
+  border-color: #3a3a48;
+}
+.optrow:focus-within {
+  outline: 2px solid rgba(120, 120, 240, 0.6);
+  outline-offset: 1px;
+}
+.optrow input[type="checkbox"] {
+  margin-top: 2px;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  accent-color: #6f6ff0;
+  cursor: pointer;
+}
+.optrow strong {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 13.5px;
+  color: #e8e8ef;
+}
+.optrow .note {
+  display: block;
+}
+
 /* Local consent prompt — a modal over the share view. The viewer stays blocked until Allow. */
 #consent {
   position: fixed;

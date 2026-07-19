@@ -57,9 +57,18 @@
         <button id="share-copy">Copy</button>
       </div>
       <p id="share-status" class="status">Preparing…</p>
+      <label class="optrow" for="share-clipboard-cb">
+        <input type="checkbox" id="share-clipboard-cb" />
+        <span>
+          <strong>Allow clipboard sharing</strong>
+          <span class="note">Off by default. When on, the viewer can read and set your clipboard for the
+            session. Set this before the viewer connects.</span>
+        </span>
+      </label>
       <div class="row">
         <button id="share-stop" class="danger">Stop sharing</button>
-        <span class="note">The viewer can see your screen and point at it — they cannot click or type.</span>
+        <span class="note">The viewer sees your screen. Remote keyboard/mouse control, if requested,
+          asks you for a separate Allow first.</span>
       </div>
 
       <div id="consent" hidden>

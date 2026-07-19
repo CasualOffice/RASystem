@@ -215,6 +215,12 @@ const connStats = document.getElementById("conn-stats");
 // video itself keeps its last frame until fresh frames + an IDR arrive on resume (no black screen).
 listen("conn-status", (e) => {
   reconnectBanner.hidden = e.payload !== "reconnecting";
+  // A host-initiated end (emergency stop / revoke / peer disconnect, surfaced as "ended") must tear the
+  // viewer UI down — otherwise the chat/clipboard/file panels stay enabled on a dead session and give
+  // phantom "sent" feedback (Inv 7 honesty). `setLive` is hoisted, so calling it here is fine.
+  if (e.payload === "ended") {
+    setLive(false);
+  }
 });
 
 // Connection-quality readout (path · RTT · loss · fps · bandwidth), updated each host stats tick.
@@ -234,6 +240,16 @@ let swapPrimaryMod = false;
 if (macModCb) {
   macModCb.addEventListener("change", () => {
     swapPrimaryMod = macModCb.checked;
+  });
+}
+
+// Clipboard-sharing opt-in (Share role, default OFF). Clipboard has no per-message consent gate, so a
+// viewer only gets the clipboard capability when the host ticks this BEFORE the viewer connects (the
+// grant's capabilities are fixed at issue time). Purely a host-side authorization choice (Inv 1/7).
+const shareClipboardCb = document.getElementById("share-clipboard-cb");
+if (shareClipboardCb) {
+  shareClipboardCb.addEventListener("change", () => {
+    invoke("set_clipboard_allowed", { allowed: shareClipboardCb.checked }).catch(() => {});
   });
 }
 

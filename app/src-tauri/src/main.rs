@@ -152,6 +152,26 @@ fn capabilities_with_extras() -> ras_core::policy::CapabilitySet {
     policy
 }
 
+/// The capabilities a plain view-**Allow** is treated as consenting to (passed as the `consented`
+/// argument to grant issuance — `granted = requested ∩ policy ∩ consented`). This is screen view + the
+/// OS-input caps (each still gated by the SEPARATE control-lease consent, a held lease, AND the
+/// per-message gate) + the file-push cap (gated by per-transfer file consent). **Clipboard is included
+/// only when `clipboard_allowed` is true** — i.e. the host explicitly opted in — because clipboard has
+/// NO second gate: the capability alone authorizes a controller→host clipboard write (the RustDesk /
+/// Reverse-RDP injection class ADR-076 severs). So clipboard must reflect a real, disclosed choice, not
+/// ride silently on a view-Allow (Inv 1 the user's actual choice, Inv 2 not defaulted-on, Inv 7 honest).
+fn consented_capabilities(clipboard_allowed: bool) -> ras_core::policy::CapabilitySet {
+    let mut caps = ras_core::policy::phase3_default_policy();
+    caps.insert(ras_core::policy::file::file_push_capability(
+        FILE_DROP_TARGET,
+    ));
+    if clipboard_allowed {
+        caps.insert(ras_core::policy::CLIPBOARD_READ.to_string());
+        caps.insert(ras_core::policy::CLIPBOARD_WRITE.to_string());
+    }
+    caps
+}
+
 // ─── Connect role (viewer) ─────────────────────────────────────────────────────────────────────
 
 /// A [`FrameSink`] forwarding the decoded-stream config + each encoded access unit to the webview
@@ -641,6 +661,12 @@ struct LocalConsent {
     /// `FileTransferAccepted` lifecycle event arrives (the lifecycle event itself is content-free). A
     /// filename is shown to the user, not a secret (Inv 8).
     last_file_offer: Mutex<Option<(String, u64)>>,
+    /// Whether the local user has opted in to **clipboard sharing** with a connecting viewer. Default
+    /// **false**: clipboard has no per-message consent gate (unlike control + file), so its capability
+    /// is only placed in the issued grant's `consented` set when this is true — otherwise a plain
+    /// view-Allow would silently authorize controller→host clipboard writes (Inv 1/2/7, ADR-076). Set
+    /// on the Share screen before a viewer connects (the grant's capabilities are fixed at issue time).
+    clipboard_allowed: std::sync::atomic::AtomicBool,
 }
 
 impl LocalConsent {
@@ -651,7 +677,21 @@ impl LocalConsent {
             pending_control: Mutex::new(None),
             pending_file: Mutex::new(None),
             last_file_offer: Mutex::new(None),
+            clipboard_allowed: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Whether the local user has opted in to clipboard sharing (default false).
+    fn clipboard_allowed(&self) -> bool {
+        self.clipboard_allowed
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Set the clipboard-sharing opt-in (from the Share-screen toggle). Takes effect for the next
+    /// viewer to connect (an already-issued grant's capabilities are immutable).
+    fn set_clipboard_allowed(&self, allowed: bool) {
+        self.clipboard_allowed
+            .store(allowed, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Deliver the local user's decision to a waiting `prompt`. Extra/late calls are no-ops.
@@ -870,6 +910,14 @@ fn respond_control_consent(state: State<'_, AppState>, allow: bool) {
 #[tauri::command]
 fn respond_file_offer(state: State<'_, AppState>, accept: bool) {
     state.share.consent.respond_file(accept);
+}
+
+/// Opt in/out of **clipboard sharing** with a connecting viewer (Share screen toggle, default OFF).
+/// Clipboard has no per-message consent gate, so it is only placed in a viewer's grant when this is on
+/// (Inv 1/7, ADR-076). Set it BEFORE a viewer connects — a grant's capabilities are fixed at issue time.
+#[tauri::command]
+fn set_clipboard_allowed(state: State<'_, AppState>, allowed: bool) {
+    state.share.consent.set_clipboard_allowed(allowed);
 }
 
 /// Stop the whole share (drop the ticket, stop accepting, end any live viewer). Idempotent.
@@ -1140,8 +1188,17 @@ async fn handle_bootstrap(
         not_before: now,
         expires_at: now + MAX_REQUEST_TTL_MS,
     };
+    // The `consented` set is what the local user actually agreed to — NOT the app's maximal ceiling.
+    // Screen view + OS-input + file-push ride the view-Allow (each has its own second gate: control-lease
+    // consent, a held lease + per-message gate, or per-transfer file consent). Clipboard has no second
+    // gate, so it is consented ONLY if the host opted in on the Share screen (default off) — otherwise a
+    // view-Allow must never silently authorize controller→host clipboard writes (Inv 1/7, ADR-076).
     match issuer
-        .issue(&request, &capabilities_with_extras(), &params)
+        .issue(
+            &request,
+            &consented_capabilities(consent.clipboard_allowed()),
+            &params,
+        )
         .await
     {
         Ok(grant) => {
@@ -1478,6 +1535,7 @@ fn main() {
             start_sharing,
             stop_sharing,
             respond_consent,
+            set_clipboard_allowed,
             respond_control_consent,
             respond_file_offer,
             check_for_updates,

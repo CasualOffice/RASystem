@@ -142,10 +142,28 @@ pub fn phase3_default_policy() -> CapabilitySet {
     PHASE3_GRANTABLE.iter().map(|s| (*s).to_string()).collect()
 }
 
-/// Whether an identifier is in the recognized catalogue.
+/// Whether an identifier is a per-target file-push capability of the form `file.push.<name>` (ADR-086).
+/// These are a **dynamic namespace** — one per catalogue target, named by the deployment — so they are
+/// recognized by *shape* here rather than living in the static [`CATALOGUE_V1`]. Recognizing an unknown
+/// target name is harmless: grant issuance still intersects against policy + consent (which only carry
+/// real targets), and [`file::authorize_file_push`] independently re-checks that the target exists, so a
+/// bogus `file.push.<x>` can never authorize a write. The `<name>` must be a simple identifier
+/// (alphanumeric / `_` / `-`, non-empty) — this keeps truly-unknown ids (e.g. `shell.exec`) denied.
+#[must_use]
+pub fn is_file_push_capability(cap: &str) -> bool {
+    cap.strip_prefix("file.push.").is_some_and(|name| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    })
+}
+
+/// Whether an identifier is in the recognized catalogue — the static [`CATALOGUE_V1`] **or** the dynamic
+/// `file.push.<name>` namespace ([`is_file_push_capability`]).
 #[must_use]
 pub fn is_recognized(cap: &str) -> bool {
-    CATALOGUE_V1.contains(&cap)
+    CATALOGUE_V1.contains(&cap) || is_file_push_capability(cap)
 }
 
 /// Drop every requested identifier not in the versioned catalogue (default-deny unknown, Inv 2).
@@ -244,6 +262,21 @@ mod tests {
         let requested = set(&["screen.view", "keyboard.key", "made.up", "x.y.z"]);
         let recognized = recognize(&requested);
         assert_eq!(recognized, set(&["screen.view", "keyboard.key"]));
+    }
+
+    #[test]
+    fn recognize_admits_the_file_push_namespace_but_not_bogus_shapes() {
+        // `file.push.<name>` is a dynamic per-target namespace (ADR-086) — recognized by shape so the
+        // wired file-transfer feature isn't fail-closed dead, while truly-unknown ids stay denied.
+        assert!(is_file_push_capability("file.push.drop"));
+        assert!(is_file_push_capability("file.push.config_bundle"));
+        assert!(!is_file_push_capability("file.push.")); // empty target
+        assert!(!is_file_push_capability("file.push.a.b")); // nested dot — not a simple name
+        assert!(!is_file_push_capability("file.pushx")); // wrong prefix
+        assert!(!is_file_push_capability("shell.exec"));
+        let requested = set(&["file.push.drop", "file.push.", "shell.exec", "file.push.a.b"]);
+        // Only the well-formed file.push.<name> survives recognition.
+        assert_eq!(recognize(&requested), set(&["file.push.drop"]));
     }
 
     #[test]
