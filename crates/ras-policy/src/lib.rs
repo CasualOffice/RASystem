@@ -274,7 +274,12 @@ mod tests {
         assert!(!is_file_push_capability("file.push.a.b")); // nested dot — not a simple name
         assert!(!is_file_push_capability("file.pushx")); // wrong prefix
         assert!(!is_file_push_capability("shell.exec"));
-        let requested = set(&["file.push.drop", "file.push.", "shell.exec", "file.push.a.b"]);
+        let requested = set(&[
+            "file.push.drop",
+            "file.push.",
+            "shell.exec",
+            "file.push.a.b",
+        ]);
         // Only the well-formed file.push.<name> survives recognition.
         assert_eq!(recognize(&requested), set(&["file.push.drop"]));
     }
