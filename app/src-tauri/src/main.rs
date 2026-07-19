@@ -1441,6 +1441,11 @@ async fn serve_one(
     let _ = app.emit("share-viewer", true);
     if let Some(ov) = app.get_webview_window("overlay") {
         let _ = ov.show();
+        // Click-through — set only AFTER show(), so the GDK window is realized. Calling it before the
+        // window is shown panics tao on Linux (window().unwrap() on None); post-show it is safe on all
+        // OSes. The show + this call are ordered on the same WindowRequest channel, so realization is
+        // done by the time this is processed.
+        let _ = ov.set_ignore_cursor_events(true);
     }
     // Keep the in-app Stop control reachable while sharing (Invariant 7): the `main` window is its home,
     // so it must not be minimizable away during an active session. Occlusion is still covered by the
@@ -1676,9 +1681,11 @@ fn main() {
                 },
             });
 
-            // The overlay must never steal input from the host user — make it click-through + hidden.
+            // Keep the overlay hidden at startup. Do NOT call `set_ignore_cursor_events` here: on
+            // Linux/GTK it does `window.window().unwrap()`, which panics (non-unwinding → aborts the
+            // whole app) because a not-yet-shown window has no realized GDK window. Click-through is
+            // instead set right after the overlay is shown (see the Share path), when it is realized.
             if let Some(ov) = app.get_webview_window("overlay") {
-                let _ = ov.set_ignore_cursor_events(true);
                 let _ = ov.hide();
             }
             Ok(())
