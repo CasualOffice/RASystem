@@ -1280,6 +1280,17 @@
     tests. The **session/host/controller SDK** (async, consent callbacks, media), the **N-API** binding,
     `THIRD-PARTY-NOTICES`/SBOM for the SDK artifact, and a real cross-language integration consumer are
     the follow-ups. The SDK is Apache-2.0 (ADR-051) so licensees embed it with no copyleft.
+  - **SDK BOUNDARY (load-bearing).** The SDK exposes the **remote-access engine only**: identity,
+    authorization (grants/leases/per-message gate), the session (connect / host / view / control /
+    consent), transport, and media. It **deliberately excludes** contacts, messaging, presence,
+    discovery, and address books — those are **the integrator's product**, not ours: an integrator
+    builds their own contact model / user directory / signaling on top of our primitives. Baking a
+    contacts opinion into the SDK would force integrators to architect around our choices (the wrong
+    place for us to be). `ras-signal` / `ContactBook` / gossip therefore stay **app-only** (the
+    reference implementation) and are **never** part of `ras-ffi`. Corollary: the **webapp/browser
+    controller** (a remote-access controller over WebRTC/WebTransport, ADR-057) **is** in SDK scope —
+    it is the remote-access controller, just on a different transport behind the same `SessionTransport`
+    seam.
 
 ## Licensing
 
