@@ -1207,3 +1207,8 @@ body {
     opacity: 0.5;
   }
 }
+
+.foot-sep {
+  color: #55556a;
+  margin: 0 4px;
+}

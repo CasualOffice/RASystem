@@ -1715,6 +1715,34 @@ async fn serve_one(
 // **user-initiated** here — no silent background replacement — and applied only on explicit consent,
 // consistent with "the local user is the final owner of the machine" (Inv 1).
 
+/// Return recent diagnostics — app version, OS/arch, and the tail of the **content-free** log file —
+/// for the user to copy and share when reporting an issue. This is what makes the field logging
+/// actionable: on-device, one click yields a shareable trail. Content-free by construction (the log
+/// never holds pixels/keystrokes/clipboard/typed-text/secrets — Inv 8), so this is always safe to copy.
+#[tauri::command]
+fn read_diagnostics(app: tauri::AppHandle) -> Result<String, String> {
+    let mut out = format!(
+        "Casual RAS {} · {} · {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    if let Ok(dir) = app.path().app_log_dir() {
+        match std::fs::read_to_string(dir.join("casual-ras.log")) {
+            // Last ~200 lines is plenty for a recent-events tail (line-based, so never a UTF-8 split).
+            Ok(contents) => {
+                let mut lines: Vec<&str> = contents.lines().collect();
+                let start = lines.len().saturating_sub(200);
+                lines.drain(..start);
+                out.push_str("\n\n--- recent log ---\n");
+                out.push_str(&lines.join("\n"));
+            }
+            Err(_) => out.push_str("\n(no log recorded yet)"),
+        }
+    }
+    Ok(out)
+}
+
 /// Check the configured endpoint for a newer signed release. `Ok(Some(version))` if one is available,
 /// `Ok(None)` if up to date, `Err(msg)` if the updater is not configured / unreachable (surfaced to
 /// the user, never silently swallowed).
@@ -1832,6 +1860,7 @@ fn main() {
             respond_file_offer,
             check_for_updates,
             install_update,
+            read_diagnostics,
         ])
         .setup(|app| {
             log::info!(
