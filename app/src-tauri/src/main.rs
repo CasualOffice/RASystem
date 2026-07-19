@@ -383,6 +383,7 @@ async fn connect_to_host(
     let grant = match boot.recv().await.map_err(|e| e.to_string())? {
         BootstrapMsg::AccessDecision(AccessOutcome::Allowed { grant }) => grant,
         BootstrapMsg::AccessDecision(AccessOutcome::Denied { code }) => {
+            log::warn!("connect: host denied access (code {code:?})");
             return Err(format!("access denied ({code})"));
         }
         _ => return Err("unexpected bootstrap decision from host".into()),
@@ -433,6 +434,7 @@ async fn connect_to_host(
     // Drain the lifecycle stream so reconnection (Suspended/Resumed) surfaces in the viewer UI (#22)
     // instead of being parked. The task ends when the stream closes (the session is dropped below on a
     // later disconnect). Emit an initial "connected" so the UI clears any stale banner.
+    log::info!("connect: session live");
     let _ = app.emit("conn-status", "connected");
     tauri::async_runtime::spawn(drain_viewer_lifecycle(events, app));
 
@@ -873,6 +875,11 @@ impl LocalConsent {
         );
         *lock(&self.pending) = None;
         let _ = self.app.emit("consent-closed", ());
+        // Content-free security-relevant event (the decision, not the peer's content) — Inv 8.
+        log::info!(
+            "consent: view access {}",
+            if allow { "ALLOWED" } else { "denied" }
+        );
         allow
     }
 }
@@ -1169,6 +1176,7 @@ async fn run_share(
     let endpoint = match IrohEndpoint::bind().await {
         Ok(e) => Arc::new(e),
         Err(_) => {
+            log::error!("share: endpoint bind failed");
             let _ = app.emit("share-status", "Failed to bind a network endpoint.");
             let _ = app.emit("share-active", false);
             return;
@@ -1195,10 +1203,13 @@ async fn run_share(
         _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => false,
     };
     if !online {
+        log::warn!("share: no relay reachable within 20s — direct-address only (LAN)");
         let _ = app.emit(
             "share-status",
             "No relay reachable — sharing a direct-address code. It will work only if the viewer is on the same network. Check your internet connection or firewall, then try again for remote access.",
         );
+    } else {
+        log::info!("share: online, endpoint reachable");
     }
     // The ticket carries this endpoint's direct socket addresses (known since bind) plus its relay, so
     // it is dialable on a LAN even when the relay never came up.
@@ -1474,9 +1485,8 @@ async fn serve_one(
     // Host side of ADR-091 resume: on a transport drop the host re-accepts on the same endpoint and
     // waits for the same peer (by authenticated EndpointId) to re-dial, then resumes. Symmetric to the
     // controller's re-dial above.
-    let transport = Arc::new(
-        IrohSessionTransport::new(endpoint.clone(), session).with_reconnect_host(),
-    );
+    let transport =
+        Arc::new(IrohSessionTransport::new(endpoint.clone(), session).with_reconnect_host());
     let host = HostSession::new(
         // Exclude our own overlay/indicator windows from the shared feed (privacy + no feedback loop).
         HostSessionConfig::new(MonitorId(0))
@@ -1783,6 +1793,19 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Native OS notifications for inbound requests / chat (see `alert_user`).
         .plugin(tauri_plugin_notification::init())
+        // Field diagnostics: a rotating log file in the OS log dir + stderr. Content-free (Inv 8).
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .max_file_size(2_000_000)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("casual-ras".into()),
+                    }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stderr),
+                ])
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             connect_to_host,
             disconnect,
@@ -1811,6 +1834,11 @@ fn main() {
             install_update,
         ])
         .setup(|app| {
+            log::info!(
+                "Casual RAS {} started on {}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS
+            );
             let consent = Arc::new(LocalConsent::new(app.handle().clone()));
             app.manage(AppState {
                 session: Mutex::new(None),

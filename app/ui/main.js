@@ -108,6 +108,11 @@ function fatalError(msg) {
   if (!fatalEl) return;
   fatalTextEl.textContent = msg;
   fatalEl.hidden = false;
+  // Record it in the app log file so an on-device black-screen (e.g. WebKitGTK can't decode H.264)
+  // leaves a trail. The message is a capability/engine string — content-free (Inv 8).
+  try {
+    window.__TAURI__?.log?.error("viewer fatal: " + msg);
+  } catch (_) {}
 }
 function clearFatalError() {
   if (!fatalEl) return;

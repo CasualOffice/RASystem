@@ -36,6 +36,13 @@ tauri-plugin-updater = "2"
 # owns the machine — Invariant 1) is never unaware of an inbound request. Notification bodies are
 # content-free (no chat text, no secrets — Invariant 8).
 tauri-plugin-notification = "2"
+# Field diagnostics: a rotating log file in the OS log dir (+ stderr in dev) so an on-device failure
+# (a connect that won't complete, a capture that won't start, a decoder that black-screens) leaves a
+# trail to debug from — the app previously had ZERO logging. Records are strictly content-free
+# (Invariant 8): event names, error codes, short public peer ids, counts — never pixels, keystrokes,
+# clipboard, typed text, grant/token contents, or any secret.
+tauri-plugin-log = "2"
+log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
