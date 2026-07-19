@@ -1,0 +1,47 @@
+[package]
+name = "ras-audio-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Windows system-audio capture backend (ADR-077 audio pipeline) behind the `ras-media`
+# `AudioCaptureBackend` trait. Uses WASAPI **loopback** capture of the default render (output)
+# endpoint — `IMMDeviceEnumerator` → default render device → `IAudioClient::Initialize` with
+# `AUDCLNT_STREAMFLAGS_LOOPBACK` → `IAudioCaptureClient::GetBuffer` — so the host streams the
+# machine's *output* audio to the controller while screen-sharing, mirroring the macOS SCK-audio
+# backend. FFI-bearing platform crate — `unsafe` is re-enabled here only (CONTRIBUTING §5) and
+# confined behind the safe trait surface. windows-rs is MIT OR Apache-2.0 (Inv 18, deny-clean).
+#
+# Permissions: WASAPI loopback of the default render endpoint needs no special OS grant on
+# desktop Windows (unlike microphone capture, which is behind a privacy toggle). This crate does
+# not request any capability; the app gates streaming on `audio.listen` + local consent (Inv 15).
+
+[dependencies]
+ras-media = { path = "../ras-media" }
+ras-protocol = { path = "../ras-protocol" }
+
+# WASAPI bindings are Windows-only: on other targets this crate compiles to an empty no-op backend
+# so `cargo build --workspace` stays green on macOS/Linux CI. windows-rs version matches
+# `ras-input-windows` (the sibling FFI crate).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+] }
+
+# FFI backend crate: unsafe confined here, wrapped in the safe `ras-media` trait surface
+# (CONTRIBUTING §5). Re-declares the workspace lint set with `unsafe_code` relaxed (as
+# `ras-audio-macos` / `ras-input-windows` do).
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

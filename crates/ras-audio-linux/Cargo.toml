@@ -1,0 +1,51 @@
+[package]
+name = "ras-audio-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Linux system-audio (output) capture backend (ADR-077 audio pipeline) behind the `ras-media`
+# `AudioCaptureBackend` trait — the Linux sibling of `ras-audio-macos`. Records the default
+# sink's **monitor source** (`<default-sink>.monitor`) so the host streams the machine's *output*
+# audio to the controller while screen-sharing (host→controller only, no microphone — MVP §Inv 12).
+#
+# Transport: PulseAudio's `libpulse-simple` **record** API against the monitor source. This is the
+# portable Linux path — a real PulseAudio server *or* PipeWire's `pipewire-pulse` shim (which every
+# modern desktop ships) both expose the monitor source over the same libpulse ABI, so one backend
+# covers both audio servers. Output PCM is interleaved i16, 48 kHz stereo (the `CapturedAudio`
+# contract); PulseAudio does the f32→i16 / resample server-side because we *request* the S16NE
+# 48 kHz stereo sample-spec, so no client-side conversion is needed on the happy path.
+#
+# FFI-bearing platform crate (CONTRIBUTING §5): the `libpulse-*` binding crates are safe Rust
+# wrappers over the system `libpulse` C library, so this crate needs no `unsafe` of its own. Still,
+# the workspace `unsafe_code = deny` is relaxed to `allow` here (parity with the other backend
+# crates) in case a raw-FFI fallback is ever needed. On non-Linux targets the crate compiles to an
+# **empty no-op backend** so macOS/Windows CI stays green (deps are `cfg(target_os = "linux")`-gated).
+#
+# Licenses: `libpulse-binding` / `libpulse-simple-binding` (+ their `-sys` crates) are all
+# **MIT OR Apache-2.0** — cargo-deny-clean (Inv 18). They FFI-link the *system* `libpulse` (LGPL),
+# which is a runtime system-library link (like x11rb→libX11 / windows-rs→system DLLs), not a
+# vendored/linked Rust dependency, so it never enters the cargo-deny SPDX graph.
+
+[dependencies]
+ras-media = { path = "../ras-media" }
+ras-protocol = { path = "../ras-protocol" }
+
+# PulseAudio bindings are Linux-only: on other targets this crate compiles to an empty no-op
+# backend so `cargo build --workspace` stays green on macOS/Windows CI.
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding = "2.30"
+libpulse-simple-binding = "2.29"
+
+# Platform backend crate: `unsafe` relaxed to `allow` here only (CONTRIBUTING §5), even though the
+# safe binding crates mean we currently use none. Re-declares the workspace lint set to match.
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

@@ -1,0 +1,45 @@
+[package]
+name = "ras-cursor-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Windows host-side CURSOR-SHAPE capture backend (ADR-073): reads the live system cursor and reports
+# each change as a `ras_core::CursorFrame` over the `ras_core::CursorObserver` seam. The host cursor
+# task then forwards it on the already-built cursor-shape channel (fresh RGBA the first time an id is
+# seen, else a `CursorCached` reference); the controller renders it client-side at zero latency.
+#
+# FFI-bearing platform crate (CONTRIBUTING §5): the workspace `unsafe_code = deny` is relaxed to
+# `allow` HERE ONLY, with `unsafe` confined behind the safe `CursorObserver` trait surface. Uses the
+# Microsoft `windows` (windows-rs) bindings — the same family/version as `ras-input-windows`. On
+# non-Windows targets the crate compiles to an empty lib so macOS/Linux CI stays green.
+
+[dependencies]
+ras-core = { path = "../ras-core" }
+bytes = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["time"] }
+
+# windows-rs (GDI + WindowsAndMessaging) bindings are Windows-only: on other targets this crate
+# compiles to an empty lib so `cargo build --workspace` stays green on macOS/Linux CI. windows-rs is
+# MIT OR Apache-2.0 (Inv 18, cargo-deny-clean).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+] }
+
+# FFI backend crate: unsafe confined here, wrapped in the safe `CursorObserver` trait surface
+# (CONTRIBUTING §5). Re-declares the workspace lint set with `unsafe_code` relaxed (as
+# `ras-cursor-macos` / `ras-input-windows` do).
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

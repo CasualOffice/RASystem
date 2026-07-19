@@ -1,0 +1,35 @@
+[package]
+name = "ras-cursor-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Linux (X11) host-side CURSOR-SHAPE capture backend (ADR-073, sibling of `ras-cursor-macos`). Reads the
+# live X11 system cursor via the XFixes extension and reports each change as a `ras_core::CursorFrame`
+# over the `ras_core::CursorObserver` seam. The host cursor task then forwards it on the already-built
+# cursor-shape channel (fresh RGBA the first time an id is seen, else a `CursorCached` reference); the
+# controller renders it client-side at zero latency (display data, never input; outside Inv 6).
+#
+# Deliberately UNPRIVILEGED and fail-closed, like `ras-input-linux`: it connects to `$DISPLAY` as the
+# logged-in user (no root), so it works only inside an X11 / Xwayland session and yields no frames when
+# there is no reachable X server. Uses the pure-Rust `x11rb` client (no C X11 libs), so — unlike
+# `ras-cursor-macos` — this backend is `unsafe`-free and keeps the workspace lint defaults. Cursor
+# pixels never touch a log (this crate logs nothing; `CursorShape::Debug` elides the RGBA in `ras-core`).
+#
+# On non-Linux targets the crate compiles to an empty lib so `cargo build --workspace` stays green on
+# macOS/Windows CI (the `x11rb` dependency is `cfg(target_os = "linux")`-gated).
+
+[dependencies]
+ras-core = { path = "../ras-core" }
+bytes = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["time"] }
+
+# XFixes bindings are Linux-only: on other targets this crate compiles to an empty lib so
+# `cargo build --workspace` stays green on macOS/Windows CI. `x11rb` is pure-Rust (no C X11 libs);
+# match the version `ras-input-linux` already uses.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", default-features = false, features = ["xfixes"] }
