@@ -139,6 +139,8 @@ impl SoftwareKeyStore {
     /// and to drive standard test vectors; it does not weaken the non-exporting guarantee.
     #[must_use]
     pub fn from_seed(seed: [u8; SECRET_KEY_LEN]) -> Self {
+        // Scrub the caller-provided seed copy on drop (it is the raw secret).
+        let seed = zeroize::Zeroizing::new(seed);
         Self {
             signing: SigningKey::from_bytes(&seed),
         }
@@ -146,13 +148,13 @@ impl SoftwareKeyStore {
 
     /// A fresh in-memory key (ephemeral; not persisted). Used for tests and one-off sessions.
     pub fn generate() -> Result<Self, IdentityError> {
-        let mut secret = [0u8; SECRET_KEY_LEN];
-        getrandom::getrandom(&mut secret).map_err(|_| internal("csprng unavailable"))?;
-        let store = Self {
+        // `Zeroizing` scrubs the seed on drop on EVERY path — including the `?` error return below,
+        // which the old manual `.fill(0)` never reached.
+        let mut secret = zeroize::Zeroizing::new([0u8; SECRET_KEY_LEN]);
+        getrandom::getrandom(&mut secret[..]).map_err(|_| internal("csprng unavailable"))?;
+        Ok(Self {
             signing: SigningKey::from_bytes(&secret),
-        };
-        secret.fill(0); // best-effort scrub of the local copy
-        Ok(store)
+        })
     }
 
     /// Load the key persisted at `path`, or generate + persist one if the file is absent.
@@ -160,23 +162,26 @@ impl SoftwareKeyStore {
     pub fn load_or_create(path: &Path) -> Result<Self, IdentityError> {
         match std::fs::read(path) {
             Ok(bytes) => {
-                let secret: [u8; SECRET_KEY_LEN] = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| internal("malformed key file"))?;
+                // The read buffer AND the fixed-size copy both hold the secret — scrub both on drop.
+                let bytes = zeroize::Zeroizing::new(bytes);
+                let secret: zeroize::Zeroizing<[u8; SECRET_KEY_LEN]> = zeroize::Zeroizing::new(
+                    bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| internal("malformed key file"))?,
+                );
                 Ok(Self {
                     signing: SigningKey::from_bytes(&secret),
                 })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let mut secret = [0u8; SECRET_KEY_LEN];
-                getrandom::getrandom(&mut secret).map_err(|_| internal("csprng unavailable"))?;
+                let mut secret = zeroize::Zeroizing::new([0u8; SECRET_KEY_LEN]);
+                getrandom::getrandom(&mut secret[..])
+                    .map_err(|_| internal("csprng unavailable"))?;
                 write_secret(path, &secret)?;
-                let store = Self {
+                Ok(Self {
                     signing: SigningKey::from_bytes(&secret),
-                };
-                secret.fill(0);
-                Ok(store)
+                })
             }
             Err(_) => Err(internal("key file unreadable")),
         }

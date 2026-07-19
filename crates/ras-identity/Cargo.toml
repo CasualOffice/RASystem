@@ -12,9 +12,14 @@ ras-protocol = { path = "../ras-protocol" }
 # Ed25519 primitive — already vendored via iroh (transport auth), reused here behind the KeyStore
 # trait so no dalek type leaks the API and libsodium/TPM stores are drop-in later (ADR-065). Pinned
 # to the RC iroh 1.0.2 already ships, to avoid a second dalek version in the tree.
-ed25519-dalek = "=3.0.0-rc.0"
+# `zeroize` feature: the in-memory SigningKey scrubs its secret on drop (defence-in-depth for a
+# software key store — the secret never lingers in freed memory).
+ed25519-dalek = { version = "=3.0.0-rc.0", features = ["zeroize"] }
 # Secure key generation without coupling to dalek's rand_core version.
 getrandom = "0.2"
+# Scrub raw secret-seed buffers on drop — on EVERY exit path (error/panic included), not just the
+# success path where a manual `.fill(0)` runs. The persisted 32-byte seed is the crown-jewel secret.
+zeroize = "1"
 
 [lints]
 workspace = true
