@@ -42,7 +42,8 @@ verification on Linux/Windows, session reconnection, and signed distribution. We
 | Signed grants · capability leases · per-message enforcement | Implemented — PASETO v4.public grants, host-authoritative capability gate (Inv 15) |
 | Consent · always-visible indicator · emergency stop | Working |
 | Tamper-evident audit (hash-chained, host-signed) | Implemented |
-| Clipboard · file transfer · audio · chat · cursor · multi-monitor | Implemented at code level ([`docs/20`](docs/20_FEATURE_GAPS_AND_ROADMAP.md)) |
+| Chat · clipboard · file transfer · output audio | **Wired into the app** (commands + UI) — clipboard & audio are consent-first host opt-ins (default off), file transfer keeps per-transfer Accept/Deny. All-OS capture backends (SCK/PipeWire/WASAPI audio; NSCursor/XFixes/GDI cursor) |
+| Cursor channel · multi-monitor | Implemented at code level ([`docs/20`](docs/20_FEATURE_GAPS_AND_ROADMAP.md)); viewer cursor-render deferred (cursor is in the video) |
 | **Session reconnection** across a network blip / NAT rebind | Implemented + adversarially hardened — controller re-dials, host re-serves, grant re-validated (never a new auth path), video/control/audio resume on a keyframe; window-bounded both ends so a silent re-dialer can't wedge the host (loopback-tested; iroh re-dial is the on-device step) |
 | Signed/notarized installers · activated auto-update | **Not yet** — alpha builds ship unsigned (ADR-072) |
 | Fraud-friction subsystem | Roadmap |
@@ -69,8 +70,8 @@ decision rule enforced throughout the design, not a slogan ([`CLAUDE.md §2`](CL
   a "skip consent" path.
 - **Host-issued authorization** — the host validates a signed access request and issues a short-lived,
   endpoint-bound, signed **PASETO v4.public** session grant; a future server replaces only the
-  *issuer*, never the validator or the wire protocol. *(Implemented at code level; grant/consent flow
-  wiring into the app UI is in progress.)*
+  *issuer*, never the validator or the wire protocol. *(Wired end-to-end in the app: the two-phase
+  bootstrap → signed access request → grant → session flow, with real local Allow/Deny consent.)*
 - **Capability-based, per-message enforcement** — fine-grained permissions checked host-side on every
   message, never trusting the controller's claimed scope (the RustDesk-CVE-2026-57850 class). *(The
   host-authoritative gate is implemented and unit-tested.)*
