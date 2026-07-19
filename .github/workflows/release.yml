@@ -145,10 +145,18 @@ jobs:
             Alpha build of **Casual RAS** — one desktop app that does both roles:
 
             - **Connect** to another machine and view its screen (with a remote pointer to point at
-              things). Works on macOS, Linux, and Windows.
+              things). Verified on **macOS**; expected to work on **Windows**. **Linux viewing is
+              limited**: the Linux WebView (WebKitGTK) often can't decode the H.264 video stream, in
+              which case the app shows an honest "can't display the shared screen" message rather than
+              a black screen — a native decode fallback is planned.
             - **Share** this machine's screen — it asks you for Allow/Deny before any pixels leave.
-              Works on macOS, Linux and Windows. Linux/Windows sharing is **experimental**: it is
-              built and compile-checked in CI but has not yet been verified on real hardware.
+              **Verified on macOS.** Linux/Windows sharing is **experimental** — built and
+              compile-checked in CI but **not yet verified on real hardware**; Linux control/capture
+              needs an **X11/Xwayland** session (a pure Wayland session is not yet supported).
+
+            > This is an **alpha**. The networked and OS-level paths are extensively unit-tested but
+            > on-device verification across machines/OSes is still in progress — expect rough edges,
+            > and please report what breaks.
 
             **Remote control** is available only when the machine being shared is a **macOS** host,
             and requires a *second*, separate Allow/Deny from that machine's local user before any
