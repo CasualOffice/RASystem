@@ -4,3 +4,7 @@ target/
 node_modules/
 dist/
 *.log
+
+# Per-release supply-chain artifacts (generated + attached to the GitHub release, not committed)
+THIRD-PARTY-NOTICES.toml
+*.cdx.json

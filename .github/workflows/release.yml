@@ -165,3 +165,31 @@ jobs:
             on Windows, "More info → Run anyway" past SmartScreen.
           releaseDraft: true
           prerelease: true
+
+  # Supply-chain artifacts: a CycloneDX SBOM + a full third-party license notices file for the exact
+  # dependency tree shipped in this release, attached to the GitHub release. Runs AFTER `build` (so the
+  # release exists to upload to) and only if the `gate` passed. A failure here never un-publishes the
+  # release — it just flags that the artifacts are missing.
+  sbom:
+    name: SBOM + third-party notices
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install SBOM tools
+        run: cargo install cargo-cyclonedx cargo-bundle-licenses
+      - name: Generate CycloneDX SBOM (the shipped app's full dependency tree)
+        run: cargo cyclonedx --manifest-path app/src-tauri/Cargo.toml --format json
+      - name: Generate third-party license notices
+        working-directory: app/src-tauri
+        run: cargo bundle-licenses -f toml -o "$GITHUB_WORKSPACE/THIRD-PARTY-NOTICES.toml"
+      - name: Attach artifacts to the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release upload "$TAG" \
+            app/src-tauri/casual-ras.cdx.json \
+            THIRD-PARTY-NOTICES.toml \
+            --clobber
