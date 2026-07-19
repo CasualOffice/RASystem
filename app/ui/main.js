@@ -18,6 +18,7 @@ const views = {
   home: document.getElementById("home"),
   share: document.getElementById("share-view"),
   connect: document.getElementById("connect-view"),
+  contacts: document.getElementById("contacts-view"),
 };
 
 function showView(name) {
@@ -28,6 +29,10 @@ document.getElementById("go-connect").addEventListener("click", () => showView("
 document.getElementById("go-share").addEventListener("click", () => {
   showView("share");
   startSharing();
+});
+document.getElementById("go-contacts").addEventListener("click", () => {
+  showView("contacts");
+  loadContacts();
 });
 document.querySelectorAll("[data-home]").forEach((b) =>
   b.addEventListener("click", () => {
@@ -677,7 +682,9 @@ function setLive(isLive) {
   files.setViewerLive(isLive); // the viewer can send a file only while its session is live
 }
 
-async function startSession(ticket) {
+// Start a viewer session either from a pasted `ticket` or a saved `contactId` (ticketless, ADR-093).
+// Both drive the identical decode path + the same consent-gated two-phase connect host-side.
+async function startSession(source) {
   if (!("VideoDecoder" in window)) {
     hud.textContent = "WebCodecs VideoDecoder unavailable in this webview.";
     return;
@@ -687,9 +694,13 @@ async function startSession(ticket) {
   channel.onmessage = onMessage;
   const onAudio = new Channel();
   onAudio.onmessage = (msg) => audioPlayer.handle(msg);
-  hud.textContent = "connecting…";
+  hud.textContent = source.contactId ? "reaching your contact…" : "connecting…";
   try {
-    await invoke("connect_to_host", { ticket, onFrame: channel, onAudio });
+    if (source.contactId) {
+      await invoke("connect_to_contact", { id: source.contactId, onFrame: channel, onAudio });
+    } else {
+      await invoke("connect_to_host", { ticket: source.ticket, onFrame: channel, onAudio });
+    }
   } catch (e) {
     hud.textContent = "connect failed: " + e;
     setLive(false);
@@ -712,13 +723,119 @@ connectBtn.addEventListener("click", () => {
     hud.textContent = "Paste a connection ticket first.";
     return;
   }
-  startSession(ticket);
+  startSession({ ticket });
 });
 
 stopBtn.addEventListener("click", stopSession);
 
 ticketInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !active) connectBtn.click();
+});
+
+// ── Contacts (address book + ticketless connect, ADR-092/093) ────────────────────────────────────
+const contactsList = document.getElementById("contacts-list");
+const contactsEmpty = document.getElementById("contacts-empty");
+const contactAddForm = document.getElementById("contact-add");
+const contactInput = document.getElementById("contact-input");
+const contactLabelInput = document.getElementById("contact-label");
+const contactAddError = document.getElementById("contact-add-error");
+
+function contactError(msg) {
+  contactAddError.textContent = msg || "";
+  contactAddError.hidden = !msg;
+}
+
+async function loadContacts() {
+  try {
+    renderContacts(await invoke("list_contacts"));
+  } catch (e) {
+    renderContacts([]);
+    contactError("Contacts unavailable: " + e);
+  }
+}
+
+function renderContacts(list) {
+  contactsList.querySelectorAll(".contact-row").forEach((r) => r.remove());
+  contactsEmpty.hidden = list.length > 0;
+  for (const c of list) {
+    const li = document.createElement("li");
+    li.className = "contact-row" + (c.blocked ? " blocked" : "");
+
+    const info = document.createElement("div");
+    info.className = "contact-info";
+    const name = document.createElement("div");
+    name.className = "contact-name";
+    name.textContent = c.label + (c.blocked ? " (blocked)" : "");
+    const code = document.createElement("div");
+    code.className = "contact-code";
+    code.textContent = c.code.slice(0, 14) + "…"; // verification-code prefix; full value on hover
+    code.title = c.code;
+    info.appendChild(name);
+    info.appendChild(code);
+
+    const actions = document.createElement("div");
+    actions.className = "contact-actions";
+
+    const connectContactBtn = document.createElement("button");
+    connectContactBtn.className = "primary";
+    connectContactBtn.textContent = "Connect";
+    connectContactBtn.disabled = c.blocked;
+    connectContactBtn.title = c.blocked
+      ? "Unblock to connect"
+      : "Connect by identity — no ticket (works when they're online)";
+    connectContactBtn.addEventListener("click", () => {
+      showView("connect");
+      startSession({ contactId: c.id });
+    });
+
+    const blockBtn = document.createElement("button");
+    blockBtn.textContent = c.blocked ? "Unblock" : "Block";
+    blockBtn.addEventListener("click", async () => {
+      try {
+        await invoke("set_contact_blocked", { id: c.id, blocked: !c.blocked });
+        loadContacts();
+      } catch (e) {
+        contactError(String(e));
+      }
+    });
+
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "danger";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", async () => {
+      try {
+        await invoke("remove_contact", { id: c.id });
+        loadContacts();
+      } catch (e) {
+        contactError(String(e));
+      }
+    });
+
+    actions.appendChild(connectContactBtn);
+    actions.appendChild(blockBtn);
+    actions.appendChild(removeBtn);
+    li.appendChild(info);
+    li.appendChild(actions);
+    contactsList.appendChild(li);
+  }
+}
+
+contactAddForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  contactError("");
+  const input = contactInput.value.trim();
+  if (!input) {
+    contactError("Paste a ticket or key first.");
+    return;
+  }
+  try {
+    await invoke("add_contact", { input, label: contactLabelInput.value.trim() });
+    contactInput.value = "";
+    contactLabelInput.value = "";
+    loadContacts();
+  } catch (err) {
+    contactError(String(err));
+  }
 });
 
 window.addEventListener("beforeunload", () => {
