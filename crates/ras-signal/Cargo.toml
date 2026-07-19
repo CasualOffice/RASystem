@@ -1,0 +1,22 @@
+[package]
+name = "ras-signal"
+description = "Casual RAS contact signaling: signed presence/message/access-request envelopes, contacts-only authorization (ADR-094/095)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Signing/verification (Ed25519 behind the KeyStore) + the ContactBook deny-by-default gate.
+ras-identity = { path = "../ras-identity" }
+# Shared error taxonomy + the `Redacted` secret wrapper (message bodies are secrets, Inv 8).
+ras-protocol = { path = "../ras-protocol" }
+
+# The iroh-gossip presence engine + the `casual-ras/signal/1` ALPN handler are added in a later
+# increment (they need a live iroh Endpoint). This crate is the **pure, off-device-testable** signed
+# signaling core first — the security heart — mirroring how `ras-grant` keeps `AccessRequest`'s
+# canonical signing pure and separate from the transport.
+
+[lints]
+workspace = true
