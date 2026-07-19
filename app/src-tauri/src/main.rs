@@ -331,6 +331,7 @@ async fn connect_to_host(
     use ras_core::{ControllerSessionConfig, IrohSessionTransport};
     use ras_protocol::{AccessOutcome, BootstrapMsg, PROTOCOL_VERSION};
 
+    log::info!("connect: dialing host (two-phase: bootstrap → grant → session)");
     // Tear down any prior viewer session first.
     let _ = disconnect(state.clone()).await;
 
@@ -1225,6 +1226,7 @@ async fn run_share(
     let host_ks = match SoftwareKeyStore::generate() {
         Ok(k) => k,
         Err(_) => {
+            log::error!("share: failed to create host identity");
             let _ = app.emit("share-status", "Failed to create a host identity.");
             let _ = app.emit("share-active", false);
             return;
@@ -1578,6 +1580,7 @@ async fn serve_one(
     }
 
     // Approved: session is Active. Show the indicator + the pointer overlay.
+    log::info!("share: viewer connected — REMOTE VIEWING ACTIVE");
     let _ = app.emit("share-status", "Viewer connected — REMOTE VIEWING ACTIVE.");
     let _ = app.emit("share-viewer", true);
     if let Some(ov) = app.get_webview_window("overlay") {
@@ -1600,6 +1603,7 @@ async fn serve_one(
         tokio::select! {
             _ = stop.changed() => {
                 if *stop.borrow() {
+                    log::info!("share: Stop pressed — halting session (emergency stop path, Inv 4)");
                     host.stop(StopReason::UserRequested).await;
                     break;
                 }
