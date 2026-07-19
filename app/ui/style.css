@@ -1358,3 +1358,38 @@ body {
 .contact-actions button.danger {
   color: #ff8a8a;
 }
+
+/* Your own shareable identity on the Contacts screen */
+.my-identity {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #2a2a34;
+  background: #101017;
+  margin: 8px 0 14px;
+}
+.my-identity-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.my-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #9ab7ff;
+  font-size: 13px;
+}
+.my-identity .note {
+  color: #9a9aa8;
+  font-size: 12.5px;
+  margin: 6px 0 10px;
+}
+.my-identity button.primary {
+  padding: 8px 16px;
+  border-radius: 9px;
+  border: 1px solid #3a8341;
+  background: #2f6b34;
+  color: #fff;
+  cursor: pointer;
+}
+.my-identity button.primary:hover {
+  background: #367a3d;
+}

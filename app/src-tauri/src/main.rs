@@ -544,6 +544,33 @@ fn identity_seed(app: &tauri::AppHandle) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(bytes.as_slice()).ok()
 }
 
+/// This machine's own shareable identity (ADR-092/093), so a peer can save you once and reach you by
+/// name. `ticket` is an id-only connection ticket to hand out (paste into their "Add contact"); `code`
+/// is the Crockford verification code to read aloud/compare against their QR.
+#[derive(serde::Serialize)]
+struct MyIdentity {
+    ticket: String,
+    code: String,
+    id: String,
+}
+
+/// Return this machine's persistent contact identity (id-only ticket + verification code). No network,
+/// no secret — the public identity only (Inv 8).
+#[tauri::command]
+fn my_identity(app: tauri::AppHandle) -> Result<MyIdentity, String> {
+    use ras_core::identity::{KeyStore, SoftwareKeyStore};
+    let seed = identity_seed(&app).ok_or("identity storage is unavailable")?;
+    let pk = SoftwareKeyStore::from_seed(seed).public_key();
+    let cid = ras_identity::ContactId::from_bytes(pk);
+    let ticket =
+        ras_core::transport::EndpointAddr::new(ras_core::transport::EndpointId(pk)).to_ticket();
+    Ok(MyIdentity {
+        ticket,
+        code: ras_identity::contact_code(&cid),
+        id: hex_id(&pk),
+    })
+}
+
 /// List all saved contacts for the address-book UI.
 #[tauri::command]
 fn list_contacts(state: State<'_, AppState>) -> Result<Vec<ContactDto>, String> {
@@ -1997,6 +2024,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             connect_to_host,
             connect_to_contact,
+            my_identity,
             list_contacts,
             add_contact,
             remove_contact,

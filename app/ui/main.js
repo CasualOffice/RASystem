@@ -33,6 +33,7 @@ document.getElementById("go-share").addEventListener("click", () => {
 document.getElementById("go-contacts").addEventListener("click", () => {
   showView("contacts");
   loadContacts();
+  loadMyIdentity();
 });
 document.querySelectorAll("[data-home]").forEach((b) =>
   b.addEventListener("click", () => {
@@ -739,11 +740,38 @@ const contactAddForm = document.getElementById("contact-add");
 const contactInput = document.getElementById("contact-input");
 const contactLabelInput = document.getElementById("contact-label");
 const contactAddError = document.getElementById("contact-add-error");
+const myCodeEl = document.getElementById("my-code");
+const copyMyCodeBtn = document.getElementById("copy-my-code");
+let myInvite = null;
 
 function contactError(msg) {
   contactAddError.textContent = msg || "";
   contactAddError.hidden = !msg;
 }
+
+// Load this machine's own shareable identity (an id-only invite ticket + a human verification code).
+async function loadMyIdentity() {
+  try {
+    const me = await invoke("my_identity");
+    myCodeEl.textContent = me.code.slice(0, 19) + "…"; // grouped Crockford prefix; full value on hover
+    myCodeEl.title = me.code;
+    myInvite = me.ticket;
+  } catch (_) {
+    myCodeEl.textContent = "unavailable";
+    myInvite = null;
+  }
+}
+
+copyMyCodeBtn.addEventListener("click", async () => {
+  if (!myInvite) return;
+  try {
+    await navigator.clipboard.writeText(myInvite);
+    copyMyCodeBtn.textContent = "Copied ✓";
+    setTimeout(() => (copyMyCodeBtn.textContent = "Copy my invite"), 1500);
+  } catch (_) {
+    contactError("Copy was blocked by the system — hover the code to read your full identity.");
+  }
+});
 
 async function loadContacts() {
   try {

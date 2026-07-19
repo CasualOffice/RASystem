@@ -67,6 +67,16 @@
       <p class="lead">Save someone once from a ticket they share, then connect to them by name — no
         ticket to copy each time. They still approve every connection on their machine.</p>
 
+      <div id="my-identity" class="my-identity">
+        <div class="my-identity-head">
+          <strong>Your code</strong>
+          <span id="my-code" class="my-code" title="Your identity — read it aloud to verify">—</span>
+        </div>
+        <p class="note">Send this to someone so they can add you and reach you by name (they still
+          approve each connection). It stays the same across restarts.</p>
+        <button id="copy-my-code" type="button" class="primary">Copy my invite</button>
+      </div>
+
       <form id="contact-add" class="contact-add" autocomplete="off">
         <input id="contact-input" type="text" spellcheck="false" autocomplete="off"
           placeholder="Paste their ticket (CASUALRAS1:…) or 64-char key" />
