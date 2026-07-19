@@ -14,7 +14,7 @@
 //! - **No secret ever crosses the boundary** (Inv 8): the identity handle signs and yields the
 //!   *public* key only, exactly like `KeyStore`.
 
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -25,7 +25,7 @@ use ras_identity::{
 
 /// Status codes returned across the ABI. `0` is success; any non-zero is a failure.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CasualRasStatus {
     /// Success.
     Ok = 0,
@@ -39,8 +39,8 @@ pub enum CasualRasStatus {
 
 /// Run an FFI body, converting a panic into [`CasualRasStatus::Internal`] so it never unwinds across
 /// the C boundary (which would be undefined behaviour).
-fn guard(f: impl FnOnce() -> CasualRasStatus) -> c_int {
-    catch_unwind(AssertUnwindSafe(f)).unwrap_or(CasualRasStatus::Internal) as c_int
+fn guard(f: impl FnOnce() -> CasualRasStatus) -> CasualRasStatus {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or(CasualRasStatus::Internal)
 }
 
 /// The library version as a static, NUL-terminated C string. **Do not free** the returned pointer.
@@ -64,7 +64,7 @@ pub struct CasualRasIdentity {
 #[no_mangle]
 pub unsafe extern "C" fn casual_ras_identity_generate(
     out_identity: *mut *mut CasualRasIdentity,
-) -> c_int {
+) -> CasualRasStatus {
     guard(|| {
         if out_identity.is_null() {
             return CasualRasStatus::NullArgument;
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn casual_ras_identity_generate(
 pub unsafe extern "C" fn casual_ras_identity_load_or_create(
     path: *const c_char,
     out_identity: *mut *mut CasualRasIdentity,
-) -> c_int {
+) -> CasualRasStatus {
     guard(|| {
         if path.is_null() || out_identity.is_null() {
             return CasualRasStatus::NullArgument;
@@ -131,7 +131,7 @@ pub unsafe extern "C" fn casual_ras_identity_free(identity: *mut CasualRasIdenti
 pub unsafe extern "C" fn casual_ras_identity_public_key(
     identity: *const CasualRasIdentity,
     out: *mut u8,
-) -> c_int {
+) -> CasualRasStatus {
     guard(|| {
         // SAFETY: validated non-null; caller guarantees a live handle.
         let (Some(id), false) = (unsafe { identity.as_ref() }, out.is_null()) else {
@@ -156,7 +156,7 @@ pub unsafe extern "C" fn casual_ras_identity_sign(
     msg: *const u8,
     msg_len: usize,
     out: *mut u8,
-) -> c_int {
+) -> CasualRasStatus {
     guard(|| {
         let Some(id) = (unsafe { identity.as_ref() }) else {
             return CasualRasStatus::NullArgument;
@@ -192,7 +192,7 @@ pub unsafe extern "C" fn casual_ras_contact_code(
     id32: *const u8,
     out: *mut c_char,
     out_cap: usize,
-) -> c_int {
+) -> CasualRasStatus {
     guard(|| {
         if id32.is_null() || out.is_null() {
             return CasualRasStatus::NullArgument;
@@ -224,7 +224,7 @@ pub unsafe extern "C" fn casual_ras_contact_code(
 pub unsafe extern "C" fn casual_ras_ticket_endpoint_id(
     ticket: *const c_char,
     out: *mut u8,
-) -> c_int {
+) -> CasualRasStatus {
     guard(|| {
         if ticket.is_null() || out.is_null() {
             return CasualRasStatus::NullArgument;
@@ -256,7 +256,7 @@ pub unsafe extern "C" fn casual_ras_verify(
     msg: *const u8,
     msg_len: usize,
     sig: *const u8,
-) -> c_int {
+) -> CasualRasStatus {
     guard(|| {
         if pubkey.is_null() || sig.is_null() || (msg.is_null() && msg_len != 0) {
             return CasualRasStatus::NullArgument;
@@ -293,7 +293,7 @@ pub unsafe extern "C" fn casual_ras_ticket_from_endpoint_id(
     id32: *const u8,
     out: *mut c_char,
     out_cap: usize,
-) -> c_int {
+) -> CasualRasStatus {
     guard(|| {
         if id32.is_null() || out.is_null() {
             return CasualRasStatus::NullArgument;
@@ -334,14 +334,14 @@ mod tests {
         let mut id: *mut CasualRasIdentity = std::ptr::null_mut();
         assert_eq!(
             unsafe { casual_ras_identity_generate(&mut id) },
-            CasualRasStatus::Ok as c_int
+            CasualRasStatus::Ok
         );
         assert!(!id.is_null());
 
         let mut pk = [0u8; PUBLIC_KEY_LEN];
         assert_eq!(
             unsafe { casual_ras_identity_public_key(id, pk.as_mut_ptr()) },
-            CasualRasStatus::Ok as c_int
+            CasualRasStatus::Ok
         );
         assert_ne!(pk, [0u8; PUBLIC_KEY_LEN], "a real key was written");
 
@@ -349,7 +349,7 @@ mod tests {
         let mut sig = [0u8; SIGNATURE_LEN];
         assert_eq!(
             unsafe { casual_ras_identity_sign(id, msg.as_ptr(), msg.len(), sig.as_mut_ptr()) },
-            CasualRasStatus::Ok as c_int
+            CasualRasStatus::Ok
         );
         // Verify the signature with the core verifier against the exported public key.
         assert!(ras_identity::verify(&pk, msg, &sig).is_ok());
@@ -361,11 +361,11 @@ mod tests {
     fn null_arguments_are_rejected_not_crashed() {
         assert_eq!(
             unsafe { casual_ras_identity_generate(std::ptr::null_mut()) },
-            CasualRasStatus::NullArgument as c_int
+            CasualRasStatus::NullArgument
         );
         assert_eq!(
             unsafe { casual_ras_identity_public_key(std::ptr::null(), std::ptr::null_mut()) },
-            CasualRasStatus::NullArgument as c_int
+            CasualRasStatus::NullArgument
         );
         // Freeing NULL is a safe no-op.
         unsafe { casual_ras_identity_free(std::ptr::null_mut()) };
@@ -379,7 +379,7 @@ mod tests {
         let mut buf = vec![0i8; 128];
         assert_eq!(
             unsafe { casual_ras_contact_code(id.as_ptr(), buf.as_mut_ptr(), buf.len()) },
-            CasualRasStatus::Ok as c_int
+            CasualRasStatus::Ok
         );
         let got = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap();
         assert_eq!(got, expected);
@@ -388,7 +388,7 @@ mod tests {
         let mut tiny = vec![0i8; 4];
         assert_eq!(
             unsafe { casual_ras_contact_code(id.as_ptr(), tiny.as_mut_ptr(), tiny.len()) },
-            CasualRasStatus::InvalidArgument as c_int
+            CasualRasStatus::InvalidArgument
         );
     }
 
@@ -402,14 +402,14 @@ mod tests {
         let mut out = [0u8; PUBLIC_KEY_LEN];
         assert_eq!(
             unsafe { casual_ras_ticket_endpoint_id(cticket.as_ptr(), out.as_mut_ptr()) },
-            CasualRasStatus::Ok as c_int
+            CasualRasStatus::Ok
         );
         assert_eq!(out, id);
 
         let bad = CString::new("NOT-A-TICKET").unwrap();
         assert_eq!(
             unsafe { casual_ras_ticket_endpoint_id(bad.as_ptr(), out.as_mut_ptr()) },
-            CasualRasStatus::InvalidArgument as c_int
+            CasualRasStatus::InvalidArgument
         );
     }
 
@@ -425,12 +425,12 @@ mod tests {
 
         assert_eq!(
             unsafe { casual_ras_verify(pk.as_ptr(), msg.as_ptr(), msg.len(), sig.as_ptr()) },
-            CasualRasStatus::Ok as c_int
+            CasualRasStatus::Ok
         );
         sig[0] ^= 0xff; // tamper
         assert_eq!(
             unsafe { casual_ras_verify(pk.as_ptr(), msg.as_ptr(), msg.len(), sig.as_ptr()) },
-            CasualRasStatus::InvalidArgument as c_int
+            CasualRasStatus::InvalidArgument
         );
         unsafe { casual_ras_identity_free(id) };
     }
@@ -441,13 +441,13 @@ mod tests {
         let mut buf = vec![0i8; 256];
         assert_eq!(
             unsafe { casual_ras_ticket_from_endpoint_id(id.as_ptr(), buf.as_mut_ptr(), buf.len()) },
-            CasualRasStatus::Ok as c_int
+            CasualRasStatus::Ok
         );
         // Parse the built ticket back — same id (build ⇄ parse are inverses).
         let mut out = [0u8; PUBLIC_KEY_LEN];
         assert_eq!(
             unsafe { casual_ras_ticket_endpoint_id(buf.as_ptr(), out.as_mut_ptr()) },
-            CasualRasStatus::Ok as c_int
+            CasualRasStatus::Ok
         );
         assert_eq!(out, id);
 
@@ -457,7 +457,7 @@ mod tests {
             unsafe {
                 casual_ras_ticket_from_endpoint_id(id.as_ptr(), tiny.as_mut_ptr(), tiny.len())
             },
-            CasualRasStatus::InvalidArgument as c_int
+            CasualRasStatus::InvalidArgument
         );
     }
 }
