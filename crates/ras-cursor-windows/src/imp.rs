@@ -228,8 +228,8 @@ fn get_bitmap_dims(hbm: HBITMAP) -> Option<(u32, u32)> {
     if n == 0 {
         return None;
     }
-    let w = i32::try_from(bm.bmWidth).ok()?;
-    let h = i32::try_from(bm.bmHeight).ok()?;
+    let w = bm.bmWidth; // BITMAP.bmWidth/bmHeight are already i32 (LONG)
+    let h = bm.bmHeight;
     if w <= 0 || h <= 0 {
         return None;
     }
@@ -241,7 +241,7 @@ fn get_bitmap_dims(hbm: HBITMAP) -> Option<(u32, u32)> {
 /// read the bytes out and swap B/R to RGBA. Every GDI handle is released before returning.
 fn draw_cursor_bgra(ii: &ICONINFO, width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> {
     // A negative `biHeight` requests a **top-down** DIB, matching the wire's top-down RGBA contract.
-    let mut bmi = BITMAPINFO {
+    let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width as i32,
