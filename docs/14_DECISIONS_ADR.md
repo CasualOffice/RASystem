@@ -1203,6 +1203,58 @@
     (`Endpoint::connect` again + real network re-handshake, verified over an actually-impaired link with
     NAT rebind) stays the on-device follow-up, like every other iroh-specific step.
 
+## Contacts, presence & signaling (`docs/design/contacts-and-signaling-design.md`)
+
+- **ADR-092 · Durable, mutual Contacts book (extends the paired-controller registry) · Accepted.**
+  - **Context.** Every connection today needs a fresh ticket copy-pasted out of band. `docs/16` already
+    names the fix — *"from then on that identity — not the ticket — is the durable trust anchor"* — and
+    ADR-084's `PairingRegistry` is its host-side half. Generalize it to a **bidirectional address book**.
+  - **Decision.** A `Contact { id (Ed25519 pubkey = EndpointId), label, added_at, last_seen_at, blocked }`
+    saved by **both** peers at first pairing (identities are exchanged once, mutually). A `ContactBook`
+    seam (in-memory MVP now, **SQLite durable impl** for restart-survival) with add / get / list / touch /
+    block / remove. Key-change detection is free (id = pubkey; a rotated key is a *new, unverified*
+    entry, surfaced never auto-trusted). De-listing / blocking is the kill-switch.
+  - **Invariants.** Identity, never authority (Inv 9): a contact hit governs only *finding* a peer and
+    *whether the human prompt is pre-filled* — it authorizes nothing. Content-light; no secret (Inv 8).
+
+- **ADR-093 · Ticketless connect to a saved contact via dial-by-EndpointId + discovery · Accepted.**
+  - **Context.** iroh 1.0.2 can dial a peer by `EndpointId` alone (no ticket) through its DNS/pkarr
+    discovery, *if* the peer is online + discoverable (verified in source; `presets::N0` — already used —
+    wires discovery). This is the headline UX win and needs no gossip.
+  - **Decision.** Reach a saved contact by dialing its stored `EndpointId`; fallbacks in order:
+    discovery-by-id → stored last-known `EndpointAddr` hints → "contact appears offline". The normal
+    two-phase connect + consent + grant run unchanged on top.
+  - **Invariants.** The dialed connection is still `EndpointId`-authenticated by QUIC/TLS; the grant is
+    still fresh, short-lived, endpoint-sender-constrained (Inv 3); consent still required (Inv 1).
+
+- **ADR-094 · Presence + signaling over iroh-gossip 0.101 · Accepted.**
+  - **Context.** `iroh-gossip = "0.101.0"` depends on `iroh ^1` → compatible with our pinned `1.0.2`
+    (buildable now). Gossip is **best-effort, unordered, no persistence**; payloads are **not**
+    author-authenticated (`delivered_from` = forwarding neighbor, not origin); `TopicId` (32 B) is a
+    **bearer secret** (anyone who knows it joins); max message ≈ 4 KiB.
+  - **Decision.** Presence via **per-contact-pair secret topics** (topic id derived from a shared secret
+    established at pairing — unguessable, private to the pair), carrying periodic **signed** "online"
+    beacons + `NeighborUp`/`NeighborDown`. **Every gossip payload is signed by the sender identity key
+    and verified before use** (`delivered_from` never trusted as author). Gossip is signaling-only
+    (≤4 KiB); bulk rides dedicated iroh streams. Owned by a new `ras-signal` crate scoping the
+    `iroh-gossip` dependency (**license `cargo-deny`-verified at implementation**).
+  - **Invariants.** Deny-by-default: only **saved, non-blocked contacts** are honored (contacts-only —
+    strangers refused). Topic secrets + beacons never logged (Inv 8). No offline delivery (see below).
+
+- **ADR-095 · Contact messaging + request-remote-access over a signaling ALPN · Accepted.**
+  - **Decision.** A new **signaling ALPN `casual-ras/signal/1`** carries **signed** direct messages
+    (reusing the `Redacted` `ChatMessage` body) and **access-request *intents*** between saved contacts.
+    A request-intent raises an **incoming-request prompt** (Inv 1 consent, with the focus/notification
+    UX already shipped); on Allow, the normal Share/Connect two-phase flow runs. This replaces "text me
+    your ticket" **without** replacing consent.
+  - **Invariants.** Contact ≠ authorization (Inv 1): the human still clicks Allow; the grant/lease/
+    per-message gate (Inv 3/15) and emergency stop (Inv 4) are unchanged. The ALPN is iroh-authenticated
+    + app-signed + consent-gated — no new unauthenticated endpoint (Inv 9).
+  - **Offline (accepted limitation).** Gossip has no store-and-forward; a message/request to an offline
+    contact is queued **locally** and delivered on next presence (best-effort), surfaced honestly. A
+    durable **mailbox is out of scope** (it needs an always-on node = backend, conflicting with the
+    no-backend-until-Phase-9 stance) — deferred, not built.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

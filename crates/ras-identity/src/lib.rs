@@ -282,6 +282,21 @@ pub struct PairedController {
 /// id (Syncthing digests only because its input is a large certificate).
 #[must_use]
 pub fn pairing_code(id: &ControllerId) -> String {
+    crockford_code(id.as_bytes())
+}
+
+/// The same grouped Crockford-base32 rendering for a saved [`Contact`]'s identity (ADR-092): the
+/// eyeball/verbal check shown alongside the QR when adding a contact. Identical algorithm to
+/// [`pairing_code`] — a contact and a paired controller share the 32-byte Ed25519 key space.
+#[must_use]
+pub fn contact_code(id: &ContactId) -> String {
+    crockford_code(id.as_bytes())
+}
+
+/// Grouped Crockford-base32 of a 32-byte public identity (the shared body of [`pairing_code`] /
+/// [`contact_code`]). Deterministic; the alphabet omits `I L O U` so it survives readback without
+/// typos; no hash is applied (the input is already a uniform 256-bit key).
+fn crockford_code(bytes: &[u8; PUBLIC_KEY_LEN]) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     let mut out = String::with_capacity(52 + 12);
     let mut acc: u32 = 0;
@@ -294,7 +309,7 @@ pub fn pairing_code(id: &ControllerId) -> String {
         out.push(ALPHABET[idx] as char);
         *symbols += 1;
     };
-    for &b in id.as_bytes() {
+    for &b in bytes {
         acc = (acc << 8) | u32::from(b);
         nbits += 8;
         while nbits >= 5 {
@@ -403,6 +418,123 @@ impl PairingRegistry for InMemoryPairingRegistry {
         }
     }
     fn revoke(&self, id: &ControllerId) {
+        self.lock().remove(id);
+    }
+}
+
+// ─── Contacts: the bidirectional address book (ADR-092 / `docs/20 §3.5`) ────────────────────────────
+
+public_id!(
+    ContactId,
+    "A saved peer's stable public identity (Ed25519 public key) — also its iroh `EndpointId`, so it is directly dialable (ADR-093)."
+);
+
+/// A saved peer in the local user's **address book** (ADR-092). Unlike [`PairedController`] (host-side:
+/// controllers that connect *to* this machine), a `Contact` is **bidirectional** — any peer you have
+/// mutually saved and can reach **by identity, not by ticket** (ADR-093): to view/share, message, or
+/// request remote access from. The `id` is the peer's Ed25519 public key, which is also its iroh
+/// `EndpointId`, so it is directly dialable. Saving a contact confers **no authority** (Inv 1/9): every
+/// session it initiates or receives still runs full local consent + a fresh short-lived grant + the
+/// per-message gate + emergency stop. Content-light — a public key + a user label + timestamps + a
+/// block flag; no secret (Inv 8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Contact {
+    /// The peer's stable public identity (= its iroh `EndpointId`, the dial key).
+    pub id: ContactId,
+    /// A human label the local user set (e.g. "Alice's laptop"). Never security-bearing.
+    pub label: String,
+    /// When the contact was first added (local clock).
+    pub added_at: UnixMillis,
+    /// When the contact was last seen online / connecting (local clock); refreshed for the UI.
+    pub last_seen_at: UnixMillis,
+    /// Whether the local user has **blocked** this contact. A blocked contact can neither be reached nor
+    /// deliver a message / access-request (the deny-by-default abuse control, ADR-094/095). Kept in the
+    /// book rather than deleted so a block survives a re-add until explicitly unblocked or removed.
+    pub blocked: bool,
+}
+
+/// The local user's contacts book (ADR-092). The user owns it (Inv 1); **blocking or removing a contact
+/// is the kill-switch**. Every method is identity-only — the book decides *who you can find/hear from*,
+/// **never** what they may do (Inv 9): even an active contact goes through full consent + a fresh grant.
+/// MVP is in-memory; a SQLite-backed impl (restart-survival) is the durable follow-up.
+pub trait ContactBook: Send + Sync {
+    /// Add or update a contact (after a human accept at pairing). For an existing id this refreshes the
+    /// label + `last_seen_at` but **preserves the original `added_at` and the `blocked` flag** — a re-add
+    /// is not a new add and must never silently unblock (Inv 1).
+    fn upsert(&self, contact: Contact);
+    /// Look up a contact by identity.
+    fn get(&self, id: &ContactId) -> Option<Contact>;
+    /// Whether `id` is a saved, **non-blocked** contact — the deny-by-default gate for reachability,
+    /// messages, and access-requests (ADR-094/095, contacts-only). A blocked or unknown id ⇒ `false`.
+    fn is_active_contact(&self, id: &ContactId) -> bool;
+    /// All contacts, for the management UI. Order is unspecified.
+    fn list(&self) -> Vec<Contact>;
+    /// Refresh `last_seen_at` (no-op if unknown).
+    fn touch(&self, id: &ContactId, now: UnixMillis);
+    /// Block a contact (kill-switch; keeps the record). Idempotent; no-op if unknown.
+    fn block(&self, id: &ContactId);
+    /// Unblock a contact. Idempotent; no-op if unknown.
+    fn unblock(&self, id: &ContactId);
+    /// Remove a contact entirely. Idempotent.
+    fn remove(&self, id: &ContactId);
+}
+
+/// In-memory [`ContactBook`] for the MVP (a restart clears it; the SQLite durable impl is the follow-up,
+/// ADR-092). `unsafe`-free, poison-tolerant like [`InMemoryPairingRegistry`].
+#[derive(Default)]
+pub struct InMemoryContactBook {
+    inner: Mutex<HashMap<ContactId, Contact>>,
+}
+
+impl InMemoryContactBook {
+    /// A fresh, empty contacts book.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ContactId, Contact>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl ContactBook for InMemoryContactBook {
+    fn upsert(&self, contact: Contact) {
+        let mut g = self.lock();
+        if let Some(existing) = g.get_mut(&contact.id) {
+            existing.label = contact.label;
+            existing.last_seen_at = contact.last_seen_at;
+            // added_at + blocked preserved — a re-add is not a new add and never silently unblocks.
+        } else {
+            g.insert(contact.id, contact);
+        }
+    }
+    fn get(&self, id: &ContactId) -> Option<Contact> {
+        self.lock().get(id).cloned()
+    }
+    fn is_active_contact(&self, id: &ContactId) -> bool {
+        self.lock().get(id).is_some_and(|c| !c.blocked)
+    }
+    fn list(&self) -> Vec<Contact> {
+        self.lock().values().cloned().collect()
+    }
+    fn touch(&self, id: &ContactId, now: UnixMillis) {
+        if let Some(c) = self.lock().get_mut(id) {
+            c.last_seen_at = now;
+        }
+    }
+    fn block(&self, id: &ContactId) {
+        if let Some(c) = self.lock().get_mut(id) {
+            c.blocked = true;
+        }
+    }
+    fn unblock(&self, id: &ContactId) {
+        if let Some(c) = self.lock().get_mut(id) {
+            c.blocked = false;
+        }
+    }
+    fn remove(&self, id: &ContactId) {
         self.lock().remove(id);
     }
 }
@@ -574,5 +706,86 @@ mod tests {
             .chars()
             .all(|c| c == '-' || c.is_ascii_uppercase() || c.is_ascii_digit()));
         assert!(!code_a.contains(['I', 'L', 'O', 'U']));
+    }
+
+    // ─── Contacts (ADR-092) ──────────────────────────────────────────────────────────────────────
+
+    fn contact(n: u8, label: &str, added: UnixMillis) -> Contact {
+        Contact {
+            id: ContactId::from_bytes([n; PUBLIC_KEY_LEN]),
+            label: label.to_string(),
+            added_at: added,
+            last_seen_at: added,
+            blocked: false,
+        }
+    }
+
+    #[test]
+    fn contact_upsert_preserves_added_at_and_block_on_re_add() {
+        let book = InMemoryContactBook::new();
+        let id = ContactId::from_bytes([5u8; PUBLIC_KEY_LEN]);
+        book.upsert(contact(5, "Alice", 1000));
+        book.block(&id); // user blocked Alice
+                         // A later re-add (e.g. re-pairing) refreshes label + last_seen but must NOT reset the
+                         // pairing age and must NOT silently unblock (Inv 1).
+        book.upsert(contact(5, "Alice (laptop)", 5000));
+        let got = book.get(&id).unwrap();
+        assert_eq!(got.label, "Alice (laptop)");
+        assert_eq!(got.last_seen_at, 5000);
+        assert_eq!(got.added_at, 1000, "added_at preserved across re-add");
+        assert!(got.blocked, "a re-add must not silently unblock");
+        assert!(!book.is_active_contact(&id), "blocked ⇒ not active");
+    }
+
+    #[test]
+    fn is_active_contact_is_the_deny_by_default_gate() {
+        let book = InMemoryContactBook::new();
+        let saved = ContactId::from_bytes([2u8; PUBLIC_KEY_LEN]);
+        let stranger = ContactId::from_bytes([3u8; PUBLIC_KEY_LEN]);
+        book.upsert(contact(2, "Bob", 1));
+        assert!(
+            book.is_active_contact(&saved),
+            "saved + non-blocked ⇒ active"
+        );
+        assert!(
+            !book.is_active_contact(&stranger),
+            "unknown identity ⇒ refused (contacts-only)"
+        );
+        book.block(&saved);
+        assert!(!book.is_active_contact(&saved), "blocked ⇒ refused");
+        book.unblock(&saved);
+        assert!(book.is_active_contact(&saved), "unblock restores active");
+        book.remove(&saved);
+        assert!(book.get(&saved).is_none(), "removed ⇒ gone");
+        assert!(!book.is_active_contact(&saved));
+    }
+
+    #[test]
+    fn contact_touch_and_list() {
+        let book = InMemoryContactBook::new();
+        book.upsert(contact(1, "A", 10));
+        book.upsert(contact(2, "B", 20));
+        book.touch(&ContactId::from_bytes([1u8; PUBLIC_KEY_LEN]), 999);
+        assert_eq!(book.list().len(), 2);
+        assert_eq!(
+            book.get(&ContactId::from_bytes([1u8; PUBLIC_KEY_LEN]))
+                .unwrap()
+                .last_seen_at,
+            999
+        );
+        // touch on an unknown id is a no-op (never panics / never inserts).
+        book.touch(&ContactId::from_bytes([9u8; PUBLIC_KEY_LEN]), 1);
+        assert_eq!(book.list().len(), 2);
+    }
+
+    #[test]
+    fn contact_code_matches_pairing_code_over_the_same_key() {
+        // A contact and a paired controller share the 32-byte key space, so the human verification code
+        // is identical for the same bytes (one algorithm, `crockford_code`).
+        let bytes = [0x5Au8; PUBLIC_KEY_LEN];
+        assert_eq!(
+            contact_code(&ContactId::from_bytes(bytes)),
+            pairing_code(&ControllerId::from_bytes(bytes))
+        );
     }
 }
