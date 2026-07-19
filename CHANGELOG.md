@@ -6,6 +6,10 @@ lives under **Unreleased** until the first tagged version. Dates are ISO-8601.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.0.1] — 2026-07-19 · first alpha (unsigned, draft pre-release)
+
 Casual RAS is an embeddable, white-label remote-access platform (Rust core + Tauri app, peer-to-peer
 over Iroh/QUIC). Priorities are strictly **Security → Latency → UX**. This log summarizes the
 capabilities implemented at the code level; on-device runtime verification status is tracked in
@@ -13,6 +17,16 @@ capabilities implemented at the code level; on-device runtime verification statu
 [`docs/21`](docs/21_PRODUCTION_READINESS_BACKLOG.md).
 
 ### Added
+
+- **Full feature set wired into the app** — chat, clipboard sync, file transfer, and output audio are
+  now surfaced in the unified desktop app (commands + polished UI), not just complete in the Rust core.
+  Consent-first: clipboard and audio are host **opt-in** (default off, disclosed) since neither has a
+  per-message gate; file transfer keeps its per-transfer Accept/Deny; an always-visible "AUDIO SHARED"
+  indicator discloses audio (Inv 7).
+- **All-OS capture backends** — audio (macOS ScreenCaptureKit / Linux PipeWire-Pulse / Windows WASAPI
+  loopback) and cursor-shape (macOS `NSCursor` / Linux XFixes / Windows GDI). macOS is on-device-verified;
+  Linux/Windows are compile/CI-gated pending hardware. **Bidirectional:** either machine can be host or
+  controller.
 
 - **Peer-to-peer session transport** over Iroh/QUIC — separate control / per-frame-video / audio /
   health planes; NAT traversal with encrypted relay fallback; connection tickets (`CASUALRAS1:`).
@@ -42,6 +56,13 @@ capabilities implemented at the code level; on-device runtime verification statu
 
 ### Security
 
+- Fixed a **silent clipboard-capability grant** (the RustDesk / Reverse-RDP injection class) found when
+  wiring clipboard into the app: a plain view-Allow forged the *consented* set to the app's maximal
+  ceiling, so `clipboard.write` (which has no per-message gate) was granted with no clipboard-specific
+  consent. Now the issued grant's consented set reflects a real choice — clipboard (and audio) ride a
+  disclosed host opt-in, not a view-Allow (Inv 1/2/7). Also fixed `recognize()` stripping the dynamic
+  `file.push.<name>` namespace (which had made file transfer fail-closed dead) and a viewer UI that
+  didn't disable its panels on host-initiated session end.
 - Fixed an **audit-checkpoint authentication bypass** — `Checkpoint::verify` verified under the
   checkpoint's *embedded* signer instead of the verifier's trusted host key (a forgery oracle); it now
   requires the trusted key.
