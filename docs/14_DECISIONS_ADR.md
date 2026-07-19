@@ -1211,9 +1211,13 @@
     ADR-084's `PairingRegistry` is its host-side half. Generalize it to a **bidirectional address book**.
   - **Decision.** A `Contact { id (Ed25519 pubkey = EndpointId), label, added_at, last_seen_at, blocked }`
     saved by **both** peers at first pairing (identities are exchanged once, mutually). A `ContactBook`
-    seam (in-memory MVP now, **SQLite durable impl** for restart-survival) with add / get / list / touch /
-    block / remove. Key-change detection is free (id = pubkey; a rotated key is a *new, unverified*
-    entry, surfaced never auto-trusted). De-listing / blocking is the kill-switch.
+    seam — `InMemoryContactBook` (MVP) + the durable **`FileContactBook`** (a hand-rolled length-prefixed
+    snapshot with **atomic temp+rename** writes and fail-closed decode) — with add / get / list / touch /
+    block / remove. **Not SQLite** (superseding the initial note): contacts are a small, low-write,
+    query-by-key set, so a file snapshot gives restart-survival with **zero new C/`-sys` dependency** and
+    a smaller supply-chain surface (Inv 18), matching the `ras-audit`/`ras-files` precedent. Key-change
+    detection is free (id = pubkey; a rotated key is a *new, unverified* entry, surfaced never
+    auto-trusted). De-listing / blocking is the kill-switch.
   - **Invariants.** Identity, never authority (Inv 9): a contact hit governs only *finding* a peer and
     *whether the human prompt is pre-filled* — it authorizes nothing. Content-light; no secret (Inv 8).
 

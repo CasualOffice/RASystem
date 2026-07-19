@@ -539,6 +539,201 @@ impl ContactBook for InMemoryContactBook {
     }
 }
 
+/// Max stored contact-label length (bytes). Bounds a corrupt/hostile file so decode can't be tricked
+/// into a huge allocation, and keeps labels UI-sized.
+pub const MAX_CONTACT_LABEL: usize = 256;
+
+/// Snapshot magic + version for the on-disk contacts book (`RCB1` = Ras Contacts Book v1).
+const CONTACTS_MAGIC: &[u8; 4] = b"RCB1";
+
+/// Encode the whole book as a length-prefixed binary snapshot (deterministic — contacts sorted by id,
+/// so the file is stable across rewrites and testable). Layout: `RCB1` then, per contact,
+/// `id[32] · added_at u64le · last_seen u64le · blocked u8 · label_len u32le · label_utf8`.
+fn encode_book(map: &HashMap<ContactId, Contact>) -> Vec<u8> {
+    let mut ids: Vec<&ContactId> = map.keys().collect();
+    ids.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    let mut out = Vec::with_capacity(4 + ids.len() * 60);
+    out.extend_from_slice(CONTACTS_MAGIC);
+    for id in ids {
+        let c = &map[id];
+        // Defensive: never persist an over-long label (decode rejects it anyway); truncate on a char
+        // boundary so the bytes stay valid UTF-8.
+        let label = if c.label.len() > MAX_CONTACT_LABEL {
+            let mut end = MAX_CONTACT_LABEL;
+            while end > 0 && !c.label.is_char_boundary(end) {
+                end -= 1;
+            }
+            &c.label[..end]
+        } else {
+            c.label.as_str()
+        };
+        out.extend_from_slice(c.id.as_bytes());
+        out.extend_from_slice(&c.added_at.to_le_bytes());
+        out.extend_from_slice(&c.last_seen_at.to_le_bytes());
+        out.push(u8::from(c.blocked));
+        out.extend_from_slice(&(label.len() as u32).to_le_bytes());
+        out.extend_from_slice(label.as_bytes());
+    }
+    out
+}
+
+/// Decode a snapshot produced by [`encode_book`]. **Fail-closed**: a bad magic, a truncated record, an
+/// over-long label, or invalid UTF-8 is an error — the book is never silently emptied or half-loaded.
+fn decode_book(bytes: &[u8]) -> Result<HashMap<ContactId, Contact>, IdentityError> {
+    let corrupt = || internal("contacts file corrupt");
+    let magic = bytes.get(..4).ok_or_else(corrupt)?;
+    if magic != CONTACTS_MAGIC {
+        return Err(corrupt());
+    }
+    let mut map = HashMap::new();
+    let mut p = 4usize;
+    while p < bytes.len() {
+        let take = |p: &mut usize, n: usize| -> Result<&[u8], IdentityError> {
+            let s = bytes
+                .get(*p..p.checked_add(n).ok_or_else(corrupt)?)
+                .ok_or_else(corrupt)?;
+            *p += n;
+            Ok(s)
+        };
+        let id: [u8; PUBLIC_KEY_LEN] = take(&mut p, PUBLIC_KEY_LEN)?
+            .try_into()
+            .map_err(|_| corrupt())?;
+        let added_at = u64::from_le_bytes(take(&mut p, 8)?.try_into().map_err(|_| corrupt())?);
+        let last_seen_at = u64::from_le_bytes(take(&mut p, 8)?.try_into().map_err(|_| corrupt())?);
+        let blocked = take(&mut p, 1)?[0] != 0;
+        let label_len =
+            u32::from_le_bytes(take(&mut p, 4)?.try_into().map_err(|_| corrupt())?) as usize;
+        if label_len > MAX_CONTACT_LABEL {
+            return Err(corrupt());
+        }
+        let label = std::str::from_utf8(take(&mut p, label_len)?)
+            .map_err(|_| corrupt())?
+            .to_string();
+        let id = ContactId::from_bytes(id);
+        map.insert(
+            id,
+            Contact {
+                id,
+                label,
+                added_at,
+                last_seen_at,
+                blocked,
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// A **durable** [`ContactBook`] backed by a snapshot file (ADR-092 — the restart-survival follow-up).
+/// Deliberately **not** SQLite: contacts are a small, low-write, query-by-key set, so a hand-rolled
+/// length-prefixed snapshot gives durability with **zero new C/`-sys` dependency** (matching the
+/// `ras-audit`/`ras-files` precedent) and a smaller supply-chain surface (Inv 18).
+///
+/// The in-memory map is authoritative for the running process; each mutation rewrites the whole
+/// snapshot **atomically** (write a temp file, then `rename` over the target — a crash mid-write leaves
+/// the previous good snapshot intact, never a torn file). Persistence is **best-effort** for the
+/// infallible [`ContactBook`] methods (a disk-write failure leaves the correct in-memory state and the
+/// next mutation re-persists the full set); use [`FileContactBook::save`] when a caller wants to observe
+/// a write error. Losing a contact is a convenience regression, never an authorization one (Inv 9) — a
+/// missing contact just means re-adding it; it can never grant access.
+pub struct FileContactBook {
+    path: std::path::PathBuf,
+    inner: Mutex<HashMap<ContactId, Contact>>,
+}
+
+impl FileContactBook {
+    /// Open the book at `path`, loading any saved contacts. A **missing** file is an empty book (first
+    /// run). A **present-but-corrupt** file is an error — never silently discards the user's contacts.
+    pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self, IdentityError> {
+        let path = path.into();
+        let map = match std::fs::read(&path) {
+            Ok(bytes) => decode_book(&bytes)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(_) => return Err(internal("contacts file unreadable")),
+        };
+        Ok(Self {
+            path,
+            inner: Mutex::new(map),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ContactId, Contact>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Explicitly persist the current book, surfacing any write error (unlike the best-effort trait
+    /// mutations). Atomic (temp + rename).
+    pub fn save(&self) -> Result<(), IdentityError> {
+        self.persist(&self.lock())
+    }
+
+    fn persist(&self, map: &HashMap<ContactId, Contact>) -> Result<(), IdentityError> {
+        let bytes = encode_book(map);
+        let tmp = self.path.with_extension("tmp");
+        std::fs::write(&tmp, &bytes).map_err(|_| internal("contacts write failed"))?;
+        std::fs::rename(&tmp, &self.path).map_err(|_| internal("contacts rename failed"))?;
+        Ok(())
+    }
+
+    /// Apply a mutation under the lock, then best-effort persist the whole snapshot.
+    fn mutate(&self, f: impl FnOnce(&mut HashMap<ContactId, Contact>)) {
+        let mut g = self.lock();
+        f(&mut g);
+        let _ = self.persist(&g); // best-effort — in-memory state stays correct; see the type doc.
+    }
+}
+
+impl ContactBook for FileContactBook {
+    fn upsert(&self, contact: Contact) {
+        self.mutate(|g| {
+            if let Some(existing) = g.get_mut(&contact.id) {
+                existing.label = contact.label;
+                existing.last_seen_at = contact.last_seen_at;
+                // added_at + blocked preserved (Inv 1) — identical rule to the in-memory book.
+            } else {
+                g.insert(contact.id, contact);
+            }
+        });
+    }
+    fn get(&self, id: &ContactId) -> Option<Contact> {
+        self.lock().get(id).cloned()
+    }
+    fn is_active_contact(&self, id: &ContactId) -> bool {
+        self.lock().get(id).is_some_and(|c| !c.blocked)
+    }
+    fn list(&self) -> Vec<Contact> {
+        self.lock().values().cloned().collect()
+    }
+    fn touch(&self, id: &ContactId, now: UnixMillis) {
+        self.mutate(|g| {
+            if let Some(c) = g.get_mut(id) {
+                c.last_seen_at = now;
+            }
+        });
+    }
+    fn block(&self, id: &ContactId) {
+        self.mutate(|g| {
+            if let Some(c) = g.get_mut(id) {
+                c.blocked = true;
+            }
+        });
+    }
+    fn unblock(&self, id: &ContactId) {
+        self.mutate(|g| {
+            if let Some(c) = g.get_mut(id) {
+                c.blocked = false;
+            }
+        });
+    }
+    fn remove(&self, id: &ContactId) {
+        self.mutate(|g| {
+            g.remove(id);
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -787,5 +982,91 @@ mod tests {
             contact_code(&ContactId::from_bytes(bytes)),
             pairing_code(&ControllerId::from_bytes(bytes))
         );
+    }
+
+    // ─── Durable FileContactBook (ADR-092) ───────────────────────────────────────────────────────
+
+    #[test]
+    fn file_book_missing_file_is_empty_then_persists_and_reloads() {
+        let path = tmp_path("contacts-roundtrip");
+        let _ = std::fs::remove_file(&path);
+        {
+            let book = FileContactBook::open(&path).unwrap();
+            assert!(book.list().is_empty(), "missing file ⇒ empty book");
+            book.upsert(contact(1, "Alice", 100));
+            book.upsert(contact(2, "Bob's PC\u{1f5a5}", 200)); // non-ASCII label survives UTF-8 round-trip
+        }
+        // Reopen from disk — both contacts and all fields survive a restart.
+        let book = FileContactBook::open(&path).unwrap();
+        let mut labels: Vec<String> = book.list().into_iter().map(|c| c.label).collect();
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec!["Alice".to_string(), "Bob's PC\u{1f5a5}".to_string()]
+        );
+        let a = book
+            .get(&ContactId::from_bytes([1u8; PUBLIC_KEY_LEN]))
+            .unwrap();
+        assert_eq!((a.added_at, a.last_seen_at, a.blocked), (100, 100, false));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_book_block_survives_a_reopen() {
+        let path = tmp_path("contacts-block");
+        let _ = std::fs::remove_file(&path);
+        let id = ContactId::from_bytes([7u8; PUBLIC_KEY_LEN]);
+        {
+            let book = FileContactBook::open(&path).unwrap();
+            book.upsert(contact(7, "Mallory", 1));
+            book.block(&id);
+        }
+        let book = FileContactBook::open(&path).unwrap();
+        assert!(
+            book.get(&id).unwrap().blocked,
+            "block persisted across restart"
+        );
+        assert!(
+            !book.is_active_contact(&id),
+            "blocked ⇒ still refused after reload"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_book_rejects_a_corrupt_file_rather_than_silently_emptying() {
+        let path = tmp_path("contacts-corrupt");
+        std::fs::write(&path, b"not a contacts snapshot").unwrap();
+        assert!(
+            FileContactBook::open(&path).is_err(),
+            "a corrupt file is an error, never a silent empty book"
+        );
+        // A truncated-but-valid-magic file (header only, dangling record) is also rejected.
+        std::fs::write(&path, b"RCB1\x01\x02\x03").unwrap();
+        assert!(FileContactBook::open(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn book_encode_decode_round_trips_and_bounds_label() {
+        let mut map = HashMap::new();
+        let id = ContactId::from_bytes([9u8; PUBLIC_KEY_LEN]);
+        map.insert(
+            id,
+            Contact {
+                id,
+                label: "x".repeat(MAX_CONTACT_LABEL + 50), // over-long → truncated on encode
+                added_at: 5,
+                last_seen_at: 6,
+                blocked: true,
+            },
+        );
+        let decoded = decode_book(&encode_book(&map)).unwrap();
+        let c = decoded.get(&id).unwrap();
+        assert!(
+            c.label.len() <= MAX_CONTACT_LABEL,
+            "label bounded on persist"
+        );
+        assert!(c.blocked);
     }
 }
