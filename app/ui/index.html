@@ -130,6 +130,65 @@
       <div id="conn-stats" hidden></div>
     </section>
 
+    <!-- ── In-session chat + clipboard (shown only while a session is live, both roles) ─────────── -->
+    <section id="chat-panel" class="chat-collapsed" hidden aria-label="Session chat">
+      <header id="chat-head">
+        <button id="chat-toggle" type="button" aria-expanded="false" aria-controls="chat-body"
+          title="Show or hide session chat">
+          <span class="chat-dot" aria-hidden="true"></span>
+          <span class="chat-title">Chat</span>
+          <span id="chat-unread" class="chat-unread" hidden aria-hidden="true">0</span>
+          <span class="chat-caret" aria-hidden="true">▾</span>
+        </button>
+      </header>
+      <div id="chat-body">
+        <div class="chat-body-inner">
+          <div id="chat-scroll">
+            <div id="chat-log" role="log" aria-live="polite" aria-relevant="additions"
+              aria-label="Chat messages">
+              <p id="chat-empty" class="chat-empty">No messages yet — say hi 👋</p>
+            </div>
+            <button id="chat-jump" type="button" hidden>New messages ↓</button>
+          </div>
+
+          <!-- Auto-dismissing notice (clipboard sent / received). aria-live announces it. -->
+          <div id="chat-notice" class="chat-notice" hidden role="status" aria-live="polite">
+            <span id="chat-notice-text" class="chat-notice-text"></span>
+            <button id="chat-notice-dismiss" class="chat-notice-dismiss" type="button"
+              title="Dismiss" aria-label="Dismiss notice">×</button>
+          </div>
+
+          <!-- Inline fallback shown only if navigator.clipboard read is blocked. -->
+          <div id="chat-paste" hidden>
+            <p>Clipboard access was blocked. Paste your text here, then Send.</p>
+            <label for="chat-paste-input" class="sr-only">Paste clipboard text to send</label>
+            <textarea id="chat-paste-input" maxlength="786432" spellcheck="false"
+              placeholder="Paste here (⌘V / Ctrl+V)…"></textarea>
+            <div class="chat-paste-actions">
+              <button id="chat-paste-cancel" type="button">Cancel</button>
+              <button id="chat-paste-send" type="button" class="primary">Send clipboard</button>
+            </div>
+          </div>
+
+          <form id="chat-form" autocomplete="off">
+            <label for="chat-input" class="sr-only">Type a chat message</label>
+            <textarea id="chat-input" rows="1" placeholder="Message…  (Enter to send)"
+              maxlength="4096" autocomplete="off" spellcheck="false" disabled></textarea>
+            <button id="chat-send" type="submit" title="Send message" disabled>Send</button>
+            <button id="chat-clipboard" type="button"
+              title="Send your clipboard text to the other side" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="8" y="3" width="8" height="4" rx="1" />
+                <path d="M9 5H6a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-3" />
+              </svg>
+              <span>Send clipboard</span>
+            </button>
+          </form>
+        </div>
+      </div>
+    </section>
+
     <script type="module" src="main.js"></script>
   </body>
 </html>

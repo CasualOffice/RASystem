@@ -466,3 +466,375 @@ body {
 #allow:hover {
   background: #367a3d;
 }
+
+/* ── In-session chat + clipboard ───────────────────────────────────────────────────────────────── */
+/* Visually-hidden label helper (keeps inputs labeled for screen readers without clutter). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* A small, collapsible corner panel so it never covers the video or the stop control. Reuses the
+   app's dark palette, radii and shadow vocabulary (cf. #tools / .consent-card). */
+#chat-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  width: min(320px, calc(100vw - 24px));
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  border: 1px solid #2a2a34;
+  background: rgba(20, 20, 26, 0.96);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55);
+  z-index: 30;
+  overflow: hidden;
+  /* Enter/exit: slide up + fade, matching the app's 0.12s ease feel but a touch longer for a panel. */
+  animation: chat-panel-in 0.18s ease both;
+}
+@keyframes chat-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+#chat-head {
+  display: flex;
+}
+#chat-toggle {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border: none;
+  background: #1b1b22;
+  color: #e8e8ee;
+  font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+  text-align: left;
+}
+#chat-toggle:hover {
+  background: #23232c;
+}
+#chat-toggle .chat-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #34c759;
+  box-shadow: 0 0 6px rgba(52, 199, 89, 0.7);
+  flex: 0 0 auto;
+}
+#chat-toggle .chat-title {
+  flex: 1 1 auto;
+}
+.chat-unread {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #0a84ff;
+  color: #fff;
+  font: 600 11px/18px ui-sans-serif, system-ui, sans-serif;
+  text-align: center;
+}
+.chat-caret {
+  color: #9a9aa8;
+  transition: transform 0.15s ease;
+}
+#chat-panel.chat-collapsed .chat-caret {
+  transform: rotate(-90deg);
+}
+/* Collapse: the body clips smoothly. grid-template-rows 1fr→0 animates height without a magic px. */
+#chat-body {
+  display: grid;
+  grid-template-rows: 1fr;
+  border-top: 1px solid #2a2a34;
+  transition: grid-template-rows 0.17s ease;
+}
+#chat-panel.chat-collapsed #chat-body {
+  grid-template-rows: 0fr;
+  border-top-color: transparent;
+}
+#chat-body > .chat-body-inner {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+#chat-scroll {
+  position: relative;
+}
+#chat-log {
+  height: 208px;
+  max-height: 40vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  scroll-behavior: smooth;
+}
+.chat-empty {
+  margin: auto;
+  color: #7a7a88;
+  font-size: 12.5px;
+  text-align: center;
+  padding: 0 12px;
+}
+.chat-msg {
+  max-width: 82%;
+  padding: 6px 10px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  animation: chat-msg-in 0.16s ease both;
+}
+@keyframes chat-msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.chat-msg.me {
+  align-self: flex-end;
+  background: #2f6b34;
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.chat-msg.them {
+  align-self: flex-start;
+  background: #23232c;
+  color: #e8e8ee;
+  border-bottom-left-radius: 4px;
+}
+.chat-msg .chat-time {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.2;
+  opacity: 0.6;
+  text-align: right;
+}
+/* "new messages ↓" pill — appears only when the user has scrolled up and a message lands. */
+#chat-jump {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid #3a8341;
+  background: #2f6b34;
+  color: #fff;
+  font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
+  animation: chat-msg-in 0.16s ease both;
+}
+#chat-jump:hover {
+  background: #367a3d;
+}
+.chat-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 10px 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(10, 132, 255, 0.16);
+  border: 1px solid rgba(10, 132, 255, 0.4);
+  color: #b9d5ff;
+  font-size: 12px;
+  animation: chat-msg-in 0.16s ease both;
+  transition: opacity 0.3s ease;
+}
+.chat-notice.ok {
+  background: rgba(52, 199, 89, 0.16);
+  border-color: rgba(52, 199, 89, 0.45);
+  color: #b6e9c5;
+}
+.chat-notice.fading {
+  opacity: 0;
+}
+.chat-notice .chat-notice-text {
+  flex: 1 1 auto;
+}
+.chat-notice-dismiss {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: 14px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.chat-notice-dismiss:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+/* Inline fallback when navigator.clipboard is blocked: paste-here textarea. */
+#chat-paste {
+  margin: 0 10px 8px;
+  padding: 8px;
+  border-radius: 8px;
+  background: #101017;
+  border: 1px solid #33333f;
+}
+#chat-paste p {
+  color: #b9b9c6;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+#chat-paste textarea {
+  width: 100%;
+  height: 54px;
+  resize: none;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #33333f;
+  background: #0b0b0e;
+  color: #e8e8ee;
+  font: 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+}
+.chat-paste-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.chat-paste-actions button {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid #33333f;
+  background: #23232c;
+  color: #e8e8ee;
+  font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+.chat-paste-actions button:hover {
+  background: #2e2e3a;
+}
+.chat-paste-actions button.primary {
+  background: #2f6b34;
+  border-color: #3a8341;
+  color: #fff;
+}
+.chat-paste-actions button.primary:hover {
+  background: #367a3d;
+}
+#chat-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid #2a2a34;
+}
+#chat-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 32px;
+  max-height: 96px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #33333f;
+  background: #0b0b0e;
+  color: #e8e8ee;
+  font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+  resize: none;
+  overflow-y: auto;
+}
+#chat-input::placeholder {
+  color: #6a6a78;
+}
+#chat-send {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 6px;
+  border: 1px solid #3a8341;
+  background: #2f6b34;
+  color: #fff;
+  font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+#chat-send:hover:not(:disabled) {
+  background: #367a3d;
+}
+#chat-send:active:not(:disabled) {
+  background: #285d2c;
+}
+#chat-clipboard {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  border-radius: 6px;
+  border: 1px solid #33333f;
+  background: #23232c;
+  color: #e8e8ee;
+  font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+#chat-clipboard:hover:not(:disabled) {
+  background: #2e2e3a;
+}
+#chat-clipboard:active:not(:disabled) {
+  background: #33333f;
+}
+#chat-clipboard svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+/* Disabled state for all chat controls when no session is live. */
+#chat-input:disabled,
+#chat-send:disabled,
+#chat-clipboard:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* Respect reduced-motion — disable panel/message/notice animations and smooth scroll. */
+@media (prefers-reduced-motion: reduce) {
+  #chat-panel,
+  .chat-msg,
+  #chat-jump,
+  .chat-notice {
+    animation: none;
+  }
+  #chat-body {
+    transition: none;
+  }
+  .chat-caret {
+    transition: none;
+  }
+  #chat-log {
+    scroll-behavior: auto;
+  }
+}

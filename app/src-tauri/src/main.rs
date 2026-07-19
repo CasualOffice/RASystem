@@ -80,6 +80,16 @@ async fn drain_viewer_lifecycle(mut events: LifecycleStream, app: tauri::AppHand
                     },
                 );
             }
+            // Chat received from the host (ADR-082). `.reveal()` here is the sanctioned display
+            // boundary — the only place the redacted text is read; it is never logged (Inv 8).
+            LifecycleEvent::ChatMessage { text } => {
+                let _ = app.emit("chat-message", text.reveal().to_string());
+            }
+            // The host pushed clipboard and we set it on this viewer's OS clipboard (host→controller,
+            // ADR-076). Content-free: emit only the byte count (Inv 8).
+            LifecycleEvent::ClipboardApplied { len } => {
+                let _ = app.emit("clipboard-received", len);
+            }
             LifecycleEvent::SessionEnded { .. }
             | LifecycleEvent::Disconnected { .. }
             | LifecycleEvent::Revoked { .. } => {
@@ -103,6 +113,21 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+/// The Phase-3 default policy **plus the two clipboard capabilities** (ADR-076/079).
+/// `phase3_default_policy()` *withholds* `clipboard.read`/`clipboard.write` (default OFF), which would
+/// make every clipboard push refuse fail-closed. Adding them here only **raises the ceiling** so
+/// clipboard *can* flow: the grant is still `requested ∩ policy ∩ ceiling`, the local Allow/Deny
+/// consent gate still runs, and the host-side per-message capability gate (Inv 15) still enforces every
+/// message. This merely lets consent *be able* to grant clipboard — nothing else about authorization
+/// changes. Used on both ends: the viewer requests it (so its `requested` set includes clipboard) and
+/// the host issues against it (so its ceiling admits clipboard).
+fn capabilities_with_clipboard() -> ras_core::policy::CapabilitySet {
+    let mut policy = ras_core::policy::phase3_default_policy();
+    policy.insert(ras_core::policy::CLIPBOARD_READ.to_string());
+    policy.insert(ras_core::policy::CLIPBOARD_WRITE.to_string());
+    policy
 }
 
 // ─── Connect role (viewer) ─────────────────────────────────────────────────────────────────────
@@ -160,7 +185,6 @@ async fn connect_to_host(
 ) -> Result<(), String> {
     use ras_core::grant::{fresh_id, AccessRequest, MAX_REQUEST_TTL_MS};
     use ras_core::identity::SoftwareKeyStore;
-    use ras_core::policy::phase3_default_policy;
     use ras_core::transport::EndpointAddr;
     use ras_core::{ControllerSessionConfig, IrohSessionTransport};
     use ras_protocol::{AccessOutcome, BootstrapMsg, PROTOCOL_VERSION};
@@ -198,10 +222,11 @@ async fn connect_to_host(
         host_id,
         "Casual RAS viewer".to_string(),
         my_endpoint_id,
-        // Request the Phase-3 capability set so the grant's ceiling can include OS input. This only
-        // sets what the controller *may later ask for*; actually injecting still needs a separate
-        // control-lease consent (Invariant 1) — the grant is the coarse gate, the lease the fine one.
-        phase3_default_policy(),
+        // Request the Phase-3 capability set (plus clipboard) so the grant's ceiling can include OS
+        // input and clipboard. This only sets what the controller *may later ask for*; actually
+        // injecting/clipboarding still needs the host's ceiling ∩ policy + consent (Invariant 1) — the
+        // grant is the coarse gate, the lease/per-message gate the fine one.
+        capabilities_with_clipboard(),
         "remote support".to_string(),
         now,
         now + MAX_REQUEST_TTL_MS,
@@ -237,6 +262,14 @@ async fn connect_to_host(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Attach the OS-clipboard write backend so a clipboard the host pushes (host→controller, gated
+    // host-side on `clipboard.read`, Inv 15) is **set** on this viewer's OS clipboard (never pasted —
+    // no-auto-paste rule, ADR-076). Best-effort: if the platform clipboard can't be opened we just skip
+    // it — a failed clipboard must never fail the connect.
+    if let Ok(sink) = ras_clipboard::ArboardClipboardSink::new() {
+        controller.attach_clipboard_sink(Arc::new(sink));
+    }
+
     // Drain the lifecycle stream so reconnection (Suspended/Resumed) surfaces in the viewer UI (#22)
     // instead of being parked. The task ends when the stream closes (the session is dropped below on a
     // later disconnect). Emit an initial "connected" so the UI clears any stale banner.
@@ -266,6 +299,52 @@ async fn send_pointer(
         c.send_pointer(x, y, visible);
     }
     Ok(())
+}
+
+/// Send an in-session **chat** message over whichever session is currently active (ADR-082). Chat is
+/// base session comms — **no capability** (a live session already required consent, so gating would be
+/// security-theater). Prefers a live viewer (Connect) session; falls back to an active share (Share)
+/// session. The text is a secret (Inv 8): it is passed straight to `ras-core` (which redacts it on the
+/// wire) and is **never** logged/formatted here. Err if no session is active.
+#[tauri::command]
+async fn send_chat(state: State<'_, AppState>, text: String) -> Result<(), String> {
+    // Viewer (Connect) session takes precedence when present.
+    let controller = lock(&state.session).as_ref().map(|s| s.controller.clone());
+    if let Some(c) = controller {
+        c.send_chat(text);
+        return Ok(());
+    }
+    // Otherwise, if a share (Share/host) session is live, send from the host side.
+    let host = lock(&state.share.session)
+        .as_ref()
+        .and_then(|s| s.host.clone());
+    if let Some(h) = host {
+        h.send_chat(text);
+        return Ok(());
+    }
+    Err("no active session".into())
+}
+
+/// Push `text` to the peer's clipboard over the active session (ADR-076). Over a viewer (Connect)
+/// session this is a controller→host push (gated host-side on `clipboard.write`); over a share (Share)
+/// session it is a host→controller push (gated on `clipboard.read`). The receiver **sets** its OS
+/// clipboard, never auto-pastes. The text is a secret (Inv 8): handed straight to `ras-core` (redacted
+/// on the wire) and never logged/formatted here. Err if no session is active.
+#[tauri::command]
+async fn send_clipboard(state: State<'_, AppState>, text: String) -> Result<(), String> {
+    let controller = lock(&state.session).as_ref().map(|s| s.controller.clone());
+    if let Some(c) = controller {
+        c.send_clipboard_text(text);
+        return Ok(());
+    }
+    let host = lock(&state.share.session)
+        .as_ref()
+        .and_then(|s| s.host.clone());
+    if let Some(h) = host {
+        h.send_clipboard_text(text);
+        return Ok(());
+    }
+    Err("no active session".into())
 }
 
 /// End the live viewer session (idempotent).
@@ -439,9 +518,37 @@ struct ShareState {
     consent: Arc<LocalConsent>,
 }
 
-/// A running share: the `watch` sender used to tear the whole share down.
+/// A running share: the `watch` sender used to tear the whole share down, plus (once a viewer is
+/// actually connected) a handle to the live host session for out-of-band chat/clipboard sends.
 struct ShareSession {
     stop: tokio::sync::watch::Sender<bool>,
+    /// The live host session while a viewer is connected (Share role), erased behind [`ShareControl`]
+    /// so `AppState` needn't be generic over the per-platform capture/encoder backends. `None` before
+    /// a viewer connects and after they leave (`serve_one` sets/clears it). Only exposes the two
+    /// content-carrying-but-redacting send APIs — never the whole session.
+    host: Option<Arc<dyn ShareControl>>,
+}
+
+/// The subset of the Share-role host session the app needs out-of-band: send chat / clipboard to the
+/// connected viewer. Object-safe so a `HostSession<C, E>` of any backend pair can be stored in the
+/// non-generic [`AppState`]. Both take an owned `String` the session redacts on the wire (Inv 8) — the
+/// text is never logged here.
+trait ShareControl: Send + Sync {
+    fn send_chat(&self, text: String);
+    fn send_clipboard_text(&self, text: String);
+}
+
+impl<C, E> ShareControl for ras_core::HostSession<C, E>
+where
+    C: ras_media::ScreenCaptureBackend + Send + 'static,
+    E: ras_media::VideoEncoderBackend + Send + 'static,
+{
+    fn send_chat(&self, text: String) {
+        ras_core::HostSession::send_chat(self, text);
+    }
+    fn send_clipboard_text(&self, text: String) {
+        ras_core::HostSession::send_clipboard_text(self, text);
+    }
 }
 
 /// The local-consent gate. Implements `ras-core`'s `GrantValidator`: when a viewer requests access it
@@ -584,7 +691,10 @@ async fn start_sharing(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
         return Ok(());
     }
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    *lock(&state.share.session) = Some(ShareSession { stop: stop_tx });
+    *lock(&state.share.session) = Some(ShareSession {
+        stop: stop_tx,
+        host: None,
+    });
     let consent = state.share.consent.clone();
     tauri::async_runtime::spawn(async move {
         run_share(app, stop_rx, consent).await;
@@ -658,7 +768,6 @@ async fn run_share(
     // trusted-controller registry is a later step.
     use ras_core::grant::{LocalHostGrantIssuer, NonceCache, MAX_REQUEST_TTL_MS};
     use ras_core::identity::{KeyStore, SoftwareKeyStore};
-    use ras_core::policy::phase3_default_policy;
     let host_ks = match SoftwareKeyStore::generate() {
         Ok(k) => k,
         Err(_) => {
@@ -669,7 +778,9 @@ async fn run_share(
     };
     let host_id = host_ks.public_key();
     let host_endpoint_id = endpoint.id().0;
-    let issuer = LocalHostGrantIssuer::new(host_ks, phase3_default_policy(), 1);
+    // Grant ceiling includes clipboard so consent CAN grant it (see `capabilities_with_clipboard`); OS
+    // input, clipboard, etc. are still each subject to the local consent + per-message gate (Inv 15).
+    let issuer = LocalHostGrantIssuer::new(host_ks, capabilities_with_clipboard(), 1);
     // Shared replay cache for AccessRequest nonces across bootstrap connections (the accept loop
     // handles one connection at a time, so a `&mut` borrow suffices).
     let mut nonces = NonceCache::new(MAX_REQUEST_TTL_MS, 4096);
@@ -765,7 +876,6 @@ async fn handle_bootstrap(
         fresh_id, validate_access_request, AccessRequest, SessionGrantIssuer, SessionParams,
         MAX_REQUEST_TTL_MS,
     };
-    use ras_core::policy::phase3_default_policy;
     use ras_protocol::{AccessOutcome, BootstrapMsg, ErrorCode};
 
     // The controller's transport-authenticated endpoint — the identity the grant is bound to.
@@ -830,7 +940,7 @@ async fn handle_bootstrap(
         expires_at: now + MAX_REQUEST_TTL_MS,
     };
     match issuer
-        .issue(&request, &phase3_default_policy(), &params)
+        .issue(&request, &capabilities_with_clipboard(), &params)
         .await
     {
         Ok(grant) => {
@@ -904,6 +1014,10 @@ async fn serve_one(
         Ok(sink) => host.with_clipboard_sink(Arc::new(sink)),
         Err(_) => host,
     };
+    // Share the built host session behind `Arc` so the `send_chat`/`send_clipboard` commands can reach
+    // it out-of-band (via `ShareControl` in `ShareState`) while this loop also drives it. All the send
+    // APIs take `&self`, so the `Arc` clone and the local `host` coexist safely.
+    let host = Arc::new(host);
 
     // `start()` runs the handshake, then blocks in the consent gate until Allow/Deny. Deny → Err.
     let mut events = match host.start().await {
@@ -916,6 +1030,19 @@ async fn serve_one(
             return;
         }
     };
+
+    // Approved: register the live host handle so out-of-band chat/clipboard sends can find it. Cleared
+    // when this loop exits (below). `host` is a concrete `HostSession<C, E>`; store it erased behind
+    // `ShareControl` so `ShareState` stays non-generic.
+    {
+        let state = app.state::<AppState>();
+        let mut guard = lock(&state.share.session);
+        if let Some(s) = guard.as_mut() {
+            let erased: Arc<dyn ShareControl> = host.clone();
+            s.host = Some(erased);
+        }
+        drop(guard);
+    }
 
     // Approved: session is Active. Show the indicator + the pointer overlay.
     let _ = app.emit("share-status", "Viewer connected — REMOTE VIEWING ACTIVE.");
@@ -979,6 +1106,16 @@ async fn serve_one(
                     let _ = app.emit("share-control", false);
                     let _ = app.emit("share-status", "Viewer connected — REMOTE VIEWING ACTIVE.");
                 }
+                // Chat received from the viewer (ADR-082). `.reveal()` here is the sanctioned display
+                // boundary — the only place the redacted text is read; it is never logged (Inv 8).
+                Some(LifecycleEvent::ChatMessage { text }) => {
+                    let _ = app.emit("chat-message", text.reveal().to_string());
+                }
+                // The viewer pushed clipboard and we set it on the host's OS clipboard (controller→host,
+                // ADR-076). Content-free: emit only the byte count (Inv 8).
+                Some(LifecycleEvent::ClipboardApplied { len }) => {
+                    let _ = app.emit("clipboard-received", len);
+                }
                 Some(LifecycleEvent::SessionEnded { .. })
                 | Some(LifecycleEvent::Revoked { .. })
                 | Some(LifecycleEvent::Disconnected { .. })
@@ -986,6 +1123,17 @@ async fn serve_one(
                 _ => {}
             },
         }
+    }
+
+    // The viewer is gone: clear the out-of-band host handle so chat/clipboard commands stop finding a
+    // dead session (the share task may still loop for the next viewer with a fresh `host`).
+    {
+        let state = app.state::<AppState>();
+        let mut guard = lock(&state.share.session);
+        if let Some(s) = guard.as_mut() {
+            s.host = None;
+        }
+        drop(guard);
     }
 
     if let Some(ov) = app.get_webview_window("overlay") {
@@ -1086,6 +1234,8 @@ fn main() {
             connect_to_host,
             disconnect,
             send_pointer,
+            send_chat,
+            send_clipboard,
             request_keyframe,
             request_control,
             is_controlling,

@@ -266,6 +266,7 @@ function setLive(isLive) {
   controlBtn.disabled = !isLive;
   controlBtn.textContent = "Take control";
   if (macMod) macMod.hidden = !isLive;
+  chat.setSessionLive(isLive); // chat/clipboard are usable only while the viewer session is live
 }
 
 async function startSession(ticket) {
@@ -366,9 +367,14 @@ listen("share-viewer", (e) => {
   const live = !!e.payload;
   shareIndicator.textContent = live ? "● REMOTE VIEWING ACTIVE" : "● IDLE";
   shareIndicator.className = live ? "indicator live" : "indicator idle";
+  // A connected viewer means a live session on the host side — chat/clipboard become usable.
+  chat.setSessionLive(live);
 });
 listen("share-active", (e) => {
-  if (!e.payload) shareIndicator.className = "indicator idle";
+  if (!e.payload) {
+    shareIndicator.className = "indicator idle";
+    chat.setSessionLive(false); // sharing torn down entirely — no session
+  }
 });
 
 // Local consent (Invariant 1: the local user authorizes each viewer).
@@ -736,4 +742,277 @@ const annotations = (function () {
       render();
     },
   };
+})();
+
+// ── In-session chat + clipboard sync ─────────────────────────────────────────────────────────────
+// A compact, collapsible corner panel usable on BOTH roles while a session is live. It talks to the
+// Rust side through a fixed contract:
+//   invoke("send_chat", { text })          — send a chat line on the active session
+//   invoke("send_clipboard", { text })     — push local clipboard text to the peer
+//   listen("chat-message", payload:String) — an incoming chat line from the remote peer
+//   listen("clipboard-received", payload:Number) — peer sent us clipboard; payload is a byte count
+// Chat/clipboard CONTENT is only ever placed in the DOM — never console.log'd (Invariant 8). The
+// panel is gated on the session being live (`setSessionLive`), which each role drives from its own
+// signals: the viewer's `setLive(...)`, the host's `share-viewer`/`share-active` events.
+const chat = (function () {
+  const panel = document.getElementById("chat-panel");
+  const toggle = document.getElementById("chat-toggle");
+  const unread = document.getElementById("chat-unread");
+  const log = document.getElementById("chat-log");
+  const jump = document.getElementById("chat-jump");
+  const notice = document.getElementById("chat-notice");
+  const noticeText = document.getElementById("chat-notice-text");
+  const noticeDismiss = document.getElementById("chat-notice-dismiss");
+  const form = document.getElementById("chat-form");
+  const input = document.getElementById("chat-input");
+  const sendBtn = document.getElementById("chat-send");
+  const clipBtn = document.getElementById("chat-clipboard");
+  const paste = document.getElementById("chat-paste");
+  const pasteInput = document.getElementById("chat-paste-input");
+  const pasteSend = document.getElementById("chat-paste-send");
+  const pasteCancel = document.getElementById("chat-paste-cancel");
+
+  // Defensive: if the markup is absent, expose a no-op so callers never throw.
+  if (!panel) {
+    return { setSessionLive() {} };
+  }
+
+  let live = false; // a session is active on this role
+  let open = false; // panel expanded (remembered within a session)
+  let unreadCount = 0; // messages arrived while collapsed
+  let noticeTimer = null;
+  const NO_SESSION_HINT = "Connect a session to chat";
+  const SEND_HINT = "Send message";
+  const CLIP_HINT = "Send your clipboard text to the other side";
+
+  // ── Panel open/close ──────────────────────────────────────────────────────────────
+  function setOpen(next) {
+    open = next;
+    panel.classList.toggle("chat-collapsed", !open);
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      clearUnread();
+      scrollToBottom(true);
+      // Focus the input when opening via keyboard/click, but only if a session is live.
+      if (live) setTimeout(() => input.focus(), 60);
+    }
+  }
+  toggle.addEventListener("click", () => setOpen(!open));
+
+  // ── Unread badge (only while collapsed) ───────────────────────────────────────────
+  function bumpUnread() {
+    unreadCount++;
+    unread.textContent = String(unreadCount > 99 ? "99+" : unreadCount);
+    unread.hidden = false;
+  }
+  function clearUnread() {
+    unreadCount = 0;
+    unread.hidden = true;
+  }
+
+  // ── Auto-scroll with a "new messages" pill when the user has scrolled up ───────────
+  function atBottom() {
+    return log.scrollHeight - log.scrollTop - log.clientHeight < 24;
+  }
+  function scrollToBottom(force) {
+    if (force || atBottom()) {
+      log.scrollTop = log.scrollHeight;
+      jump.hidden = true;
+    }
+  }
+  log.addEventListener("scroll", () => {
+    if (atBottom()) jump.hidden = true;
+  });
+  jump.addEventListener("click", () => {
+    log.scrollTop = log.scrollHeight;
+    jump.hidden = true;
+  });
+
+  function timeLabel() {
+    const d = new Date();
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  // Append a message bubble. `text` is placed via textContent — never interpolated into HTML and
+  // never logged (Inv 8). `mine` sticks the view to the bottom; a received message only auto-scrolls
+  // if the reader was already at the bottom, otherwise it offers the "new messages" pill.
+  function appendMessage(text, mine) {
+    const emptyNode = document.getElementById("chat-empty");
+    if (emptyNode) emptyNode.remove();
+    const stick = atBottom();
+    const bubble = document.createElement("div");
+    bubble.className = "chat-msg " + (mine ? "me" : "them");
+    const txt = document.createElement("span");
+    txt.className = "chat-text";
+    txt.textContent = text;
+    bubble.appendChild(txt);
+    const t = document.createElement("span");
+    t.className = "chat-time";
+    t.textContent = timeLabel();
+    bubble.appendChild(t);
+    log.appendChild(bubble);
+
+    if (mine || stick) {
+      scrollToBottom(true);
+    } else {
+      jump.hidden = false; // reader scrolled up — offer a pill instead of yanking them down
+    }
+    if (!mine && !open) bumpUnread();
+  }
+
+  // ── Notice (clipboard sent / received), auto-dismiss after ~3s ─────────────────────
+  function showNotice(text, kind) {
+    noticeText.textContent = text;
+    notice.classList.remove("fading");
+    notice.classList.toggle("ok", kind === "ok");
+    notice.hidden = false;
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      notice.classList.add("fading");
+      noticeTimer = setTimeout(() => {
+        notice.hidden = true;
+        notice.classList.remove("fading");
+      }, 320);
+    }, 3000);
+  }
+  function hideNotice() {
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = null;
+    notice.hidden = true;
+    notice.classList.remove("fading");
+  }
+  noticeDismiss.addEventListener("click", hideNotice);
+
+  // ── Send chat ──────────────────────────────────────────────────────────────────────
+  async function sendChat() {
+    if (!live) return;
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    autosize();
+    input.focus(); // keep focus after send
+    appendMessage(text, true);
+    try {
+      await invoke("send_chat", { text });
+    } catch (_) {
+      // No active session (or a transient send error) — surface gracefully in the log, not console.
+      showNotice("Couldn't send — no active session.", "");
+    }
+  }
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    sendChat();
+  });
+  // Enter sends, Shift+Enter inserts a newline. Trimmed empties are ignored by sendChat().
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      sendChat();
+    }
+  });
+  // Auto-grow the single-row textarea up to its max-height.
+  function autosize() {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 96) + "px";
+  }
+  input.addEventListener("input", autosize);
+
+  // ── Clipboard send ───────────────────────────────────────────────────────────────
+  async function pushClipboard(text) {
+    if (!live || !text) return;
+    try {
+      await invoke("send_clipboard", { text });
+      showNotice("Clipboard sent · " + text.length + " chars", "ok");
+    } catch (_) {
+      showNotice("Couldn't send clipboard — no active session.", "");
+    }
+  }
+  clipBtn.addEventListener("click", async () => {
+    if (!live) return;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) {
+        showNotice("Clipboard is empty.", "");
+        return;
+      }
+      pushClipboard(text);
+    } catch (_) {
+      // Permission denied / not available in this webview — offer the inline paste fallback.
+      paste.hidden = false;
+      pasteInput.value = "";
+      pasteInput.focus();
+    }
+  });
+  pasteSend.addEventListener("click", () => {
+    const text = pasteInput.value;
+    paste.hidden = true;
+    if (text.trim()) pushClipboard(text);
+  });
+  pasteCancel.addEventListener("click", () => {
+    paste.hidden = true;
+    pasteInput.value = "";
+  });
+
+  // ── Enable/disable the controls for the current session state ──────────────────────
+  function setEnabled(on) {
+    input.disabled = !on;
+    sendBtn.disabled = !on;
+    clipBtn.disabled = !on;
+    input.title = on ? "" : NO_SESSION_HINT;
+    sendBtn.title = on ? SEND_HINT : NO_SESSION_HINT;
+    clipBtn.title = on ? CLIP_HINT : NO_SESSION_HINT;
+  }
+
+  // ── Session lifecycle ──────────────────────────────────────────────────────────────
+  // Called by each role when its session goes live / ends. Ending clears the log (Inv 8 hygiene —
+  // no stale chat lingering after a session) and resets the panel to collapsed.
+  function setSessionLive(isLive) {
+    isLive = !!isLive;
+    if (isLive === live) {
+      setEnabled(isLive);
+      return;
+    }
+    live = isLive;
+    panel.hidden = !isLive;
+    setEnabled(isLive);
+    if (isLive) {
+      setOpen(false); // start collapsed & unobtrusive; the user expands when they want to chat
+    } else {
+      // Session ended: wipe content and transient UI (no stale chat lingering — Inv 8 hygiene).
+      resetLog();
+      input.value = "";
+      autosize();
+      clearUnread();
+      hideNotice();
+      paste.hidden = true;
+      pasteInput.value = "";
+      jump.hidden = true;
+      open = false;
+      panel.classList.add("chat-collapsed");
+      toggle.setAttribute("aria-expanded", "false");
+    }
+  }
+
+  // Clear the message log back to its empty state.
+  function resetLog() {
+    log.textContent = "";
+    const p = document.createElement("p");
+    p.id = "chat-empty";
+    p.className = "chat-empty";
+    p.textContent = "No messages yet — say hi 👋";
+    log.appendChild(p);
+  }
+
+  // ── Incoming events from Rust ──────────────────────────────────────────────────────
+  listen("chat-message", (e) => {
+    const text = typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
+    if (!text) return;
+    appendMessage(text, false);
+  });
+  listen("clipboard-received", (e) => {
+    const n = Number(e.payload) || 0;
+    showNotice("Received clipboard · " + n + " bytes", "ok");
+  });
+
+  return { setSessionLive };
 })();
