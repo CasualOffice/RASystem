@@ -1417,6 +1417,18 @@ fn stop_sharing(state: State<'_, AppState>) {
     }
 }
 
+/// Bring the main Casual RAS window back from the compact sharing strip (issue #5). Un-minimizes +
+/// shows + focuses it so the host can reach chat / files / the full UI mid-share. It re-appears in the
+/// shared screen while up (the host chose to open it); the strip's Stop stays available regardless.
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 /// Begin sharing this screen: bind an iroh endpoint, publish a ticket, and accept one viewer at a
 /// time behind the local consent gate. Returns immediately; the ticket/status arrive as events.
 /// Supported on macOS (hardware) + Linux/Windows (scap + OpenH264), ADR-063.
@@ -1612,9 +1624,15 @@ async fn run_share(
     if let Some(ov) = app.get_webview_window("overlay") {
         let _ = ov.hide();
     }
-    // Restore normal main-window behavior now that the session is over.
+    // Dismiss the compact sharing strip and restore the main window now that the session is over.
+    if let Some(strip) = app.get_webview_window("control-strip") {
+        let _ = strip.hide();
+    }
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.set_minimizable(true);
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
     }
     let _ = app.emit("share-viewer", false);
     let _ = app.emit("share-active", false);
@@ -1628,7 +1646,7 @@ async fn run_share(
 /// unchanged), never fatal. macOS-only — the capture backend that consumes these is macOS-only.
 #[cfg(target_os = "macos")]
 fn host_excluded_windows(app: &tauri::AppHandle) -> Vec<ras_media::WindowId> {
-    ["overlay", "main"]
+    ["overlay", "main", "control-strip"]
         .iter()
         .filter_map(|label| app.get_webview_window(label))
         .filter_map(|w| w.ns_window().ok())
@@ -1950,12 +1968,17 @@ async fn serve_one(
         // done by the time this is processed.
         let _ = ov.set_ignore_cursor_events(true);
     }
-    // Keep the in-app Stop control reachable while sharing (Invariant 7): the `main` window is its home,
-    // so it must not be minimizable away during an active session. Occlusion is still covered by the
-    // always-on-top overlay indicator badge, and closing the window halts the share (see `stop_active_share`).
+    // Keep the host's own control UI OUT of the shared screen (issue #5): minimize the big main window
+    // and raise a compact always-on-top strip carrying the live indicator + Stop. Invariant 7 holds —
+    // the Stop control stays visible on the strip. Invariant 1 holds too: a mid-session consent prompt
+    // (control-lease / file) calls `alert_user`, which un-minimizes + focuses main so the host can
+    // answer. On Linux the strip is small (scap can't exclude windows, so a big window would otherwise
+    // fill the shared feed); on macOS the strip is also excluded via `host_excluded_windows`.
     if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_minimizable(false);
-        let _ = win.set_focus();
+        let _ = win.minimize();
+    }
+    if let Some(strip) = app.get_webview_window("control-strip") {
+        let _ = strip.show();
     }
 
     // Dedupe key for the InputRejected diagnostic below: a rejected control gate fires per-event (up to
@@ -2253,6 +2276,7 @@ fn main() {
             input_set_lock_state,
             start_sharing,
             stop_sharing,
+            show_main_window,
             respond_consent,
             set_clipboard_allowed,
             set_audio_allowed,

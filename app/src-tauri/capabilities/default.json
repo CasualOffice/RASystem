@@ -1,6 +1,6 @@
 {
   "identifier": "default",
   "description": "Casual RAS unified shell: core defaults for the main window and the (host-role) pointer overlay. App commands (connect_to_host / disconnect / send_pointer / request_keyframe / start_sharing / stop_sharing / respond_consent) are exposed via the invoke handler. The only plugin permission is the signed auto-updater (ADR-078); update checking/installing is driven through app commands, so only `updater:default` is granted.",
-  "windows": ["main", "overlay"],
+  "windows": ["main", "overlay", "control-strip"],
   "permissions": ["core:default", "updater:default", "notification:default", "log:default"]
 }

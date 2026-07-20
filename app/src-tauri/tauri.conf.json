@@ -28,6 +28,19 @@
         "focus": false,
         "skipTaskbar": true,
         "visible": false
+      },
+      {
+        "label": "control-strip",
+        "url": "strip.html",
+        "width": 320,
+        "height": 60,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "shadow": true,
+        "focus": false,
+        "skipTaskbar": true,
+        "visible": false
       }
     ],
     "security": {

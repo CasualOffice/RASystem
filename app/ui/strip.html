@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Casual RAS — sharing</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        font: 600 13px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        user-select: none;
+      }
+      /* A compact always-on-top control while the big window is minimized out of the shared screen
+         (issue #5). Holds the always-visible active indicator + Stop (Invariant 7). */
+      #bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 100%;
+        box-sizing: border-box;
+        padding: 0 12px;
+        background: #1b1d22;
+        color: #fff;
+        border: 1px solid #33363d;
+        border-radius: 10px;
+      }
+      #dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #ff3b30;
+        flex: none;
+        animation: blink 1.4s ease-in-out infinite;
+      }
+      @keyframes blink {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.35;
+        }
+      }
+      #label {
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        letter-spacing: 0.03em;
+      }
+      #stop {
+        flex: none;
+        border: 0;
+        border-radius: 7px;
+        padding: 7px 14px;
+        font: inherit;
+        color: #fff;
+        background: #c9201a;
+        cursor: pointer;
+      }
+      #stop:hover {
+        background: #e02a22;
+      }
+      #show {
+        flex: none;
+        border: 1px solid #4a4d55;
+        border-radius: 7px;
+        padding: 6px 10px;
+        font: inherit;
+        color: #cdd0d6;
+        background: transparent;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <span id="dot"></span>
+      <span id="label">REMOTE VIEWING ACTIVE</span>
+      <button id="show" title="Show the Casual RAS window">Controls</button>
+      <button id="stop">Stop</button>
+    </div>
+    <script type="module" src="strip.js"></script>
+  </body>
+</html>

@@ -942,16 +942,30 @@ shareCopy.addEventListener("click", async () => {
 
 listen("share-ticket", (e) => { shareTicket.value = e.payload; });
 listen("share-status", (e) => { shareStatus.textContent = e.payload; });
+// While a viewer is connected, the main window is minimized out of the shared screen (Rust side) and
+// the compact strip carries Stop. `hostSharing` lets us RE-minimize main after a mid-session consent
+// prompt (which `alert_user` un-minimized so the host could answer) closes — best-effort.
+let hostSharing = false;
+const currentWindow = window.__TAURI__?.window?.getCurrentWindow?.();
+function reminimizeMainIfSharing() {
+  if (hostSharing && currentWindow) currentWindow.minimize().catch(() => {});
+}
 listen("share-viewer", (e) => {
   const live = !!e.payload;
+  hostSharing = live;
   shareIndicator.textContent = live ? "● REMOTE VIEWING ACTIVE" : "● IDLE";
   shareIndicator.className = live ? "indicator live" : "indicator idle";
   // A connected viewer means a live session on the host side — chat/clipboard become usable.
   chat.setSessionLive(live);
   files.setHostLive(live); // host can receive a file while a viewer is connected
 });
+// After a consent prompt (control-lease / file) is answered, slide the main window back out of the
+// shared screen if we're still sharing. Best-effort: no-ops if window control isn't permitted.
+listen("control-consent-closed", reminimizeMainIfSharing);
+listen("file-offer-closed", reminimizeMainIfSharing);
 listen("share-active", (e) => {
   if (!e.payload) {
+    hostSharing = false;
     shareIndicator.className = "indicator idle";
     chat.setSessionLive(false); // sharing torn down entirely — no session
     files.setHostLive(false); // no session — dismiss any file offer/notice
