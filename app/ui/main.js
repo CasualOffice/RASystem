@@ -926,7 +926,10 @@ let sharing = false;
 function startSharing() {
   if (sharing) return;
   sharing = true;
-  shareTicket.value = "";
+  // Do NOT wipe shareTicket here: the always-on boot accept loop (ADR-098) already emitted the ticket
+  // at startup, which the top-level `share-ticket` listener cached into this (hidden) box. start_sharing
+  // no-ops when the machine is already reachable, so wiping would leave the Share view permanently
+  // ticketless — the invite would be un-copyable. The listener refreshes the value live if it changes.
   shareStatus.textContent = "Preparing…";
   invoke("start_sharing").catch((e) => {
     shareStatus.textContent = String(e);
@@ -964,9 +967,24 @@ listen("share-status", (e) => { shareStatus.textContent = e.payload; });
 // prompt (which `alert_user` un-minimized so the host could answer) closes — best-effort.
 let hostSharing = false;
 const currentWindow = window.__TAURI__?.window?.getCurrentWindow?.();
+// Count of consent prompts currently open (access / control-lease / file). alert_user un-minimizes
+// main so the host can answer; we must only re-minimize once EVERY open prompt is closed — otherwise
+// answering one prompt slides a still-open second prompt off-screen, forcing its fail-closed timeout to
+// deny an action the user intended to allow (Inv 1 regression).
+let openConsentPrompts = 0;
+listen("consent-request", () => { openConsentPrompts += 1; });
+listen("control-consent-request", () => { openConsentPrompts += 1; });
+listen("file-offer", () => { openConsentPrompts += 1; });
 function reminimizeMainIfSharing() {
-  if (hostSharing && currentWindow) currentWindow.minimize().catch(() => {});
+  if (hostSharing && openConsentPrompts === 0 && currentWindow) currentWindow.minimize().catch(() => {});
 }
+// Decrement first, THEN try to re-minimize — so the just-closed prompt no longer counts. Registered
+// before the raw reminimize listeners were (order matters for same-event delivery).
+function onConsentClosed() {
+  openConsentPrompts = Math.max(0, openConsentPrompts - 1);
+  reminimizeMainIfSharing();
+}
+listen("consent-closed", onConsentClosed);
 listen("share-viewer", (e) => {
   const live = !!e.payload;
   hostSharing = live;
@@ -976,10 +994,10 @@ listen("share-viewer", (e) => {
   chat.setSessionLive(live);
   files.setHostLive(live); // host can receive a file while a viewer is connected
 });
-// After a consent prompt (control-lease / file) is answered, slide the main window back out of the
-// shared screen if we're still sharing. Best-effort: no-ops if window control isn't permitted.
-listen("control-consent-closed", reminimizeMainIfSharing);
-listen("file-offer-closed", reminimizeMainIfSharing);
+// After a consent prompt (access / control-lease / file) is answered, decrement the open-prompt count
+// and slide main back out of the shared screen only once NO prompt remains open (see onConsentClosed).
+listen("control-consent-closed", onConsentClosed);
+listen("file-offer-closed", onConsentClosed);
 listen("share-active", (e) => {
   if (!e.payload) {
     hostSharing = false;
@@ -1156,6 +1174,7 @@ function setControlling(on) {
   if (!controlling) {
     lastCaps = null;
     lastNum = null;
+    releaseHeldButtons(); // don't leak a held button / stuck drag across control sessions (Inv 4-aligned)
   }
   if (controlBtn) {
     controlBtn.textContent = controlling ? "Controlling — click to stop" : "Take control";
@@ -1243,6 +1262,9 @@ controlBtn.addEventListener("click", async () => {
 // marquee-select still work). Result: one clear virtual cursor for aiming; the real cursor engages
 // only on click/drag — like a touchscreen.
 let dragging = false;
+const heldButtons = new Set(); // buttons currently pressed on the host, for best-effort release
+let lastNx = 0;
+let lastNy = 0;
 window.addEventListener("pointermove", (e) => {
   if (!controlling) return;
   if (!dragging) return; // hover: virtual cursor only (trackPointer); don't drag the real OS cursor
@@ -1250,7 +1272,11 @@ window.addEventListener("pointermove", (e) => {
   if (now - lastMoveAt < 8) return; // ~120 Hz cap
   lastMoveAt = now;
   const p = normInput(e);
-  if (p) invoke("input_pointer_move", { nx: p.nx, ny: p.ny });
+  if (p) {
+    lastNx = p.nx;
+    lastNy = p.ny;
+    invoke("input_pointer_move", { nx: p.nx, ny: p.ny });
+  }
 });
 function forwardButton(e, down) {
   if (!controlling) return;
@@ -1258,12 +1284,36 @@ function forwardButton(e, down) {
   if (!p) return;
   e.preventDefault();
   const button = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
-  dragging = down; // real cursor tracks only during a held-button drag (touch model)
+  lastNx = p.nx;
+  lastNy = p.ny;
+  if (down) heldButtons.add(button);
+  else heldButtons.delete(button);
+  // Derive drag state from the buttons STILL held (PointerEvent.buttons is the post-event bitmask), so
+  // releasing one of several held buttons doesn't freeze an in-progress drag, and a plain hover never
+  // drags the host's real cursor (ADR-097 touch model).
+  dragging = e.buttons !== 0;
   invoke("input_pointer_button", { nx: p.nx, ny: p.ny, button, down });
 }
 window.addEventListener("pointerdown", (e) => forwardButton(e, true));
 window.addEventListener("pointerup", (e) => forwardButton(e, false));
 window.addEventListener("contextmenu", (e) => { if (controlling) e.preventDefault(); });
+// A drag can end WITHOUT a pointerup reaching us — pointercancel (pen/touch), the window losing focus
+// (alt-tab / a notification), the tab backgrounding, or lost pointer capture. Without this, `dragging`
+// stays true and the host's real cursor keeps following every hover move, and a pressed button stays
+// held. Best-effort: release each tracked button at the last known spot, then clear the drag state.
+function releaseHeldButtons() {
+  for (const button of heldButtons) {
+    invoke("input_pointer_button", { nx: lastNx, ny: lastNy, button, down: false }).catch(() => {});
+  }
+  heldButtons.clear();
+  dragging = false;
+}
+window.addEventListener("pointercancel", releaseHeldButtons);
+window.addEventListener("lostpointercapture", releaseHeldButtons);
+window.addEventListener("blur", releaseHeldButtons);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) releaseHeldButtons();
+});
 window.addEventListener("wheel", (e) => {
   if (!controlling) return;
   e.preventDefault();
