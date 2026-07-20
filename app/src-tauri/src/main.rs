@@ -344,13 +344,13 @@ async fn connect_to_host(
     // the app-identity keystore, so a host can save THIS machine as a contact and reach it by name too
     // (bidirectional). `None` ⇒ ephemeral fallback.
     let id_seed = identity_seed(&app);
-    let endpoint = Arc::new(
-        match id_seed {
-            Some(seed) => Endpoint::bind_with_key(&seed).await,
-            None => Endpoint::bind().await,
-        }
-        .map_err(|e| e.to_string())?,
-    );
+    // Dial from an EPHEMERAL endpoint (ADR-098): this outgoing viewer connection must NOT collide with
+    // our always-on ACCEPT endpoint, which is bound with our persistent identity so saved contacts can
+    // reach us by name. Two endpoints with the same identity would clash in iroh discovery. The grant
+    // binds to this dial endpoint's id (the endpoint iroh authenticates); our CONTACT identity
+    // (`controller_id`, used for the host to save us back) stays the persistent key via the signing
+    // keystore below — so bidirectional contacts still work.
+    let endpoint = Arc::new(Endpoint::bind().await.map_err(|e| e.to_string())?);
     let my_endpoint_id = endpoint.id().0;
     let ks = match id_seed {
         Some(seed) => SoftwareKeyStore::from_seed(seed),
@@ -2304,14 +2304,35 @@ fn main() {
                     ras_identity::FileContactBook::open(dir.join("contacts.rcb")).ok()
                 })
                 .map(Arc::new);
+            // Always-on reachability (ADR-098, bidirectional contacts): run the host accept loop from
+            // startup so a saved contact can reach this machine by name WITHOUT it clicking "Share"
+            // first — true two-way contacts. Every incoming connection is still gated by local
+            // Allow/Deny consent (Invariant 1) and mints a fresh endpoint-bound grant (Inv 3); the
+            // accept loop merely listens. The user can turn reachability off with Stop and back on with
+            // Share. Only started where a capture backend exists (the accept loop serves screen frames).
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
             app.manage(AppState {
                 session: Mutex::new(None),
                 share: ShareState {
-                    session: Mutex::new(None),
-                    consent,
+                    session: Mutex::new(Some(ShareSession {
+                        stop: stop_tx,
+                        host: None,
+                    })),
+                    consent: consent.clone(),
                 },
                 contacts,
             });
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            {
+                let reach_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    run_share(reach_app, stop_rx, consent).await;
+                });
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+            {
+                let _ = (stop_rx, consent); // no capture backend ⇒ no accept loop
+            }
 
             // Keep the overlay hidden at startup. Do NOT call `set_ignore_cursor_events` here: on
             // Linux/GTK it does `window.window().unwrap()`, which panics (non-unwinding → aborts the

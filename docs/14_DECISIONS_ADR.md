@@ -1313,6 +1313,29 @@
     test green. Two-way (host annotating the controller) and the richer cursor model (labeled virtual
     cursors for every participant, touch-style clicks under a control lease) are follow-ups.
 
+- **ADR-098 · Always-on host-accept endpoint for true bidirectional contacts · Accepted.**
+  - **Context.** On-device (issue #5): contacts felt "not two-way" because a machine was only reachable
+    by name **while it had clicked "Share"** — it bound its persistent-identity endpoint only inside
+    `start_sharing`. So initiation was one-way (a viewer dials a sharer who is already waiting); a saved
+    contact could not be "called" if they were idle.
+  - **Decision.** The app runs the host **accept loop from startup** (`run_share` spawned in `.setup()`),
+    bound with the machine's persistent identity, so a saved contact can reach it by name any time —
+    without it clicking Share first. The `connect_to_host` (viewer) path now dials from an **ephemeral**
+    endpoint, because two endpoints with the same identity would collide in iroh discovery; the grant
+    binds to that dial endpoint, while the **`controller_id`** (contact identity, used for the host to
+    save the peer back) stays the persistent key via the signing keystore — so bidirectional saving +
+    reach both work. Reachability is toggleable: **Stop** halts the accept loop, **Share** restarts it.
+  - **Security posture (unchanged).** Always-*accepting* is not always-*sharing*: every incoming
+    connection is still gated by local Allow/Deny consent (Inv 1), mints a fresh, endpoint-bound,
+    per-message-enforced, emergency-stoppable grant (Inv 3/4/15), and captures no screen until consent.
+    The accept loop merely listens; it self-authorizes nothing. Only started where a capture backend
+    exists.
+  - **Risk / status.** This changes the two core flows (`start_sharing` reachability + `connect_to_host`
+    endpoint) and is **on-device-unverified** (networked). It is deliberately minimal + revertible (two
+    edits, no change to the proven `run_share`/`serve_one` serve logic). Deferred: gossip **presence /
+    online-dots** and the signed **AccessRequestIntent** "call" prompt (ras-signal wiring) now have the
+    always-on endpoint they need — the next increment.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
