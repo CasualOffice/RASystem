@@ -125,6 +125,9 @@ let t0 = performance.now();
 // loop so an unsupported-but-valid codec can't silently re-arm forever (permanent black canvas).
 let decErrors = 0;
 const MAX_DEC_RETRIES = 3;
+// Latency guard: max decoder backlog before we start dropping deltas to catch up (see the frame path).
+const DECODE_QUEUE_MAX = 6;
+let lastLatencyKeyReq = 0;
 
 // Persistent, honest capability message (Inv 8: engine capability only, never stream content). Shown
 // when the video (or audio) can't be decoded on this webview engine; cleared when a fresh session
@@ -285,6 +288,20 @@ function onFrame(bytes) {
   if (!sawKeyframe) {
     if (!isKey) return;
     sawKeyframe = true;
+  }
+
+  // Latency guard (Priority: latency > UX). If the decoder falls behind, its queue builds and the
+  // end-to-end delay grows without bound — "lag that keeps getting worse". While backed up, drop
+  // delta frames and ask the host for a fresh keyframe (the stream is ∞-GOP, so a keyframe is the
+  // only resync point); decode a keyframe even when backed up so we recover promptly. Trades a brief
+  // skip for staying live.
+  if (decoder.decodeQueueSize > DECODE_QUEUE_MAX && !isKey) {
+    const now = performance.now();
+    if (now - lastLatencyKeyReq > 400) {
+      lastLatencyKeyReq = now;
+      invoke("request_keyframe").catch(() => {});
+    }
+    return;
   }
 
   try {
