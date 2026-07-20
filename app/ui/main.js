@@ -975,6 +975,25 @@ listen("share-input-warning", (e) => {
   el.textContent = "⚠ " + e.payload;
   el.style.display = "block";
 });
+// Diagnostic: the host rejected the viewer's remote input at the per-message gate. Shows the reason
+// code so "I have control but clicks/keys do nothing" is no longer invisible. Auto-hides after a bit.
+let inputRejectTimer = null;
+listen("share-input-rejected", (e) => {
+  let el = document.getElementById("share-input-rejected");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "share-input-rejected";
+    el.style.cssText =
+      "background:#5a1a1a;color:#ffb3b3;padding:8px 14px;border-radius:8px;" +
+      "margin:8px 0;font-size:12px;line-height:1.4;";
+    const parent = document.getElementById("share-view") || document.body;
+    parent.insertBefore(el, parent.firstChild);
+  }
+  el.textContent = "Remote input was rejected by the control gate: " + e.payload;
+  el.style.display = "block";
+  if (inputRejectTimer) clearTimeout(inputRejectTimer);
+  inputRejectTimer = setTimeout(() => { el.style.display = "none"; }, 6000);
+});
 
 // Local consent (Invariant 1: the local user authorizes each viewer).
 listen("consent-request", (e) => {

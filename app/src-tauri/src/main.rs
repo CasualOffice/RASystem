@@ -1863,6 +1863,9 @@ async fn serve_one(
         let _ = win.set_focus();
     }
 
+    // Dedupe key for the InputRejected diagnostic below: a rejected control gate fires per-event (up to
+    // ~25 Hz for pointer moves), so we surface only reason *changes* to avoid flooding the log/UI.
+    let mut last_input_reject: Option<String> = None;
     loop {
         tokio::select! {
             _ = stop.changed() => {
@@ -1908,6 +1911,7 @@ async fn serve_one(
                 // Control-lease lifecycle (Phase 3), content-free. Surface it so the sharer's UI can
                 // show that the viewer now has (or lost) OS-input control.
                 Some(LifecycleEvent::ControlLeaseGranted { .. }) => {
+                    last_input_reject = None; // fresh control session — let the first rejection resurface
                     let _ = app.emit("share-control", true);
                     let _ = app.emit(
                         "share-status",
@@ -1917,6 +1921,20 @@ async fn serve_one(
                 Some(LifecycleEvent::ControlLeaseEnded { .. }) => {
                     let _ = app.emit("share-control", false);
                     let _ = app.emit("share-status", "Viewer connected — REMOTE VIEWING ACTIVE.");
+                }
+                // The host-side per-message gate (Inv 15) rejected a remote input event. Content-free
+                // (a reason code only). Normally silent, but when EVERY event is rejected the viewer's
+                // "Take control" looks dead — so surface the reason (deduped) to the sharer + the log.
+                // This is the diagnostic for "I have control but clicks/keys do nothing": the code
+                // (StaleGeneration / NoActiveLease / LeaseExpired / ReplayedInput / StaleLayout /
+                // CapabilityDenied / InputFailed) names exactly which check failed.
+                Some(LifecycleEvent::InputRejected { code }) => {
+                    let c = format!("{code:?}");
+                    if last_input_reject.as_deref() != Some(c.as_str()) {
+                        log::warn!("share: remote input rejected by the control gate — {c}");
+                        let _ = app.emit("share-input-rejected", c.clone());
+                        last_input_reject = Some(c);
+                    }
                 }
                 // Chat received from the viewer (ADR-082). `.reveal()` here is the sanctioned display
                 // boundary — the only place the redacted text is read; it is never logged (Inv 8).
