@@ -158,7 +158,7 @@ function draw(now) {
     g.fillStyle = "rgba(0,0,0,0.6)";
     g.fillRect(px + 24 * s, py + 18 * s, 58 * s, 20 * s);
     g.fillStyle = "#fff";
-    g.fillText("viewer", px + 30 * s, py + 32 * s);
+    g.fillText(controlling ? "control" : "viewer", px + 30 * s, py + 32 * s);
   }
   requestAnimationFrame(draw);
 }

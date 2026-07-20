@@ -1166,8 +1166,18 @@ controlBtn.addEventListener("click", async () => {
 
 // Pointer + keyboard forwarding. All guarded on `controlling`; when active they preventDefault so the
 // webview itself doesn't act on the input.
+//
+// TOUCH-STYLE control model (ADR-097 cursor model, from issue #5): while merely HOVERING (no button
+// held) we move only the *virtual* cursor on the host overlay (via trackPointer/send_pointer) and do
+// NOT drag the host's real OS cursor — that's what produced the "multi cursors + drag" ghosting when
+// both a real and a virtual cursor moved together. A click TAPS at the pointed spot (the OS sinks
+// position the button at nx,ny), and the real cursor follows only while a button is held (so drag /
+// marquee-select still work). Result: one clear virtual cursor for aiming; the real cursor engages
+// only on click/drag — like a touchscreen.
+let dragging = false;
 window.addEventListener("pointermove", (e) => {
   if (!controlling) return;
+  if (!dragging) return; // hover: virtual cursor only (trackPointer); don't drag the real OS cursor
   const now = performance.now();
   if (now - lastMoveAt < 8) return; // ~120 Hz cap
   lastMoveAt = now;
@@ -1180,6 +1190,7 @@ function forwardButton(e, down) {
   if (!p) return;
   e.preventDefault();
   const button = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
+  dragging = down; // real cursor tracks only during a held-button drag (touch model)
   invoke("input_pointer_button", { nx: p.nx, ny: p.ny, button, down });
 }
 window.addEventListener("pointerdown", (e) => forwardButton(e, true));
