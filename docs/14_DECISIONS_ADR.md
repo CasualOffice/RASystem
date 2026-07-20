@@ -1336,6 +1336,36 @@
     online-dots** and the signed **AccessRequestIntent** "call" prompt (ras-signal wiring) now have the
     always-on endpoint they need — the next increment.
 
+- **ADR-099 · Add a uinput Linux input backend so remote control works on Wayland · Accepted.**
+  - **Context.** On-device testing found remote control dead on Ubuntu's default (Wayland) session: our
+    only Linux input backend was **X11 XTEST** (`ras-input-linux`), which injects through the display
+    server — on Wayland it reaches only Xwayland clients, never native Wayland windows, so control
+    silently no-opped (issue #5). A study of how mature tools solve this (RustDesk + GNOME/KDE, study-
+    only; RustDesk is AGPL — techniques not code) found two answers: kernel **`uinput`** (injects below
+    the display server → works on X11 **and** Wayland; RustDesk's path, but they run it as root) and
+    **libei via the RemoteDesktop portal** (unprivileged, GNOME/KDE's path).
+  - **Decision.** Add a second `OsInputSink` — a **`uinput`** virtual-device backend via the permissive
+    **`input-linux`** crate (MIT, Inv 18 clean) — alongside the existing XTEST one, both behind the same
+    trait. A runtime selector `best_input_sink()` (returning a concrete `LinuxInputSink` enum so the
+    X11-only `set_display_bounds` stays inherent) prefers uinput when `/dev/uinput` is writable (works on
+    Wayland + X11), else falls back to XTEST (X11 only), else a **fail-closed** sink whose
+    `input_permitted()` is false so the host refuses the lease and the app shows an honest setup banner —
+    never dead control (Inv 15). uinput maps our normalized `0..=65535` directly onto an ABS device range
+    (no display-bounds read needed); keycodes are raw evdev (X keycode − 8); pressed keys/buttons are
+    tracked and released on teardown (Inv 4).
+  - **Trade-off / posture.** uinput needs elevated device access (a udev rule on `/dev/uinput` + the
+    `uinput` module) — a one-time setup, lighter than RustDesk's root daemon (we open the device as the
+    user, no root service). We deliberately did **not** adopt libei as the first cut: it is the cleaner
+    unprivileged long-term path but its async portal + `reis` handshake is intricate and unverifiable on
+    a blind (no-Wayland) build; the compile-verified uinput path ships working Wayland control now, with
+    **libei/portal documented as the follow-up upgrade** (no udev setup, portal-native consent). `unsafe`
+    is confined to the single `OwnedFd` bridge (crate re-declares `unsafe_code = "allow"`, CONTRIBUTING §5).
+  - **Status.** Implemented + compile-verified (`input-linux` API confirmed against the real crate;
+    cross-compile + clippy `-D` clean for `x86_64-unknown-linux-gnu`; pure HID→evdev/coord tests run on
+    the host; `cargo-deny` clean). Wired into the app's Linux Share role via `best_input_sink()`. **Live
+    uinput injection is the on-device step** (a Linux box with the udev rule) — the analogue of the macOS
+    on-device row. Deep-study capture + fix tracker in `docs/22`.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

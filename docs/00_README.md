@@ -44,6 +44,10 @@ Priorities, in strict order: **1. Security → 2. Latency → 3. UX.**
 16. `16_ACCESS_AND_ENROLLMENT_MODEL.md` — Per-device keys + authenticator tiers.
 17. `17_ROADMAP_AND_MILESTONES.md` — Milestones + phase-wise task plan (design gate → build → verify).
 18. `18_HOST_PLATFORM_MACOS.md` — macOS host deep-dive (development-lead platform, ADR-054).
+19. `19_CROSS_PLATFORM_HOST_RESEARCH.md` — Linux/Windows capture·input·encode·build survey (permissive stack).
+20. `20_FEATURE_GAPS_AND_ROADMAP.md` — Where we lapse vs incumbents + safe designs + priority.
+21. `21_PRODUCTION_READINESS_BACKLOG.md` — Prioritized production-grade gap backlog (P0/P1), graded on behavior.
+22. `22_LEARNINGS_TRACKER.md` — Study-only research learnings + half-done-implementation fix tracker (☐/◐/☑).
 
 ## Authority model (MVP)
 

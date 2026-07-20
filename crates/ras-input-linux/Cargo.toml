@@ -18,7 +18,22 @@ ras-control = { path = "../ras-control" }
 ras-protocol = { path = "../ras-protocol" }
 
 # XTEST bindings are Linux-only: on other targets this crate compiles to an empty lib so
-# `cargo build --workspace` stays green on macOS/Windows CI. `x11rb` is pure-Rust (no C X11 libs),
-# so — unlike `ras-input-macos` — this backend is `unsafe`-free and keeps the workspace lint defaults.
+# `cargo build --workspace` stays green on macOS/Windows CI. `x11rb` is pure-Rust (no C X11 libs);
+# `input-linux` (uinput backend) is a thin safe wrapper over the kernel ioctls (only the fd-from-file
+# bridge is `unsafe`) — both are MIT (Inv 18 OK).
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", default-features = false, features = ["xtest"] }
+# uinput virtual-device backend (docs/19 §3 — the Wayland-capable path below the display server). MIT.
+input-linux = "0.7.1"
+
+# This crate now carries a minimal FFI edge (OwnedFd::from_raw_fd in the uinput backend), so — like
+# `ras-input-macos` — it re-declares the workspace lint set with `unsafe_code` relaxed. The `unsafe` is
+# confined to that single fd bridge and wrapped behind the safe `OsInputSink` surface (CONTRIBUTING §5);
+# the X11 path stays `unsafe`-free.
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

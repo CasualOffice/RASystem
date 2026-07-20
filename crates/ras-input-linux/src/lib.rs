@@ -21,6 +21,13 @@
 //! is an on-device step on a Linux X11/Xwayland session (the Linux analogue of the macOS on-device
 //! row, `docs/19 §7`). `uinput` + libei backends are additive follow-ups behind the same trait.
 
+// Platform-independent pure logic for the uinput backend (HID→evdev keycode map, coordinate scaling).
+// NOT `cfg`-gated, so its unit tests run on the macOS/Windows dev host too, not only a Linux target.
+mod pure;
+
+#[cfg(target_os = "linux")]
+pub mod uinput;
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::collections::HashSet;
@@ -653,3 +660,124 @@ mod linux {
 
 #[cfg(target_os = "linux")]
 pub use linux::X11InputSink;
+
+#[cfg(target_os = "linux")]
+pub use uinput::UInputSink;
+
+/// A concrete Linux OS-input sink that is EITHER the kernel uinput backend (Wayland-capable) or the
+/// X11 XTEST backend, chosen at runtime by [`best_input_sink`]. Kept **concrete** (not `dyn`) so the
+/// app can still call the X11-only inherent [`set_display_bounds`](Self::set_display_bounds) uniformly:
+/// it forwards to whichever backend is active (a no-op for uinput, which maps `0..=65535` natively).
+/// Variants are boxed so the enum stays pointer-sized (both backends are large).
+#[cfg(target_os = "linux")]
+pub enum LinuxInputSink {
+    /// Kernel uinput virtual device — injects below the display server (X11 **and** Wayland).
+    UInput(Box<uinput::UInputSink>),
+    /// X11 XTEST — X11 / Xwayland only.
+    X11(Box<linux::X11InputSink>),
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxInputSink {
+    /// Register a display's global pixel bounds. Forwarded to the X11 backend (normalized→pixel map);
+    /// a no-op for uinput, whose virtual device maps `0..=65535` across the output natively.
+    pub fn set_display_bounds(&self, id: u32, x: f64, y: f64, w: f64, h: f64) {
+        if let Self::X11(s) = self {
+            s.set_display_bounds(id, x, y, w, h);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ras_control::OsInputSink for LinuxInputSink {
+    fn pointer_move(&self, display: u32, nx: f32, ny: f32) -> Result<(), ras_control::InputError> {
+        match self {
+            Self::UInput(s) => s.pointer_move(display, nx, ny),
+            Self::X11(s) => s.pointer_move(display, nx, ny),
+        }
+    }
+    fn pointer_move_relative(&self, dx: i16, dy: i16) -> Result<(), ras_control::InputError> {
+        match self {
+            Self::UInput(s) => s.pointer_move_relative(dx, dy),
+            Self::X11(s) => s.pointer_move_relative(dx, dy),
+        }
+    }
+    fn pointer_button(
+        &self,
+        display: u32,
+        nx: f32,
+        ny: f32,
+        button: ras_protocol::PointerButton,
+        down: bool,
+    ) -> Result<(), ras_control::InputError> {
+        match self {
+            Self::UInput(s) => s.pointer_button(display, nx, ny, button, down),
+            Self::X11(s) => s.pointer_button(display, nx, ny, button, down),
+        }
+    }
+    fn pointer_wheel(&self, dx: i16, dy: i16) -> Result<(), ras_control::InputError> {
+        match self {
+            Self::UInput(s) => s.pointer_wheel(dx, dy),
+            Self::X11(s) => s.pointer_wheel(dx, dy),
+        }
+    }
+    fn key(
+        &self,
+        hid_usage: u16,
+        down: bool,
+        modifiers: u8,
+    ) -> Result<(), ras_control::InputError> {
+        match self {
+            Self::UInput(s) => s.key(hid_usage, down, modifiers),
+            Self::X11(s) => s.key(hid_usage, down, modifiers),
+        }
+    }
+    fn text(&self, utf8: &str) -> Result<(), ras_control::InputError> {
+        match self {
+            Self::UInput(s) => s.text(utf8),
+            Self::X11(s) => s.text(utf8),
+        }
+    }
+    fn release_all(&self) -> Result<(), ras_control::InputError> {
+        match self {
+            Self::UInput(s) => s.release_all(),
+            Self::X11(s) => s.release_all(),
+        }
+    }
+    fn set_lock_state(
+        &self,
+        caps_lock: bool,
+        num_lock: bool,
+    ) -> Result<(), ras_control::InputError> {
+        match self {
+            Self::UInput(s) => s.set_lock_state(caps_lock, num_lock),
+            Self::X11(s) => s.set_lock_state(caps_lock, num_lock),
+        }
+    }
+    fn input_permitted(&self) -> bool {
+        match self {
+            Self::UInput(s) => s.input_permitted(),
+            Self::X11(s) => s.input_permitted(),
+        }
+    }
+}
+
+/// Select the best available OS-input backend, fail-closed. Prefers kernel **uinput** (Wayland-capable)
+/// when `/dev/uinput` is writable + the virtual device was created; else the unprivileged **X11 XTEST**
+/// backend (X11/Xwayland only). If neither can inject, the returned sink reports
+/// `input_permitted() == false`, so the host refuses the lease rather than granting dead control (Inv 15).
+///
+/// The uinput path needs elevated device access (a udev rule on `/dev/uinput` + the `uinput` module);
+/// the X11 path needs only `$DISPLAY`. So a plain X11 desktop without the udev rule falls back to XTEST,
+/// and a Wayland desktop with the udev rule uses uinput — the intended platform matrix.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn best_input_sink() -> std::sync::Arc<LinuxInputSink> {
+    use ras_control::OsInputSink as _;
+    let uinput = uinput::UInputSink::new();
+    if uinput.input_permitted() {
+        std::sync::Arc::new(LinuxInputSink::UInput(Box::new(uinput)))
+    } else {
+        std::sync::Arc::new(LinuxInputSink::X11(Box::<linux::X11InputSink>::default()))
+    }
+}

@@ -698,6 +698,8 @@ casual-ras/
 | `docs/18_HOST_PLATFORM_MACOS.md` | macOS host deep-dive — dev-lead platform (ADR-054/055) |
 | `docs/19_CROSS_PLATFORM_HOST_RESEARCH.md` | Linux/Windows capture·input·encode·build survey + permissive recommended stack (Inv 18 license verdicts) |
 | `docs/20_FEATURE_GAPS_AND_ROADMAP.md` | Where we lapse vs incumbents (clipboard/file/audio/multi-monitor/cursor/chat/whiteboard/auto-update/…) + safe designs + priority, from a 5-stream cross-device research sweep |
+| `docs/21_PRODUCTION_READINESS_BACKLOG.md` | Prioritized production-grade gap backlog (P0/P1) benchmarked vs incumbents; graded on production behavior not loopback-green |
+| `docs/22_LEARNINGS_TRACKER.md` | **Study-only research learnings (RustDesk/ecosystem: Wayland input, cursor, capture exclusion, latency) + the half-done-implementation fix tracker (☐/◐/☑)** |
 | `docs/design/phase-<n>-design.md` | Per-phase design notes (written at each phase's design gate) |
 
 ---

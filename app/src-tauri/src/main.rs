@@ -1830,7 +1830,11 @@ async fn serve_one(
     // Linux: XTEST over x11rb (ADR-070). No permission prompt — it connects to $DISPLAY as the user
     // and is fail-closed when no X server is reachable (`input_permitted()` false ⇒ lease refused).
     #[cfg(target_os = "linux")]
-    let input_sink = Arc::new(ras_input_linux::X11InputSink::new());
+    // Pick the best Linux backend at runtime (ADR-098+): kernel uinput when /dev/uinput is available
+    // (works on Wayland AND X11), else the unprivileged X11 XTEST backend (X11/Xwayland only), else a
+    // fail-closed sink whose input_permitted() is false so the host refuses the lease and the honest
+    // "needs Xorg / uinput setup" banner shows — never dead control.
+    let input_sink = ras_input_linux::best_input_sink();
     // Windows: SendInput over windows-rs (ADR-071). In-session, no UIAccess (Inv 14).
     #[cfg(target_os = "windows")]
     let input_sink = Arc::new(ras_input_windows::SendInputSink::new());
