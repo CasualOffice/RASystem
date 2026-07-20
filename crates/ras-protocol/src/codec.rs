@@ -21,11 +21,11 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use prost::Message;
 
 use crate::{
-    AccessOutcome, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode, InputAction,
-    InputEnvelope, KeyframeReason, KeyframeRequest, PointerButton, PointerUpdate, RasError,
-    Redacted, StreamConfigWire, MAX_CAPABILITIES, MAX_CAPABILITY_LEN, MAX_CHAT_BYTES,
-    MAX_CLIPBOARD_BYTES, MAX_CONTROL_FRAME, MAX_CURSOR_DIM, MAX_DISPLAY_NAME, MAX_FILE_CHUNK,
-    MAX_FILE_NAME, MAX_FILE_TARGET, MAX_TEXT_INPUT,
+    AccessOutcome, AnnotTool, AnnotateOp, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode,
+    InputAction, InputEnvelope, KeyframeReason, KeyframeRequest, PointerButton, PointerUpdate,
+    RasError, Redacted, StreamConfigWire, MAX_ANNOT_POINTS, MAX_CAPABILITIES, MAX_CAPABILITY_LEN,
+    MAX_CHAT_BYTES, MAX_CLIPBOARD_BYTES, MAX_CONTROL_FRAME, MAX_CURSOR_DIM, MAX_DISPLAY_NAME,
+    MAX_FILE_CHUNK, MAX_FILE_NAME, MAX_FILE_TARGET, MAX_TEXT_INPUT,
 };
 
 /// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
@@ -293,8 +293,79 @@ fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
         }),
         ControlMsg::FileChunk { data } => Kind::FileChunk(pb::FileChunk { data }),
         ControlMsg::FileComplete => Kind::FileComplete(pb::FileComplete {}),
+        ControlMsg::Annotate(op) => Kind::Annotate(annotate_to_pb(op)),
     };
     pb::ControlMsg { kind: Some(kind) }
+}
+
+/// Rust → wire annotation op. Points pack `(x << 16) | y` (both `u16`, so lossless in a `u32`).
+fn annotate_to_pb(op: AnnotateOp) -> pb::Annotate {
+    match op {
+        AnnotateOp::Stroke {
+            tool,
+            color_rgb,
+            points,
+        } => pb::Annotate {
+            op: 0,
+            tool: annot_tool_to_u32(tool),
+            color: color_rgb,
+            points: points
+                .into_iter()
+                .map(|(x, y)| (u32::from(x) << 16) | u32::from(y))
+                .collect(),
+        },
+        AnnotateOp::Undo => pb::Annotate {
+            op: 1,
+            ..Default::default()
+        },
+        AnnotateOp::Clear => pb::Annotate {
+            op: 2,
+            ..Default::default()
+        },
+    }
+}
+
+fn annot_tool_to_u32(t: AnnotTool) -> u32 {
+    match t {
+        AnnotTool::Pen => 0,
+        AnnotTool::Highlighter => 1,
+        AnnotTool::Arrow => 2,
+        AnnotTool::Rect => 3,
+    }
+}
+
+/// Wire → Rust annotation op, fully validated (fail-closed): unknown op/tool tags are rejected and the
+/// point count is bounded to [`MAX_ANNOT_POINTS`] so a hostile peer cannot force a huge allocation.
+fn annotate_from_pb(a: pb::Annotate) -> Result<ControlMsg, RasError> {
+    let bad = |m: &'static str| RasError::fatal(ErrorCode::InvalidMessage, m);
+    let op = match a.op {
+        0 => {
+            if a.points.len() > MAX_ANNOT_POINTS {
+                return Err(bad("annotation stroke exceeds MAX_ANNOT_POINTS"));
+            }
+            let tool = match a.tool {
+                0 => AnnotTool::Pen,
+                1 => AnnotTool::Highlighter,
+                2 => AnnotTool::Arrow,
+                3 => AnnotTool::Rect,
+                _ => return Err(bad("unknown annotation tool")),
+            };
+            let points = a
+                .points
+                .iter()
+                .map(|v| (((v >> 16) & 0xffff) as u16, (v & 0xffff) as u16))
+                .collect();
+            AnnotateOp::Stroke {
+                tool,
+                color_rgb: a.color & 0x00ff_ffff,
+                points,
+            }
+        }
+        1 => AnnotateOp::Undo,
+        2 => AnnotateOp::Clear,
+        _ => return Err(bad("unknown annotation op")),
+    };
+    Ok(ControlMsg::Annotate(op))
 }
 
 /// Wire → Rust cursor shape, fully validated (Inv: fail-closed). Dimensions are bounded to
@@ -436,6 +507,7 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
             Ok(ControlMsg::FileChunk { data: c.data })
         }
         Some(Kind::FileComplete(_)) => Ok(ControlMsg::FileComplete),
+        Some(Kind::Annotate(a)) => annotate_from_pb(a),
         // No valid empty control message: unset oneof (empty bytes, or a future variant an old
         // build doesn't recognize) is rejected, never silently defaulted.
         None => Err(RasError::fatal(
@@ -1266,6 +1338,52 @@ mod tests {
         assert_roundtrip(&ControlMsg::ChatMessage {
             text: Redacted(String::new()),
         });
+    }
+
+    #[test]
+    fn roundtrip_annotate() {
+        assert_roundtrip(&ControlMsg::Annotate(AnnotateOp::Stroke {
+            tool: AnnotTool::Pen,
+            color_rgb: 0x00ff_3b30,
+            points: vec![(0, 0), (12345, 54321), (65535, 65535)],
+        }));
+        assert_roundtrip(&ControlMsg::Annotate(AnnotateOp::Stroke {
+            tool: AnnotTool::Rect,
+            color_rgb: 0x0000_00ff,
+            points: vec![(10, 20), (300, 400)],
+        }));
+        assert_roundtrip(&ControlMsg::Annotate(AnnotateOp::Undo));
+        assert_roundtrip(&ControlMsg::Annotate(AnnotateOp::Clear));
+    }
+
+    #[test]
+    fn annotate_rejects_oversized_stroke_and_unknown_tags() {
+        // Point count over the cap is refused (never allocated as-is).
+        let too_many = pb::Annotate {
+            op: 0,
+            tool: 0,
+            color: 0,
+            points: vec![0u32; MAX_ANNOT_POINTS + 1],
+        };
+        assert_eq!(
+            annotate_from_pb(too_many).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+        // Unknown tool tag and unknown op tag are both fail-closed.
+        assert!(annotate_from_pb(pb::Annotate {
+            op: 0,
+            tool: 99,
+            color: 0,
+            points: vec![],
+        })
+        .is_err());
+        assert!(annotate_from_pb(pb::Annotate {
+            op: 7,
+            tool: 0,
+            color: 0,
+            points: vec![],
+        })
+        .is_err());
     }
 
     #[test]

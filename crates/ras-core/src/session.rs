@@ -1520,6 +1520,11 @@ async fn host_control_loop<C, E>(
                     });
                 }
             }
+            // Controller sent annotation markup (ADR-097) — purely visual, no capability (like the
+            // remote pointer). Forward it; the app renders it on the host overlay. Bounded on decode.
+            Ok(ControlMsg::Annotate(op)) => {
+                emit_lifecycle(inner, LifecycleEvent::RemoteAnnotation(op));
+            }
             // Controller requests the OS-input control lease (Phase 3). Refuse fail-closed if this
             // host has no input backend or lacks OS permission; else prompt the local user (Inv 1),
             // clamp to grant ∩ policy ∩ consent, and issue. Never trust the requested caps as
@@ -2327,6 +2332,8 @@ enum ControlCommand {
     FileChunk(bytes::Bytes),
     /// The accepted file transfer's bytes are all sent (ADR-090).
     FileComplete,
+    /// Annotation markup to render on the host overlay (ADR-097). Purely visual, no capability.
+    Annotate(ras_protocol::AnnotateOp),
     Bye,
 }
 
@@ -2628,6 +2635,21 @@ impl ControllerSession {
         }
     }
 
+    /// Send annotation markup to render on the **host's** overlay (ADR-097): a completed stroke, an
+    /// undo, or a clear. Purely visual — **not OS input**, no capability, like [`Self::send_pointer`].
+    /// Best-effort (dropped if the control task is briefly behind); the host bounds it on decode.
+    pub fn send_annotation(&self, op: ras_protocol::AnnotateOp) {
+        let tx = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(ControlCommand::Annotate(op));
+        }
+    }
+
     /// Request the OS-input control lease from the host (Phase 3). The host prompts its local user and
     /// replies with `ControlGranted` (→ [`Self::current_lease`]) or `ControlRevoked`. Best-effort.
     pub fn request_control(&self, capabilities: Vec<String>) {
@@ -2823,6 +2845,7 @@ async fn controller_control_loop(
                     }
                     Some(ControlCommand::FileChunk(data)) => ControlMsg::FileChunk { data },
                     Some(ControlCommand::FileComplete) => ControlMsg::FileComplete,
+                    Some(ControlCommand::Annotate(op)) => ControlMsg::Annotate(op),
                     // A controller leaving is a clean peer close, never a revoke — a controller cannot
                     // revoke the host (Invariants 1/13). Send the benign closure code and exit.
                     Some(ControlCommand::Bye) => {

@@ -1294,22 +1294,61 @@ const annotations = (function () {
     if (cur) drawStroke(cur);
   }
 
+  // Normalize a pointer event to 0..=65535 over the VIDEO CONTENT rect (not the raw canvas), so a
+  // stroke lands on the same pixels on the host's shared frame — the same mapping the remote pointer
+  // uses. Returns null if the video isn't sized yet. `npts` (normalized) is what we send to the host;
+  // `pts` (local canvas px) is what we render locally.
+  function normPt(e) {
+    const r = videoContentRect();
+    if (!r.width || !r.height) return null;
+    let nx = (e.clientX - r.left) / r.width;
+    let ny = (e.clientY - r.top) / r.height;
+    nx = Math.max(0, Math.min(1, nx));
+    ny = Math.max(0, Math.min(1, ny));
+    return [Math.round(nx * 65535), Math.round(ny * 65535)];
+  }
+  const toolTag = (t) => (t === "hi" ? 1 : t === "arrow" ? 2 : t === "rect" ? 3 : 0);
+  const colorNum = (c) => parseInt(String(c).replace("#", ""), 16) & 0xffffff;
+  // Mirror a completed stroke onto the HOST's overlay (ADR-097). Best-effort — a failed send never
+  // affects local drawing. No-op if there's no live session (the Rust command drops it).
+  function sendStroke(s) {
+    const pts = (s.npts || []).filter(Boolean);
+    if (!pts.length) return;
+    invoke("annotate", { op: "stroke", tool: toolTag(s.tool), color: colorNum(s.color), points: pts }).catch(
+      () => {},
+    );
+  }
+  function sendAnnotOp(op) {
+    invoke("annotate", { op, tool: 0, color: 0, points: [] }).catch(() => {});
+  }
+
   cv.addEventListener("pointerdown", (e) => {
     if (tool === "off") return;
     cv.setPointerCapture(e.pointerId);
-    cur = { tool, color, pts: [pt(e)] };
+    cur = { tool, color, pts: [pt(e)], npts: [] };
+    const n = normPt(e);
+    if (n) cur.npts.push(n);
     render();
   });
   cv.addEventListener("pointermove", (e) => {
     if (!cur) return;
     const p = pt(e);
-    if (cur.tool === "pen" || cur.tool === "hi") cur.pts.push(p);
-    else cur.pts[1] = p;
+    const n = normPt(e);
+    if (cur.tool === "pen" || cur.tool === "hi") {
+      cur.pts.push(p);
+      if (n) cur.npts.push(n);
+    } else {
+      cur.pts[1] = p;
+      if (n) cur.npts[cur.npts.length > 0 ? 1 : 0] = n;
+    }
     render();
   });
   function endStroke() {
     if (!cur) return;
-    if (cur.pts.length > 1 || cur.tool === "pen" || cur.tool === "hi") strokes.push(cur);
+    if (cur.pts.length > 1 || cur.tool === "pen" || cur.tool === "hi") {
+      strokes.push(cur);
+      sendStroke(cur);
+    }
     cur = null;
     render();
   }
@@ -1334,10 +1373,12 @@ const annotations = (function () {
   document.getElementById("undo").addEventListener("click", () => {
     strokes.pop();
     render();
+    sendAnnotOp("undo");
   });
   document.getElementById("clearannot").addEventListener("click", () => {
     strokes = [];
     render();
+    sendAnnotOp("clear");
   });
   const firstSwatch = bar.querySelector(".swatch");
   if (firstSwatch) firstSwatch.classList.add("active");

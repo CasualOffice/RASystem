@@ -359,6 +359,45 @@ pub enum ControlMsg {
     /// Controller → host: the accepted file transfer's bytes are all sent. The host finalizes the write
     /// iff the received total equals the offered `size`, else aborts (Inv: no partial/oversized file).
     FileComplete,
+    /// Controller → host: annotation markup to render on the host's overlay (ADR-097). Display data,
+    /// **no capability** (like the visual pointer, it touches no OS/input/screen surface). Bounded on
+    /// decode ([`MAX_ANNOT_POINTS`]).
+    Annotate(AnnotateOp),
+}
+
+/// The freehand-markup tool an [`AnnotateOp::Stroke`] was drawn with. The host renders each accordingly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnotTool {
+    /// Freehand pen (every point).
+    Pen,
+    /// Translucent highlighter (thick, low-alpha).
+    Highlighter,
+    /// Straight arrow (first → last point).
+    Arrow,
+    /// Rectangle (first & last point = opposite corners).
+    Rect,
+}
+
+/// One annotation operation from the viewer, rendered on the **host's** overlay (ADR-097). This is
+/// display data (drawing geometry + a colour), **not** OS input and **not** a secret — so it carries no
+/// capability, exactly like the visual remote pointer. Point counts are bounded on decode
+/// ([`MAX_ANNOT_POINTS`]) so a malicious/buggy peer cannot exhaust memory (fail-closed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnotateOp {
+    /// A completed stroke: normalized points (`0..=65535` over the shared frame), the tool, and a
+    /// `0x00RR_GGBB` colour.
+    Stroke {
+        /// The drawing tool.
+        tool: AnnotTool,
+        /// Colour as `0x00RR_GGBB` (the high byte is ignored).
+        color_rgb: u32,
+        /// Normalized `(x, y)` points, `0..=65535`. Bounded by [`MAX_ANNOT_POINTS`].
+        points: Vec<(u16, u16)>,
+    },
+    /// Remove the most recent stroke (viewer pressed undo).
+    Undo,
+    /// Remove all strokes (viewer pressed clear).
+    Clear,
 }
 
 /// A UTF-8 secret whose `Debug` prints only its byte length, never its content — so it physically
@@ -416,6 +455,10 @@ pub const MAX_CAPABILITY_LEN: usize = 64;
 /// Upper bound on a [`InputAction::TextInput`] payload (bytes). Unicode entry is short bursts, never
 /// bulk — a longer payload is a malformed message. Content-bearing: never logged (Invariant 8).
 pub const MAX_TEXT_INPUT: usize = 256;
+
+/// Upper bound on the number of points in one [`AnnotateOp::Stroke`] — a DoS guard. A freehand stroke
+/// samples at ~pointer rate for a few seconds; 1024 points is generous. A longer stroke is malformed.
+pub const MAX_ANNOT_POINTS: usize = 1024;
 
 /// One OS-input event, bound to the control lease that authorizes it (Phase 3, ADR-067).
 ///

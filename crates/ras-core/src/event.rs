@@ -157,6 +157,10 @@ pub enum LifecycleEvent {
         /// Whether the pointer is on-screen (`false` → hide the overlay cursor).
         visible: bool,
     },
+    /// Host-side: the controller drew annotation markup to render on the host overlay (ADR-097).
+    /// Purely visual (never OS input, no capability), bounded on decode. The app forwards it to the
+    /// overlay window; a stroke/undo/clear op mirrors the viewer's local markup onto the shared screen.
+    RemoteAnnotation(ras_protocol::AnnotateOp),
     /// Host-side: the shared display's global bounds (logical units), emitted once the capture
     /// starts, so the app can place its pointer overlay over exactly the display being shared —
     /// correct on a secondary monitor, not just the primary. Not emitted if the backend can't report

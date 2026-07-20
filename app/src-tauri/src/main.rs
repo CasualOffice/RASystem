@@ -692,6 +692,46 @@ async fn send_pointer(
     Ok(())
 }
 
+/// Send annotation markup to render on the **host's** overlay (ADR-097). `op` is `"stroke"` (with
+/// `tool`/`color`/`points`), `"undo"`, or `"clear"`. Display data only — not OS input, no capability,
+/// like the visual pointer. `points` are normalized `0..=65535` `[x, y]`, bounded here and on the host.
+#[tauri::command]
+async fn annotate(
+    state: State<'_, AppState>,
+    op: String,
+    tool: u8,
+    color: u32,
+    points: Vec<[u16; 2]>,
+) -> Result<(), String> {
+    use ras_protocol::{AnnotTool, AnnotateOp};
+    let controller = lock(&state.session).as_ref().map(|s| s.controller.clone());
+    let Some(c) = controller else { return Ok(()) };
+    let op = match op.as_str() {
+        "undo" => AnnotateOp::Undo,
+        "clear" => AnnotateOp::Clear,
+        _ => {
+            let tool = match tool {
+                1 => AnnotTool::Highlighter,
+                2 => AnnotTool::Arrow,
+                3 => AnnotTool::Rect,
+                _ => AnnotTool::Pen,
+            };
+            let points: Vec<(u16, u16)> = points
+                .into_iter()
+                .take(ras_protocol::MAX_ANNOT_POINTS)
+                .map(|p| (p[0], p[1]))
+                .collect();
+            AnnotateOp::Stroke {
+                tool,
+                color_rgb: color & 0x00ff_ffff,
+                points,
+            }
+        }
+    };
+    c.send_annotation(op);
+    Ok(())
+}
+
 /// Send an in-session **chat** message over whichever session is currently active (ADR-082). Chat is
 /// base session comms — **no capability** (a live session already required consent, so gating would be
 /// security-theater). Prefers a live viewer (Connect) session; falls back to an active share (Share)
@@ -1263,6 +1303,51 @@ struct PointerPayload {
     x: u16,
     y: u16,
     visible: bool,
+}
+
+/// Annotation op pushed to the host overlay window (ADR-097). `op` is `"stroke"`/`"undo"`/`"clear"`;
+/// `points` are normalized `0..=65535` `[x, y]`. Display data only (no secret) — mirrors the viewer's
+/// markup onto the shared screen.
+#[derive(Clone, serde::Serialize)]
+struct AnnotatePayload {
+    op: &'static str,
+    tool: u8,
+    color: u32,
+    points: Vec<[u16; 2]>,
+}
+
+/// Project a core [`ras_protocol::AnnotateOp`] into the overlay's JSON payload.
+fn annotate_payload(op: &ras_protocol::AnnotateOp) -> AnnotatePayload {
+    use ras_protocol::{AnnotTool, AnnotateOp};
+    match op {
+        AnnotateOp::Undo => AnnotatePayload {
+            op: "undo",
+            tool: 0,
+            color: 0,
+            points: vec![],
+        },
+        AnnotateOp::Clear => AnnotatePayload {
+            op: "clear",
+            tool: 0,
+            color: 0,
+            points: vec![],
+        },
+        AnnotateOp::Stroke {
+            tool,
+            color_rgb,
+            points,
+        } => AnnotatePayload {
+            op: "stroke",
+            tool: match tool {
+                AnnotTool::Pen => 0,
+                AnnotTool::Highlighter => 1,
+                AnnotTool::Arrow => 2,
+                AnnotTool::Rect => 3,
+            },
+            color: *color_rgb,
+            points: points.iter().map(|(x, y)| [*x, *y]).collect(),
+        },
+    }
 }
 
 /// Connection-quality readout for the viewer HUD (task #22). Projects `ras_core::QualitySample` for the
@@ -1881,6 +1966,12 @@ async fn serve_one(
                         let _ = ov.emit("pointer", PointerPayload { x, y, visible });
                     }
                 }
+                // Viewer annotation markup (ADR-097) → render it on the host overlay. Purely visual.
+                Some(LifecycleEvent::RemoteAnnotation(op)) => {
+                    if let Some(ov) = app.get_webview_window("overlay") {
+                        let _ = ov.emit("annotate", annotate_payload(&op));
+                    }
+                }
                 Some(LifecycleEvent::CaptureGeometry { x, y, width, height }) => {
                     // Place the pointer overlay over exactly the shared display (logical/point
                     // coordinates, which macOS global space and Tauri's Logical* share), so the
@@ -2136,6 +2227,7 @@ fn main() {
             set_contact_blocked,
             disconnect,
             send_pointer,
+            annotate,
             send_chat,
             send_clipboard,
             file_begin,

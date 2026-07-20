@@ -61,8 +61,71 @@ listen("pointer", (e) => {
   ptr = { x: p.x, y: p.y, visible: !!p.visible, at: performance.now() };
 });
 
+// ── Annotations mirrored from the viewer (ADR-097) ──────────────────────────────────────────────
+// The viewer's markup, rendered on the host's shared display. Points are normalized 0..=65535 over
+// the shared frame (same space as the pointer), so they map straight onto the overlay canvas.
+let annotStrokes = [];
+const MAX_ANNOT_STROKES = 256; // bound host-side memory; oldest drop first
+const colorHex = (n) => "#" + ((n & 0xffffff) >>> 0).toString(16).padStart(6, "0");
+listen("annotate", (e) => {
+  const p = e.payload || {};
+  if (p.op === "clear") annotStrokes = [];
+  else if (p.op === "undo") annotStrokes.pop();
+  else if (p.op === "stroke") {
+    annotStrokes.push({ tool: p.tool | 0, color: colorHex(p.color | 0), points: p.points || [] });
+    if (annotStrokes.length > MAX_ANNOT_STROKES) annotStrokes.shift();
+  }
+});
+// Clear markup when the whole share ends, so it never outlives the session.
+listen("share-active", (e) => {
+  if (!e.payload) annotStrokes = [];
+});
+
+// Draw one annotation stroke (tool: 0=pen, 1=highlighter, 2=arrow, 3=rect). Coords normalized.
+function drawAnnot(s) {
+  const pts = s.points;
+  if (!pts || !pts.length) return;
+  const X = (n) => (n / 65535) * cv.width;
+  const Y = (n) => (n / 65535) * cv.height;
+  g.strokeStyle = s.color;
+  g.lineJoin = "round";
+  g.lineCap = "round";
+  if (s.tool === 1) {
+    g.globalAlpha = 0.35;
+    g.lineWidth = 18 * dpr;
+  } else {
+    g.globalAlpha = 1;
+    g.lineWidth = 3 * dpr;
+  }
+  const a = pts[0];
+  const b = pts[pts.length - 1];
+  g.beginPath();
+  if (s.tool === 3) {
+    g.strokeRect(X(a[0]), Y(a[1]), X(b[0]) - X(a[0]), Y(b[1]) - Y(a[1]));
+  } else if (s.tool === 2) {
+    g.moveTo(X(a[0]), Y(a[1]));
+    g.lineTo(X(b[0]), Y(b[1]));
+    g.stroke();
+    const ang = Math.atan2(Y(b[1]) - Y(a[1]), X(b[0]) - X(a[0]));
+    const head = 16 * dpr;
+    g.beginPath();
+    g.moveTo(X(b[0]), Y(b[1]));
+    g.lineTo(X(b[0]) - head * Math.cos(ang - Math.PI / 6), Y(b[1]) - head * Math.sin(ang - Math.PI / 6));
+    g.moveTo(X(b[0]), Y(b[1]));
+    g.lineTo(X(b[0]) - head * Math.cos(ang + Math.PI / 6), Y(b[1]) - head * Math.sin(ang + Math.PI / 6));
+    g.stroke();
+  } else {
+    g.moveTo(X(pts[0][0]), Y(pts[0][1]));
+    for (let i = 1; i < pts.length; i++) g.lineTo(X(pts[i][0]), Y(pts[i][1]));
+    g.stroke();
+  }
+  g.globalAlpha = 1;
+}
+
 function draw(now) {
   g.clearRect(0, 0, cv.width, cv.height);
+  // Viewer annotations first, so the live pointer cursor draws on top of them.
+  for (const s of annotStrokes) drawAnnot(s);
   const fresh = now - ptr.at < STALE_MS;
   if (ptr.visible && fresh) {
     const px = (ptr.x / 65535) * cv.width;

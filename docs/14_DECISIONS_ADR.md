@@ -1292,6 +1292,27 @@
     it is the remote-access controller, just on a different transport behind the same `SessionTransport`
     seam.
 
+- **ADR-097 · Viewer annotation markup rendered on the host overlay · Accepted.**
+  - **Context.** On-device two-machine testing (issue #5) reported that viewer drawing ("draw…
+    nothing works") only appeared on the *controller's* own screen — annotation was a v1 local-only
+    canvas, never transmitted. The host had no way to show the viewer's markup.
+  - **Decision.** Add a `ControlMsg::Annotate(AnnotateOp)` wire variant (proto oneof field 22) — a
+    completed **stroke** (tool + `0xRRGGBB` colour + normalized `0..=65535` points), **undo** (drop
+    last), or **clear** (drop all). The host forwards it as `LifecycleEvent::RemoteAnnotation`; the app
+    renders it on the existing transparent pointer overlay. Points are normalized to the **video
+    content rect** (letterbox-aware, same mapping as the remote pointer) so markup lands on the correct
+    host pixels — including a secondary monitor.
+  - **Security posture.** Annotation is **display data, not OS input and not a secret** — drawing
+    geometry + a colour, exactly like the visual remote pointer (ADR-061). So it carries **no
+    capability** (Inv 2 is about *privileged* behaviours; markup touches no OS/input/screen-write
+    surface — a live session already required consent). It is **fail-closed on decode**: unknown
+    tool/op tags are rejected and the point count is bounded (`MAX_ANNOT_POINTS = 1024`), so a hostile
+    or buggy peer cannot force a large allocation; the host also bounds retained strokes (256, oldest
+    dropped). It is one-way (controller → host) in this slice.
+  - **Scope / deferred.** Wire + core + app + overlay render landed, codec round-trip + a core loopback
+    test green. Two-way (host annotating the controller) and the richer cursor model (labeled virtual
+    cursors for every participant, touch-style clicks under a control lease) are follow-ups.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

@@ -120,6 +120,17 @@ message PointerUpdate {
   bool   visible = 3; // false → hide the overlay cursor
 }
 
+// Viewer annotation markup rendered on the HOST's overlay (ADR-097). Display data — NOT OS input and
+// NOT a secret (drawing coordinates + a colour, like the visual pointer), so it carries NO capability.
+// `points` are packed (x<<16)|y, each normalized 0..=65535 over the shared frame; the count is bounded
+// (MAX_ANNOT_POINTS) on decode — fail-closed. op: 0=stroke, 1=undo (drop last), 2=clear (drop all).
+message Annotate {
+  uint32 op    = 1; // 0=stroke, 1=undo, 2=clear
+  uint32 tool  = 2; // 0=pen, 1=highlighter, 2=arrow, 3=rect
+  uint32 color = 3; // 0xRRGGBB
+  repeated uint32 points = 4; // packed (x<<16)|y; bounded MAX_ANNOT_POINTS on decode
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3 — OS input (ADR-067). Coordinates are normalized fixed-point u16
 // (0..=65535 = 0.0..=1.0 of a display) carried in uint32; the codec validates
@@ -312,6 +323,7 @@ message ControlMsg {
     FileReject      file_reject      = 19;
     FileChunk       file_chunk       = 20;
     FileComplete    file_complete    = 21;
+    Annotate        annotate         = 22;
   }
 }
 
