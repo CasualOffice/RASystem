@@ -26,7 +26,11 @@ description = "Casual RAS — one desktop app that both shares this screen and c
 tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
-tauri = { version = "2.11", features = [] }
+# `macos-private-api` backs `app.macOSPrivateApi = true` in tauri.conf.json — REQUIRED for genuinely
+# transparent windows on macOS (without it the pointer overlay renders as an opaque white sheet over the
+# host's own desktop). Uses private AppKit APIs, so this build is not App-Store-eligible (we distribute
+# directly), which is fine.
+tauri = { version = "2.11", features = ["macos-private-api"] }
 # Signed auto-update (ADR-078). Verifies each update against an embedded Ed25519 (minisign) public
 # key before applying — the FREE update-integrity layer, independent of the deferred paid OS
 # code-signing/notarization (ADR-072). Inert until a signing key is provisioned (see the runbook).

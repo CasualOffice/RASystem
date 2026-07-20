@@ -17,6 +17,10 @@
         display: block;
         width: 100vw;
         height: 100vh;
+        /* Explicitly transparent: a full-viewport canvas must not paint an opaque backdrop over the
+           host's own desktop (the macOS "white sheet covering my screen" report). Window-level
+           transparency also requires app.macOSPrivateApi = true in tauri.conf.json. */
+        background: transparent;
       }
       /* Always-visible "remote active" indicator (Invariant 7). Lives on the always-on-top, maximized,
          un-minimizable overlay so it stays visible on the shared display even if the main app window is

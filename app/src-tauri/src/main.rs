@@ -1722,6 +1722,31 @@ async fn serve_one(
     #[cfg(target_os = "windows")]
     let input_sink = Arc::new(ras_input_windows::SendInputSink::new());
 
+    // Tell the sharer UP FRONT if OS-input injection won't be available on this machine, so a later
+    // "Take control" request doesn't just silently hang (the host refuses the lease fail-closed when
+    // `input_permitted()` is false — Inv 15/fail-closed — but that refusal was previously invisible to
+    // the user). Screen viewing is unaffected; only remote control needs OS-level injection rights.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        use ras_core::control::OsInputSink as _;
+        if !input_sink.input_permitted() {
+            #[cfg(target_os = "macos")]
+            let msg =
+                "Remote control needs Accessibility permission: open System Settings → Privacy \
+                       & Security → Accessibility, enable Casual RAS, then stop and start sharing \
+                       again. Screen viewing works without it.";
+            #[cfg(target_os = "linux")]
+            let msg = "Remote control is unavailable: no X11 server is reachable. A pure-Wayland \
+                       session cannot receive injected input (XTEST) — log in using an Xorg/X11 \
+                       session to allow control. Screen viewing works without it.";
+            #[cfg(target_os = "windows")]
+            let msg =
+                "Remote control is currently unavailable on this machine. Screen viewing works.";
+            log::warn!("share: OS input not permitted up front — {msg}");
+            let _ = app.emit("share-input-warning", msg);
+        }
+    }
+
     let (capture, encoder) = make_backends();
     // Host side of ADR-091 resume: on a transport drop the host re-accepts on the same endpoint and
     // waits for the same peer (by authenticated EndpointId) to re-dial, then resumes. Symmetric to the
@@ -1860,6 +1885,12 @@ async fn serve_one(
                     // monitor. Best-effort: positioning failures leave the default overlay.
                     if let Some(ov) = app.get_webview_window("overlay") {
                         use tauri::{LogicalPosition, LogicalSize};
+                        // A maximized window ignores set_position/set_size (its geometry is locked to
+                        // the primary monitor) — the multi-monitor bug where the overlay stuck to the
+                        // primary display while capture streamed a secondary one. Unmaximize first so the
+                        // overlay can be moved to (and sized for) exactly the shared display, even at a
+                        // negative origin (a monitor left of / above the primary).
+                        let _ = ov.unmaximize();
                         let _ = ov.set_position(LogicalPosition::new(x, y));
                         let _ = ov.set_size(LogicalSize::new(width, height));
                     }

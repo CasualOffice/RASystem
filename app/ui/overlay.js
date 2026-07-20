@@ -39,7 +39,9 @@ listen("share-active", (e) => {
 });
 
 const cv = document.getElementById("ptr");
-const g = cv.getContext("2d");
+// `alpha: true` is the 2D default, but set it explicitly so the backing store is guaranteed
+// transparent across engines — the overlay must composite over the host desktop, never paint white.
+const g = cv.getContext("2d", { alpha: true });
 
 let dpr = 1;
 function fit() {

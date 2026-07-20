@@ -8,6 +8,7 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -26,7 +27,6 @@
         "shadow": false,
         "focus": false,
         "skipTaskbar": true,
-        "maximized": true,
         "visible": false
       }
     ],

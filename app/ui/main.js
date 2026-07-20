@@ -955,7 +955,25 @@ listen("share-active", (e) => {
     shareIndicator.className = "indicator idle";
     chat.setSessionLive(false); // sharing torn down entirely — no session
     files.setHostLive(false); // no session — dismiss any file offer/notice
+    const w = document.getElementById("share-input-warning");
+    if (w) w.style.display = "none"; // clear stale warning when sharing ends
   }
+});
+// A persistent, honest banner when OS-input control can't work on this machine (macOS Accessibility
+// not granted / Linux on Wayland). Without it, a viewer's "Take control" just silently never engages.
+listen("share-input-warning", (e) => {
+  let el = document.getElementById("share-input-warning");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "share-input-warning";
+    el.style.cssText =
+      "background:#5a3d00;color:#ffd479;padding:10px 14px;border-radius:8px;" +
+      "margin:8px 0;font-size:13px;line-height:1.45;";
+    const parent = document.getElementById("share-view") || document.body;
+    parent.insertBefore(el, parent.firstChild);
+  }
+  el.textContent = "⚠ " + e.payload;
+  el.style.display = "block";
 });
 
 // Local consent (Invariant 1: the local user authorizes each viewer).
