@@ -416,10 +416,28 @@ mod linux {
         }
 
         fn input_permitted(&self) -> bool {
+            // Fail-closed on a pure-Wayland session: XTEST connects via Xwayland (so the checks below
+            // would pass), but injected events reach ONLY Xwayland clients — never native Wayland
+            // windows or the compositor — so control would silently no-op with NO rejection (exactly
+            // the "took control but can't click/type, nothing rejected" report). Refuse the lease so
+            // the host surfaces the honest "use an Xorg/X11 session" banner instead of dead control.
+            if is_wayland_session() {
+                return false;
+            }
             // Fail-closed: a reachable X server AND a usable XTEST extension are both required, or the
             // host refuses the lease (never grant one that would silently no-op on every event).
             self.conn.is_some() && self.xtest_available
         }
+    }
+
+    /// True on a Wayland session, where XTEST injection cannot drive native Wayland windows. Heuristic:
+    /// `WAYLAND_DISPLAY` is set, or `XDG_SESSION_TYPE=wayland`. A real Xorg session sets neither to
+    /// Wayland. (A future native path is libei/uinput — docs/19 §3.)
+    fn is_wayland_session() -> bool {
+        std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var("XDG_SESSION_TYPE")
+                .map(|v| v.eq_ignore_ascii_case("wayland"))
+                .unwrap_or(false)
     }
 
     /// Map a USB-HID Keyboard/Keypad usage (page 0x07) to an **X keycode** (Linux evdev keycode + 8).
