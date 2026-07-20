@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use x11rb::connection::Connection as _; // brings `setup()` into scope (screen dimensions)
 use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
