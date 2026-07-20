@@ -957,6 +957,8 @@ listen("share-active", (e) => {
     files.setHostLive(false); // no session — dismiss any file offer/notice
     const w = document.getElementById("share-input-warning");
     if (w) w.style.display = "none"; // clear stale warning when sharing ends
+    const pc = document.getElementById("peer-contact-banner");
+    if (pc) pc.style.display = "none";
   }
 });
 // A persistent, honest banner when OS-input control can't work on this machine (macOS Accessibility
@@ -993,6 +995,41 @@ listen("share-input-rejected", (e) => {
   el.style.display = "block";
   if (inputRejectTimer) clearTimeout(inputRejectTimer);
   inputRejectTimer = setTimeout(() => { el.style.display = "none"; }, 6000);
+});
+// Make contacts two-way: when a viewer connects, offer to save THEM as a contact (they already
+// dialed us by code/ticket, so they have us; this lets us reach them by name too). No auto-save —
+// the local user decides (Inv 1). The code is public-key-derived (not a secret).
+listen("peer-contact", (e) => {
+  const code = String(e.payload || "");
+  if (!code) return;
+  let el = document.getElementById("peer-contact-banner");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "peer-contact-banner";
+    el.style.cssText =
+      "background:#123a2a;color:#9be8c4;padding:10px 14px;border-radius:8px;margin:8px 0;" +
+      "font-size:13px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;";
+    const parent = document.getElementById("share-view") || document.body;
+    parent.insertBefore(el, parent.firstChild);
+  }
+  el.textContent = "";
+  const span = document.createElement("span");
+  span.textContent = "Connected peer " + code.split("-").slice(0, 3).join("-") + "… — save to reach them by name:";
+  const btn = document.createElement("button");
+  btn.textContent = "Add to contacts";
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      await invoke("add_contact", { input: code, label: "" });
+      btn.textContent = "Added ✓";
+    } catch (_) {
+      btn.textContent = "Add failed";
+      btn.disabled = false;
+    }
+  });
+  el.appendChild(span);
+  el.appendChild(btn);
+  el.style.display = "flex";
 });
 
 // Local consent (Invariant 1: the local user authorizes each viewer).

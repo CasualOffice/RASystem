@@ -1724,6 +1724,16 @@ async fn handle_bootstrap(
         deny!(boot, code);
     }
 
+    // Surface the viewer's stable contact code so the host can save them back as a contact — this is
+    // what makes contacts **two-way** after a connection (ADR-092/093) without any always-on presence
+    // layer: the controller already saved the host (they dialed by its code/ticket); this lets the host
+    // reciprocate. It's a public-key-derived code (display data, no secret), and the host chooses
+    // whether to add them (Invariant 1 — never auto-saved).
+    let _ = app.emit(
+        "peer-contact",
+        ras_identity::contact_code(&ras_identity::ContactId::from_bytes(request.controller_id)),
+    );
+
     // Local human consent (Invariant 1) — no grant is minted until the user clicks Allow.
     let _ = app.emit("share-status", "A viewer is requesting access…");
     if !consent.prompt(short_id(&request.controller_id)).await {
