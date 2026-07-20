@@ -2013,7 +2013,9 @@ async fn serve_one(
     // the multi-monitor follow-up. Linux/Windows stay shape-only until the position observer has a bounds
     // plumbing path (the X11 observer suppresses `Moved` without bounds, so wiring it would be inert).
     #[cfg(target_os = "macos")]
-    let host = host.with_cursor_observer(Box::new(ras_media_macos::MacCursorObserver::without_bounds()));
+    let host = host.with_cursor_observer(Box::new(
+        ras_media_macos::MacCursorObserver::without_bounds(),
+    ));
     #[cfg(target_os = "linux")]
     let host = host.with_cursor_observer(Box::new(ras_cursor_linux::X11CursorObserver::new()));
     #[cfg(target_os = "windows")]
