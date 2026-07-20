@@ -313,6 +313,58 @@ impl ras_core::AudioOutput for AppAudioOutput {
     }
 }
 
+/// The host OS-cursor shape (ADR-073) forwarded to the webview so the viewer draws a **soft cursor**
+/// over the video at zero latency (the host capture runs `showsCursor=false`, so the real cursor is no
+/// longer baked into the frames — this channel replaces it). Cursor pixels are **display-only** data,
+/// not a secret (Inv 8 lists keystrokes/clipboard/screen pixels — the small cursor bitmap is not a
+/// screen pixel and carries nothing sensitive), so emitting them to the webview is fine. Sync +
+/// non-blocking exactly like [`ChannelFrameSink`]: a closed webview just drops the event, never
+/// backpressuring the control channel (per the [`CursorSink`] contract).
+struct AppCursorSink {
+    app: tauri::AppHandle,
+}
+
+/// Serialized cursor shape for the `cursor-shape` event. `rgba` is the raw top-down RGBA bytes (a
+/// `Vec<u8>` serializes to a JSON array Tauri hands the webview). Bounded ≤ `256*256*4` by the wire
+/// decoder before it ever reaches here, so the payload is small.
+#[derive(serde::Serialize, Clone)]
+struct CursorShapePayload {
+    id: u32,
+    hotspot_x: u16,
+    hotspot_y: u16,
+    width: u16,
+    height: u16,
+    rgba: Vec<u8>,
+}
+
+impl ras_core::CursorSink for AppCursorSink {
+    fn set_shape(&self, shape: ras_core::CursorShape) {
+        // The webview MUST cache this shape by `id` (see the CursorSink cache contract) so a later
+        // `cursor-cached` reference resolves. A closed channel just drops the event.
+        let _ = self.app.emit(
+            "cursor-shape",
+            CursorShapePayload {
+                id: shape.id,
+                hotspot_x: shape.hotspot_x,
+                hotspot_y: shape.hotspot_y,
+                width: shape.width,
+                height: shape.height,
+                rgba: shape.rgba.to_vec(),
+            },
+        );
+    }
+
+    fn set_cached(&self, id: u32) {
+        // Reuse a shape the webview already cached by `id` (the host sent no RGBA to save bandwidth).
+        let _ = self.app.emit("cursor-cached", id);
+    }
+
+    fn hide(&self) {
+        // The host OS cursor is hidden — the webview hides the soft cursor (drawing nothing).
+        let _ = self.app.emit("cursor-hidden", ());
+    }
+}
+
 /// Dial a host's **connection ticket** over iroh and render its screen. Works on any platform (the
 /// viewer only decodes).
 ///
@@ -435,6 +487,13 @@ async fn connect_to_host(
     if let Ok(sink) = ras_clipboard::ArboardClipboardSink::new() {
         controller.attach_clipboard_sink(Arc::new(sink));
     }
+
+    // Attach the cursor-shape sink (ADR-073): the host's OS cursor shape/cache/hidden updates are
+    // forwarded to the webview as `cursor-shape`/`cursor-cached`/`cursor-hidden` events, which draw a
+    // soft cursor over the video. Since macOS/Linux capture now runs `showsCursor=false` (the real
+    // cursor is no longer in the frame), this soft cursor replaces it — one cursor, never zero (the
+    // webview falls back to a default arrow until the first shape arrives). Display-only data (Inv 8).
+    controller.attach_cursor_sink(Arc::new(AppCursorSink { app: app.clone() }));
 
     // Attach the output-audio sink (ADR-077): each Opus packet the host sends (only if it granted
     // `audio.listen`, gated host-side, Inv 15) is forwarded to the webview over `on_audio` for WebCodecs
@@ -1920,10 +1979,11 @@ async fn serve_one(
         Box::new(audio_capture),
         Box::new(ras_audio_opus::OpusEncoder::new()),
     );
-    // Host-cursor-shape observer (ADR-073): the live OS cursor shape is streamed to the viewer so it draws
-    // the real cursor client-side at zero latency. Display data, never input (outside Inv 6); always safe to
-    // wire (no capability, no consent gate). The viewer-side render is a separate follow-up — this just
-    // feeds the observer so the capture pipeline has it.
+    // Host-cursor-shape observer (ADR-073): the live OS cursor shape is streamed to the viewer, which draws
+    // it as a soft cursor over the video at zero latency (its `AppCursorSink` end is attached in
+    // `connect_to_host`). Display data, never input (outside Inv 6); always safe to wire (no capability, no
+    // consent gate). Because macOS/Linux capture runs `showsCursor=false` (the real cursor is no longer
+    // baked into frames), this channel IS the cursor the viewer sees. Wired only where a backend exists.
     #[cfg(target_os = "macos")]
     let host = host.with_cursor_observer(Box::new(ras_cursor_macos::MacCursorObserver::new()));
     #[cfg(target_os = "linux")]

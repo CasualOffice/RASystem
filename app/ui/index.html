@@ -229,6 +229,10 @@
       </div>
       <canvas id="screen"></canvas>
       <canvas id="annot"></canvas>
+      <!-- Soft cursor: the host's OS cursor shape (ADR-073) drawn over the video. The host capture runs
+           showsCursor=false, so the real cursor is NOT in the frame — this overlay is the one cursor the
+           viewer sees. Click-through (pointer-events:none) so it never intercepts input. -->
+      <canvas id="softcursor"></canvas>
       <div id="tools" hidden>
         <button data-tool="off" class="active" title="Stop annotating (interact with nothing — view only)">🚫</button>
         <button data-tool="pen" title="Freehand pen">✏️</button>

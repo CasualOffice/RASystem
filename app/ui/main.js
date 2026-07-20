@@ -722,6 +722,7 @@ function setLive(isLive) {
   if (macMod) macMod.hidden = !isLive;
   chat.setSessionLive(isLive); // chat/clipboard are usable only while the viewer session is live
   files.setViewerLive(isLive); // the viewer can send a file only while its session is live
+  softCursor.setLive(isLive); // seed the soft cursor + hide the browser cursor over the video (ADR-073)
 }
 
 // Start a viewer session either from a pasted `ticket` or a saved `contactId` (ticketless, ADR-093).
@@ -1157,6 +1158,167 @@ window.addEventListener("pointermove", trackPointer);
 window.addEventListener("pointerleave", () => {
   if (active) invoke("send_pointer", { x: 0, y: 0, visible: false });
 });
+
+// ── Soft cursor (ADR-073): draw the HOST's OS cursor shape over the video ──────────────────────────
+// The host capture now runs `showsCursor=false`, so the real cursor is NOT baked into the frames. The
+// host streams its cursor shape/cache/hidden out-of-band (Rust `AppCursorSink` → these events) and we
+// draw it here as a single soft cursor. Position uses the LOCAL pointer over the video content rect —
+// the touch-style control model (ADR-097): where the local user points is where the host cursor is
+// aimed. Combined with CSS `cursor:none` over the video, this yields EXACTLY ONE cursor.
+//
+// "Never zero" guarantee: the moment a session goes live we set `soft-cursor-active` (hiding the
+// browser cursor) AND seed a default arrow shape, so even before the first host shape arrives — or if
+// one never does — the user always sees a cursor. `cursor-hidden` hides the soft cursor ONLY while the
+// pointer is over the video, but the browser cursor stays hidden there; a genuinely hidden host cursor
+// (e.g. a fullscreen video player) is the correct thing to mirror. Off the video, we neither draw nor
+// hide (`soft-cursor-active` only affects `#screen`), so the normal browser cursor shows on the chrome.
+const softCanvas = document.getElementById("softcursor");
+const softCtx = softCanvas.getContext("2d");
+const connectView = views.connect;
+
+const softCursor = (() => {
+  // FIFO cache by id, matching ras_core::CURSOR_CACHE_CAP so a `cursor-cached` reference always
+  // resolves (the cache contract: retain ≥ cap distinct shapes, evict oldest-first, no reorder on hit).
+  const CACHE_CAP = 128;
+  const cache = new Map(); // id -> { bitmap: ImageBitmap|null, hotspot_x, hotspot_y, width, height }
+  let current = null; // the shape to draw (from cache), or null → fall back to the default arrow
+  let hostHidden = false; // the host reported its cursor hidden → draw nothing while over the video
+  let overVideo = false; // the local pointer is inside the video content rect
+  let px = 0, py = 0; // last local pointer position (viewport px)
+  let live = false;
+
+  // A crisp default arrow drawn in code (no asset), used until the first host shape arrives or if none
+  // ever does — so the user is never left with no cursor. Hotspot is the tip (0,0).
+  function drawDefaultArrow(x, y) {
+    softCtx.save();
+    softCtx.translate(x, y);
+    softCtx.beginPath();
+    softCtx.moveTo(0, 0);
+    softCtx.lineTo(0, 16);
+    softCtx.lineTo(4, 12);
+    softCtx.lineTo(7, 18);
+    softCtx.lineTo(9.5, 17);
+    softCtx.lineTo(6.5, 11);
+    softCtx.lineTo(11, 11);
+    softCtx.closePath();
+    softCtx.fillStyle = "#fff";
+    softCtx.strokeStyle = "#000";
+    softCtx.lineWidth = 1.4;
+    softCtx.lineJoin = "round";
+    softCtx.stroke();
+    softCtx.fill();
+    softCtx.restore();
+  }
+
+  function evictIfNeeded() {
+    while (cache.size > CACHE_CAP) {
+      const oldest = cache.keys().next().value; // insertion order = FIFO (Map preserves it)
+      const rec = cache.get(oldest);
+      if (rec && rec.bitmap && rec.bitmap.close) { try { rec.bitmap.close(); } catch (_) {} }
+      cache.delete(oldest);
+    }
+  }
+
+  function redraw() {
+    // Match the drawing surface to the video box so overlay px == screen px.
+    const w = softCanvas.clientWidth, h = softCanvas.clientHeight;
+    if (softCanvas.width !== w) softCanvas.width = w;
+    if (softCanvas.height !== h) softCanvas.height = h;
+    softCtx.clearRect(0, 0, softCanvas.width, softCanvas.height);
+    // "Never zero, exactly one": the browser cursor is hidden over the video ONLY while the soft cursor
+    // is actually being drawn (live, over the video, host not hiding). We toggle `soft-cursor-active`
+    // HERE — not on setLive — so the window between session-live and the first pointer move (when the
+    // pointer may already sit stationary over the video, so no pointermove has seeded overVideo yet)
+    // keeps the native browser cursor visible rather than hiding it with nothing drawn (which would be a
+    // zero-cursor state, a regression worse than the old baked cursor). `hostHidden` is the one
+    // deliberate no-cursor case (the host itself hides its cursor, e.g. a fullscreen player) — we mirror
+    // it, and there the native cursor is correctly shown as the chrome fallback again.
+    const drawing = live && overVideo && !hostHidden;
+    connectView.classList.toggle("soft-cursor-active", drawing);
+    if (!drawing) return;
+    // Coordinates relative to the canvas (its box is fixed at top:52 left:0, same as #screen).
+    const box = softCanvas.getBoundingClientRect();
+    const x = px - box.left, y = py - box.top;
+    if (current && current.bitmap) {
+      softCtx.drawImage(current.bitmap, x - current.hotspot_x, y - current.hotspot_y);
+    } else {
+      // No shape yet (or a cached shape whose bitmap failed to decode) → default arrow, tip at pointer.
+      drawDefaultArrow(x, y);
+    }
+  }
+
+  function useShape(id) {
+    const rec = cache.get(id);
+    if (rec) current = rec; // a hit does NOT reorder (host uses insertion order) — cache contract
+    // If we somehow don't have it (shouldn't happen under the contract), keep the last shape / arrow.
+    redraw();
+  }
+
+  return {
+    setLive(on) {
+      live = on;
+      // Note: the `soft-cursor-active` class (which hides the browser cursor over the video) is NOT
+      // toggled here — `redraw()` sets it only while a soft cursor is actually drawn, so we never hide
+      // the native cursor with nothing to replace it (the zero-cursor regression). redraw() runs below.
+      if (!on) {
+        current = null;
+        hostHidden = false;
+        overVideo = false;
+        for (const rec of cache.values()) {
+          if (rec.bitmap && rec.bitmap.close) { try { rec.bitmap.close(); } catch (_) {} }
+        }
+        cache.clear();
+      }
+      redraw();
+    },
+    // A fresh host shape: decode its RGBA to an ImageBitmap, cache it by id, and show it. We MUST record
+    // it even under load (the cache contract) or a later `cursor-cached` would strand.
+    async setShape(p) {
+      hostHidden = false;
+      const { id, hotspot_x, hotspot_y, width, height, rgba } = p;
+      // Reserve the slot in insertion order immediately (so a rapid cached-ref for this id resolves and
+      // FIFO order is correct) with a null bitmap; fill the bitmap once decoded.
+      if (!cache.has(id)) {
+        cache.set(id, { bitmap: null, hotspot_x, hotspot_y, width, height });
+        evictIfNeeded();
+      }
+      current = cache.get(id);
+      redraw(); // draw the arrow at the right spot immediately; the bitmap replaces it once ready
+      try {
+        const arr = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+        const img = new ImageData(new Uint8ClampedArray(arr), width, height); // top-down RGBA
+        const bmp = await createImageBitmap(img);
+        const rec = cache.get(id);
+        if (rec) { rec.bitmap = bmp; rec.hotspot_x = hotspot_x; rec.hotspot_y = hotspot_y; }
+        redraw();
+      } catch (_) {
+        // Decode failed → the default arrow already stands in; not fatal (cursor pixels are display-only).
+      }
+    },
+    setCached(id) { hostHidden = false; useShape(id); },
+    setHidden() { hostHidden = true; redraw(); },
+    // The local pointer moved (or entered/left the video) — reposition the soft cursor.
+    setPos(x, y, inside) {
+      px = x; py = y; overVideo = inside;
+      redraw();
+    },
+  };
+})();
+
+// Track the local pointer for the soft-cursor position (independent of the throttled send_pointer).
+window.addEventListener("pointermove", (e) => {
+  if (!active) return;
+  const r = videoContentRect();
+  const inside = r.width > 0 && r.height > 0 &&
+    e.clientX >= r.left && e.clientX <= r.left + r.width &&
+    e.clientY >= r.top && e.clientY <= r.top + r.height;
+  softCursor.setPos(e.clientX, e.clientY, inside);
+});
+window.addEventListener("pointerleave", () => softCursor.setPos(0, 0, false));
+
+listen("cursor-shape", (e) => { softCursor.setShape(e.payload); });
+listen("cursor-cached", (e) => { softCursor.setCached(e.payload); });
+listen("cursor-hidden", () => { softCursor.setHidden(); });
 
 // ── Remote control (Phase 3): forward this viewer's clicks/keys to the host's OS ─────────────────
 // Only when we hold the lease (`controlling`). The host re-checks every event (lease/generation/seq/

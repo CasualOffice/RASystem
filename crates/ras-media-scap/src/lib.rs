@@ -360,7 +360,17 @@ mod imp {
         // Built here (not passed in) because `Options`/`Target` is `!Send` on Windows.
         let options = Options {
             fps,
-            show_cursor: true,
+            // Do NOT bake the OS cursor into captured frames (ADR-073): the live cursor shape is
+            // streamed out-of-band over the dedicated cursor-shape channel (the per-OS `CursorObserver`
+            // — `ras-cursor-linux` XFixes / `ras-cursor-windows` `GetCursorInfo` → `ras-core` →
+            // controller) and drawn client-side at zero latency. Compositing it into the video too
+            // would double-draw the cursor and lag behind the out-of-band shape. `scap` maps this to
+            // `shows_cursor=false` (macOS SCK), `WithoutCursor` (Windows.Graphics.Capture) and portal
+            // `cursor_mode = 1 / hidden` (Linux PipeWire). HONEST CAVEAT: on Linux the portal decides —
+            // most compositors honor the hidden mode, but a compositor that ignores `cursor_mode` may
+            // still embed the cursor, in which case the controller sees a (harmless) double cursor. The
+            // shape channel is the source of truth; the baked pixels, if any, are display-only.
+            show_cursor: false,
             show_highlight: false,
             target: None, // primary display
             crop_area: None,

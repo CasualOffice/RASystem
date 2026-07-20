@@ -36,12 +36,25 @@ mod macos {
     // PostEvent TCC (macOS 10.15+): preflight WITHOUT prompting, and request (prompts once). Declared
     // here because `core-graphics` does not wrap them; they live in the CoreGraphics framework the
     // crate already links. Both return a C `bool`.
+    //
+    // The cursor-warp discipline symbols (RustDesk two-cursor fix, PR #10314 class) also live in
+    // CoreGraphics and are un-wrapped by `core-graphics`, so they are declared here too. Signatures
+    // (CGRemoteOperation.h / CGDirectDisplay.h): `boolean_t` is a C `int` (map to i32), `CGError` is
+    // `int32_t` (i32, `kCGErrorSuccess == 0`), `CGDirectDisplayID` is `uint32_t` (u32).
     extern "C" {
         fn CGPreflightPostEventAccess() -> bool;
         fn CGRequestPostEventAccess() -> bool;
         // Current modifier/lock flags of an event-source state (HIDSystemState = 1). Returns a
         // CGEventFlags bitset; bit `kCGEventFlagMaskAlphaShift` (0x00010000) is CapsLock.
         fn CGEventSourceFlagsState(state_id: i32) -> u64;
+        // Decouple the hardware mouse from the on-screen cursor position (`connected == 0`) so an
+        // absolute warp does not fight the local user's physical mouse (the "two cursors" artifact).
+        // `connected != 0` re-couples it.
+        fn CGAssociateMouseAndMouseCursorPosition(connected: i32) -> i32;
+        // Hide / show the local cursor on a display while remote control is warping it.
+        fn CGDisplayHideCursor(display: u32) -> i32;
+        fn CGDisplayShowCursor(display: u32) -> i32;
+        fn CGMainDisplayID() -> u32;
     }
 
     /// Display bounds in global points, for normalized→pixel mapping.
@@ -62,6 +75,12 @@ mod macos {
         pressed_buttons: Mutex<HashSet<u8>>,
         last_point: Mutex<(f64, f64)>,
         displays: Mutex<Vec<DisplayBounds>>,
+        /// Warp-discipline guard (RustDesk PR #10314 class). `true` while we have dissociated the
+        /// hardware mouse from the cursor position and hidden the local cursor for an absolute warp.
+        /// Latched on the first warp of a control burst and released **only** by [`Self::end_warp`],
+        /// which the emergency-stop / teardown path (`release_all`) always calls — so a stop can
+        /// never leave the local cursor dissociated or hidden (Inv 4).
+        cursor_dissociated: Mutex<bool>,
     }
 
     impl CgEventSink {
@@ -139,6 +158,79 @@ mod macos {
                 (min_x, min_y, max_x - min_x, max_y - min_y)
             }
         }
+
+        /// Enter the cursor-warp state (RustDesk two-cursor fix, PR #10314 class): decouple the
+        /// hardware mouse from the on-screen cursor and hide the local cursor, so an injected absolute
+        /// warp does not fight the local user's physical mouse (which otherwise shows two cursors /
+        /// a fighting cursor). **Idempotent and balanced**: it fires the FFI only on the
+        /// `false → true` transition (a control burst stays dissociated for its duration, re-associating
+        /// between every event is what reintroduces the artifact), and every enter is guaranteed a
+        /// matching exit via [`Self::end_warp`] on the `release_all` teardown path.
+        fn begin_warp(&self) {
+            // Latch the flag under the lock and learn whether this is the `false → true` transition
+            // (the only time we touch the OS). `latch_warp` is pure so the balance logic is unit-tested
+            // without a display/login session; the FFI stays on-device.
+            let fire = latch_warp(
+                &mut self
+                    .cursor_dissociated
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            );
+            if fire {
+                // SAFETY: plain C predicates over a scalar/display-id; safe from any thread. The
+                // display id is the live main display. Return codes are best-effort (a non-zero
+                // CGError does not change our latched state — we still record `true` so the balancing
+                // `end_warp` unconditionally re-associates + unhides, never leaving the cursor stuck).
+                unsafe {
+                    CGAssociateMouseAndMouseCursorPosition(0);
+                    CGDisplayHideCursor(CGMainDisplayID());
+                }
+            }
+        }
+
+        /// Exit the cursor-warp state: re-couple the hardware mouse to the cursor and show the local
+        /// cursor again. **Idempotent** (a no-op if we never dissociated) and the guaranteed cleanup —
+        /// [`OsInputSink::release_all`] calls it on **every** teardown path (emergency stop, lease end,
+        /// session end), so a stop never leaves the local cursor hidden or dissociated (Inv 4).
+        fn end_warp(&self) {
+            let fire = unlatch_warp(
+                &mut self
+                    .cursor_dissociated
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            );
+            if fire {
+                // SAFETY: as `begin_warp`. Unconditionally restore the local cursor even if a prior
+                // hide/dissociate call returned a CGError — showing/re-associating an already-shown/
+                // associated cursor is a harmless no-op on the OS side.
+                unsafe {
+                    CGAssociateMouseAndMouseCursorPosition(1);
+                    CGDisplayShowCursor(CGMainDisplayID());
+                }
+            }
+        }
+    }
+
+    /// Pure transition for [`CgEventSink::begin_warp`]: set the guard and report whether this call is
+    /// the `false → true` edge (i.e. whether the OS dissociate/hide should fire). Idempotent on repeat.
+    fn latch_warp(dissociated: &mut bool) -> bool {
+        if *dissociated {
+            false
+        } else {
+            *dissociated = true;
+            true
+        }
+    }
+
+    /// Pure transition for [`CgEventSink::end_warp`]: clear the guard and report whether this call is
+    /// the `true → false` edge (i.e. whether the OS re-associate/show should fire). Idempotent on repeat.
+    fn unlatch_warp(dissociated: &mut bool) -> bool {
+        if *dissociated {
+            *dissociated = false;
+            true
+        } else {
+            false
+        }
     }
 
     fn source() -> Result<CGEventSource, InputError> {
@@ -172,6 +264,9 @@ mod macos {
     impl OsInputSink for CgEventSink {
         fn pointer_move(&self, display: u32, nx: f32, ny: f32) -> Result<(), InputError> {
             let point = self.to_point(display, nx, ny);
+            // Warp discipline (PR #10314): dissociate + hide the local cursor before an absolute warp
+            // so it does not fight the physical mouse. Balanced by `end_warp` in `release_all`.
+            self.begin_warp();
             let event = CGEvent::new_mouse_event(
                 source()?,
                 CGEventType::MouseMoved,
@@ -191,6 +286,9 @@ mod macos {
             let (bx, by, bw, bh) = self.desktop_bounds();
             let nx = (current.x + f64::from(dx)).clamp(bx, bx + (bw - 1.0).max(0.0));
             let ny = (current.y + f64::from(dy)).clamp(by, by + (bh - 1.0).max(0.0));
+            // This posts an absolute reposition too (MouseMoved at the computed point), so it is a warp:
+            // apply the same discipline. Balanced by `end_warp` in `release_all`.
+            self.begin_warp();
             let event = CGEvent::new_mouse_event(
                 source()?,
                 CGEventType::MouseMoved,
@@ -216,6 +314,8 @@ mod macos {
             down: bool,
         ) -> Result<(), InputError> {
             let point = self.to_point(display, nx, ny);
+            // A button event carries an absolute location, i.e. it warps the cursor: same discipline.
+            self.begin_warp();
             let (event_type, cg_button) = match (button, down) {
                 (PointerButton::Left, true) => (CGEventType::LeftMouseDown, CGMouseButton::Left),
                 (PointerButton::Left, false) => (CGEventType::LeftMouseUp, CGMouseButton::Left),
@@ -298,6 +398,14 @@ mod macos {
             // release as much as possible and **never abort early**. A transient `source()` / event
             // failure skips that one release and continues — it never `?`-propagates out, which would
             // otherwise leave the already-drained keys neither tracked nor released (physically stuck).
+            //
+            // FIRST, and UNCONDITIONALLY, exit any cursor-warp state (PR #10314 cleanup): re-associate
+            // the hardware mouse + unhide the local cursor. This is the guaranteed balancing exit for
+            // every `begin_warp` — `release_all` is the single funnel the host calls on emergency stop,
+            // lease end, and graceful teardown — so a stop can NEVER leave the local cursor hidden or
+            // dissociated (Inv 4). It is idempotent (a no-op if we never warped) and cannot fail, so it
+            // runs before the fallible key/button releases below (which never `?`-propagate anyway).
+            self.end_warp();
             let keys: Vec<CGKeyCode> = {
                 let mut pressed = self.pressed_keys.lock().unwrap_or_else(|e| e.into_inner());
                 pressed.drain().collect()
@@ -553,6 +661,55 @@ mod macos {
             let p = sink.to_point(0, f32::NAN, f32::INFINITY);
             assert!((p.x - 50.0).abs() < 0.001);
             assert!((p.y - 60.0).abs() < 0.001);
+        }
+
+        #[test]
+        fn warp_guard_fires_os_only_on_the_transition_edge() {
+            // RustDesk PR #10314 discipline: dissociate/hide fires once at the start of a control burst
+            // (not on every event — that reintroduces the two-cursor artifact), and re-associate/show
+            // fires once on exit. Repeated begins/ends inside the burst are no-ops.
+            let mut g = false;
+            assert!(latch_warp(&mut g), "first warp dissociates + hides");
+            assert!(g);
+            assert!(
+                !latch_warp(&mut g),
+                "subsequent warps do not re-fire the OS"
+            );
+            assert!(!latch_warp(&mut g));
+            assert!(unlatch_warp(&mut g), "teardown re-associates + unhides");
+            assert!(!g);
+            assert!(!unlatch_warp(&mut g), "a second teardown is a no-op");
+        }
+
+        #[test]
+        fn warp_guard_cleanup_is_a_noop_when_never_warped() {
+            // `release_all` on a session that never injected a warp (e.g. keyboard-only, or an
+            // emergency stop before any pointer event) must not touch the cursor at all (Inv 4: a stop
+            // must never leave the cursor hidden — and here there is nothing to restore).
+            let mut g = false;
+            assert!(!unlatch_warp(&mut g), "no warp → no OS restore call");
+            assert!(!g);
+        }
+
+        #[test]
+        fn warp_latch_then_unlatch_is_always_balanced() {
+            // Property: however many begins precede it, a single unlatch restores the cursor exactly
+            // once and leaves the guard clear — so `release_all` (which calls `end_warp` once) always
+            // brings a warped session back to the un-warped state (Inv 4), no leak, no double-restore.
+            for begins in 0..5u8 {
+                let mut g = false;
+                let mut os_dissociate_calls = 0u8;
+                for _ in 0..begins {
+                    if latch_warp(&mut g) {
+                        os_dissociate_calls += 1;
+                    }
+                }
+                // At most one OS dissociate regardless of how many pointer events fired.
+                assert!(os_dissociate_calls <= 1);
+                let restored = unlatch_warp(&mut g);
+                assert_eq!(restored, begins > 0, "restore fires iff we had dissociated");
+                assert!(!g, "guard always ends clear after teardown");
+            }
         }
 
         #[test]

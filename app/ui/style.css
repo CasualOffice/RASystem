@@ -95,6 +95,25 @@ body {
   pointer-events: auto;
   cursor: crosshair;
 }
+/* Soft cursor (ADR-073): host OS cursor shape drawn over the video. Same fixed box as #screen/#annot
+   so it aligns with the video content rect. Click-through — it never intercepts input. Above the
+   annotation layer so the remote cursor is always visible. */
+#softcursor {
+  position: fixed;
+  top: 52px;
+  left: 0;
+  width: 100vw;
+  height: calc(100vh - 52px);
+  pointer-events: none;
+  z-index: 6;
+}
+/* While a live session draws the soft cursor, hide the webview's OWN cursor over the video so there is
+   exactly one cursor (the soft one). Toggled by JS (`soft-cursor-active`) only while connected; when
+   off, the normal browser cursor returns. The annotation crosshair (when a tool is active) still wins
+   because `#annot.drawing` sets its own cursor and sits above the soft-cursor toggle target. */
+#connect-view.soft-cursor-active #screen {
+  cursor: none;
+}
 /* Floating annotation toolbar. */
 #tools {
   position: fixed;
