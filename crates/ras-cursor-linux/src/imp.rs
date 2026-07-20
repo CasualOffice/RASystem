@@ -32,9 +32,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 pub struct X11CursorObserver {
     /// The X11 connection to `$DISPLAY`, or `None` if unreachable / XFixes absent (fail-closed).
     conn: Option<RustConnection>,
-    /// The last `id` we emitted (content hash of the last shape's RGBA), so we only report changes.
-    /// `None` before the first frame.
+    /// Root-window pixel dimensions, for normalizing the cursor's root position to `0..=65535`. On a
+    /// single-monitor desktop the root equals the shared display; on multi-monitor the position is
+    /// normalized over the whole virtual desktop (a known follow-up, matching the macOS observer).
+    screen_w: u16,
+    screen_h: u16,
+    /// The last `id` we emitted (content hash of the last shape's RGBA), so we only report shape changes.
     last_id: Option<u32>,
+    /// The last normalized position we emitted, so we only report movement (`Moved`) on a real change.
+    last_pos: Option<(u16, u16)>,
 }
 
 impl X11CursorObserver {
@@ -42,8 +48,8 @@ impl X11CursorObserver {
     /// without XFixes — yields an observer whose [`CursorObserver::next`] ends immediately (`None`).
     #[must_use]
     pub fn new() -> Self {
-        let conn = match RustConnection::connect(None) {
-            Ok((conn, _screen_num)) => {
+        let (conn, screen_w, screen_h) = match RustConnection::connect(None) {
+            Ok((conn, screen_num)) => {
                 // XFixes must be version-negotiated before `get_cursor_image` is usable. A single
                 // round-trip; if it fails the extension is unavailable, so drop the connection and
                 // fail closed (no cursor rather than a broken request every poll).
@@ -51,16 +57,21 @@ impl X11CursorObserver {
                     .xfixes_query_version(5, 0)
                     .is_ok_and(|c| c.reply().is_ok());
                 if ok {
-                    Some(conn)
+                    let screen = &conn.setup().roots[screen_num];
+                    let (w, h) = (screen.width_in_pixels, screen.height_in_pixels);
+                    (Some(conn), w, h)
                 } else {
-                    None
+                    (None, 0, 0)
                 }
             }
-            Err(_) => None,
+            Err(_) => (None, 0, 0),
         };
         Self {
             conn,
+            screen_w,
+            screen_h,
             last_id: None,
+            last_pos: None,
         }
     }
 }
@@ -78,50 +89,75 @@ impl CursorObserver for X11CursorObserver {
         // cursor rather than a wrong one.
         self.conn.as_ref()?;
 
-        // Poll until the cursor differs from what we last reported. The observer models a *stream of
-        // changes*, so we suppress repeats here (in addition to the core's send-side dedup) and never
-        // busy-spin.
+        // Poll until the cursor SHAPE or POSITION differs from what we last reported. The observer models
+        // a *stream of changes*, so we suppress repeats here (in addition to the core's send-side dedup)
+        // and never busy-spin. Shape changes win over position changes in a single poll; the core's
+        // send-side throttle rate-limits the frequent `Moved` stream.
         loop {
-            let frame = capture_cursor_frame(self.conn.as_ref()?);
-            let this_id = match &frame {
-                Some(CursorFrame::Shape(s)) => Some(s.id),
-                // A hidden/too-large cursor collapses to a single sentinel so Hidden→Hidden is a repeat.
-                Some(CursorFrame::Hidden) => Some(0),
-                None => None,
+            let Some((frame, rx, ry)) = capture_cursor(self.conn.as_ref()?) else {
+                return None; // connection error → observer ends (fail-closed)
             };
+            let this_id = match &frame {
+                CursorFrame::Shape(s) => s.id,
+                // A hidden/too-large cursor collapses to a single sentinel so Hidden→Hidden is a repeat.
+                _ => 0,
+            };
+            // Normalize the root-window cursor position to 0..=65535 for the wire (matches the pointer).
+            let pos = (
+                normalize_pos(rx, self.screen_w),
+                normalize_pos(ry, self.screen_h),
+            );
 
-            match (frame, this_id) {
-                (Some(frame), Some(id)) if self.last_id != Some(id) => {
-                    self.last_id = Some(id);
-                    return Some(frame);
-                }
-                // Same as last time (or transiently unreadable): wait and poll again.
-                _ => tokio::time::sleep(POLL_INTERVAL).await,
+            // Shape change (incl. Shape↔Hidden) takes priority — emit it and re-seed the position so the
+            // next poll only reports genuine movement.
+            if self.last_id != Some(this_id) {
+                self.last_id = Some(this_id);
+                self.last_pos = Some(pos);
+                return Some(frame);
             }
+            // Otherwise, a position-only change → emit Moved.
+            if self.last_pos != Some(pos) {
+                self.last_pos = Some(pos);
+                return Some(CursorFrame::Moved { x: pos.0, y: pos.1 });
+            }
+            // Nothing changed (or transiently unreadable): wait and poll again.
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     }
 }
 
-/// Read the current X11 cursor once via XFixes and convert it to a [`CursorFrame`]. Returns:
-/// - `Some(Shape)` for a normal, in-bounds cursor,
-/// - `Some(Hidden)` if the cursor image is empty / oversized / malformed (draw nothing),
+/// Normalize a root-window pixel coordinate to `0..=65535` over `dim` pixels (matching the wire pointer
+/// units). Off-screen / out-of-range coordinates clamp to the edges; a zero `dim` (no screen) maps to 0.
+fn normalize_pos(v: i16, dim: u16) -> u16 {
+    if dim == 0 {
+        return 0;
+    }
+    let clamped = v.clamp(0, dim as i16) as u32;
+    ((clamped * 65535) / u32::from(dim)) as u16
+}
+
+/// Read the current X11 cursor once via XFixes: its shape frame plus its **root-window position**
+/// (`reply.x`, `reply.y`, in pixels). Returns:
+/// - `Some((Shape, x, y))` for a normal, in-bounds cursor,
+/// - `Some((Hidden, x, y))` if the cursor image is empty / oversized / malformed (draw nothing),
 /// - `None` only on a connection error (treated as the observer ending).
-fn capture_cursor_frame(conn: &RustConnection) -> Option<CursorFrame> {
+fn capture_cursor(conn: &RustConnection) -> Option<(CursorFrame, i16, i16)> {
     // One XFixes round-trip. A connection-level error ends the observer (`None`); anything malformed
     // in the *reply* collapses to `Hidden` (draw nothing) so a weird cursor never crashes the pump.
     let reply = conn.xfixes_get_cursor_image().ok()?.reply().ok()?;
+    let (px, py) = (reply.x, reply.y);
 
     let width = u32::from(reply.width);
     let height = u32::from(reply.height);
     if width == 0 || height == 0 || width > MAX_CURSOR_DIM || height > MAX_CURSOR_DIM {
-        return Some(CursorFrame::Hidden);
+        return Some((CursorFrame::Hidden, px, py));
     }
 
     // XFixes gives one pixel per `u32`, so the vec length must be exactly width*height. A short/long
     // buffer is malformed — draw nothing rather than read out of bounds or ship a wrong-sized bitmap.
     let expected = (width as usize).checked_mul(height as usize)?;
     if reply.cursor_image.len() != expected {
-        return Some(CursorFrame::Hidden);
+        return Some((CursorFrame::Hidden, px, py));
     }
 
     let rgba = argb_u32_to_rgba8(&reply.cursor_image);
@@ -134,14 +170,18 @@ fn capture_cursor_frame(conn: &RustConnection) -> Option<CursorFrame> {
     let hx = clamp_hotspot(reply.xhot, width);
     let hy = clamp_hotspot(reply.yhot, height);
 
-    Some(CursorFrame::Shape(CursorShape {
-        id,
-        hotspot_x: hx,
-        hotspot_y: hy,
-        width: width as u16,
-        height: height as u16,
-        rgba: Bytes::from(rgba),
-    }))
+    Some((
+        CursorFrame::Shape(CursorShape {
+            id,
+            hotspot_x: hx,
+            hotspot_y: hy,
+            width: width as u16,
+            height: height as u16,
+            rgba: Bytes::from(rgba),
+        }),
+        px,
+        py,
+    ))
 }
 
 /// Convert XFixes ARGB cursor pixels (one **premultiplied** ARGB pixel per `u32`, low 24 bits = RGB, high

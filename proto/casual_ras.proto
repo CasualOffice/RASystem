@@ -259,6 +259,15 @@ message CursorCached {
 // Host -> controller: the OS cursor is currently hidden (no shape to draw).
 message CursorHidden {}
 
+// Host -> controller: the OS cursor POSITION, normalized 0..=65535 over the shared display
+// (ADR-073, position channel). Far more frequent than shape changes, so it rides a throttled
+// (~60 Hz) drop-newest send. Display data, not input — outside Invariant 6.
+// ras_protocol::ControlMsg::CursorPosition.
+message CursorPosition {
+  uint32 x = 1; // 0..=65535, normalized over the shared display width
+  uint32 y = 2; // 0..=65535, normalized over the shared display height
+}
+
 // Clipboard-text push (ADR-076). Explicit, never auto-synced, and the receiver NEVER auto-pastes —
 // it only populates the OS clipboard. Direction is implicit in the role: controller->host requires
 // the host-enforced `clipboard.write` capability, host->controller `clipboard.read` (Inv 15). The
@@ -324,6 +333,7 @@ message ControlMsg {
     FileChunk       file_chunk       = 20;
     FileComplete    file_complete    = 21;
     Annotate        annotate         = 22;
+    CursorPosition  cursor_position  = 23;
   }
 }
 

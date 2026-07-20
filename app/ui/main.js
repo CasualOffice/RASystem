@@ -1162,16 +1162,20 @@ window.addEventListener("pointerleave", () => {
 // ── Soft cursor (ADR-073): draw the HOST's OS cursor shape over the video ──────────────────────────
 // The host capture now runs `showsCursor=false`, so the real cursor is NOT baked into the frames. The
 // host streams its cursor shape/cache/hidden out-of-band (Rust `AppCursorSink` → these events) and we
-// draw it here as a single soft cursor. Position uses the LOCAL pointer over the video content rect —
-// the touch-style control model (ADR-097): where the local user points is where the host cursor is
-// aimed. Combined with CSS `cursor:none` over the video, this yields EXACTLY ONE cursor.
+// draw it here as a single soft cursor. POSITION source depends on the mode (see `redraw`): while
+// VIEW-ONLY (and the host has streamed a position over `cursor-position`) it tracks the HOST's real
+// pointer, mapped onto the video content rect; while CONTROLLING (we hold the lease) it uses the LOCAL
+// pointer for zero-latency touch-style feedback (ADR-097) — the host's OS cursor is being driven by our
+// own input. Combined with CSS `cursor:none` over the video, this yields EXACTLY ONE cursor.
 //
 // "Never zero" guarantee: the moment a session goes live we set `soft-cursor-active` (hiding the
 // browser cursor) AND seed a default arrow shape, so even before the first host shape arrives — or if
-// one never does — the user always sees a cursor. `cursor-hidden` hides the soft cursor ONLY while the
-// pointer is over the video, but the browser cursor stays hidden there; a genuinely hidden host cursor
-// (e.g. a fullscreen video player) is the correct thing to mirror. Off the video, we neither draw nor
-// hide (`soft-cursor-active` only affects `#screen`), so the normal browser cursor shows on the chrome.
+// one never does — the user always sees a cursor. A view-only session that has not yet heard a host
+// position falls back to the local-pointer path (never a zero-cursor gap). `cursor-hidden` hides the
+// soft cursor while it would otherwise draw, but the browser cursor stays hidden over the video; a
+// genuinely hidden host cursor (e.g. a fullscreen video player) is the correct thing to mirror. Off the
+// video (local-pointer path), we neither draw nor hide (`soft-cursor-active` only affects `#screen`), so
+// the normal browser cursor shows on the chrome.
 const softCanvas = document.getElementById("softcursor");
 const softCtx = softCanvas.getContext("2d");
 const connectView = views.connect;
@@ -1186,6 +1190,13 @@ const softCursor = (() => {
   let overVideo = false; // the local pointer is inside the video content rect
   let px = 0, py = 0; // last local pointer position (viewport px)
   let live = false;
+  // The host's real cursor position, streamed over the `cursor-position` channel and normalized
+  // 0..=65535 over the captured display. Used as the draw position ONLY while NOT controlling (view-only
+  // tracks the host's real pointer); a held control lease switches back to the local pointer for
+  // zero-latency touch feedback. `haveHostPos` stays false until the first host position arrives, so a
+  // view-only session that has not yet heard a host move falls back to the local-pointer path (never
+  // zero cursor).
+  let hostNx = 0, hostNy = 0, haveHostPos = false;
 
   // A crisp default arrow drawn in code (no asset), used until the first host shape arrives or if none
   // ever does — so the user is never left with no cursor. Hotspot is the tip (0,0).
@@ -1225,20 +1236,37 @@ const softCursor = (() => {
     if (softCanvas.width !== w) softCanvas.width = w;
     if (softCanvas.height !== h) softCanvas.height = h;
     softCtx.clearRect(0, 0, softCanvas.width, softCanvas.height);
+    // POSITION SOURCE (the view-only-tracks-host / control-uses-local rule):
+    //   - While CONTROLLING (we hold the lease): use the LOCAL pointer for zero-latency touch feedback —
+    //     the host's OS cursor is being driven by our own input, so the local pointer IS where it goes.
+    //   - While VIEW-ONLY, once the host has streamed a position: track the HOST's real cursor, mapping
+    //     its normalized 0..=65535 onto the video content rect. The host owns where its cursor is, so we
+    //     draw it wherever the host reports — independent of the local pointer.
+    //   - View-only but no host position yet: fall back to the local pointer (never a zero-cursor gap).
+    const trackHost = !controlling && haveHostPos;
+    const box = softCanvas.getBoundingClientRect();
+    let x, y;
+    if (trackHost) {
+      // Map the host's normalized position onto the video content rect (viewport px), then to canvas px.
+      const r = videoContentRect();
+      x = r.left + (hostNx / 65535) * r.width - box.left;
+      y = r.top + (hostNy / 65535) * r.height - box.top;
+    } else {
+      // Coordinates relative to the canvas (its box is fixed at top:52 left:0, same as #screen).
+      x = px - box.left;
+      y = py - box.top;
+    }
     // "Never zero, exactly one": the browser cursor is hidden over the video ONLY while the soft cursor
-    // is actually being drawn (live, over the video, host not hiding). We toggle `soft-cursor-active`
-    // HERE — not on setLive — so the window between session-live and the first pointer move (when the
-    // pointer may already sit stationary over the video, so no pointermove has seeded overVideo yet)
-    // keeps the native browser cursor visible rather than hiding it with nothing drawn (which would be a
-    // zero-cursor state, a regression worse than the old baked cursor). `hostHidden` is the one
-    // deliberate no-cursor case (the host itself hides its cursor, e.g. a fullscreen player) — we mirror
-    // it, and there the native cursor is correctly shown as the chrome fallback again.
-    const drawing = live && overVideo && !hostHidden;
+    // is actually being drawn. In the LOCAL-pointer path this is gated on `overVideo` (as before) — the
+    // window between session-live and the first pointer move keeps the native browser cursor visible
+    // rather than hiding it with nothing drawn (a zero-cursor state, worse than the old baked cursor). In
+    // the HOST-tracking path (view-only) the soft cursor follows the host's real position wherever it is,
+    // so the draw gate does not depend on the local `overVideo` — the host cursor is always shown while
+    // live and not host-hidden. `hostHidden` is the one deliberate no-cursor case (the host itself hides
+    // its cursor, e.g. a fullscreen player) — we mirror it, and the native cursor shows as the fallback.
+    const drawing = live && !hostHidden && (trackHost || overVideo);
     connectView.classList.toggle("soft-cursor-active", drawing);
     if (!drawing) return;
-    // Coordinates relative to the canvas (its box is fixed at top:52 left:0, same as #screen).
-    const box = softCanvas.getBoundingClientRect();
-    const x = px - box.left, y = py - box.top;
     if (current && current.bitmap) {
       softCtx.drawImage(current.bitmap, x - current.hotspot_x, y - current.hotspot_y);
     } else {
@@ -1264,6 +1292,8 @@ const softCursor = (() => {
         current = null;
         hostHidden = false;
         overVideo = false;
+        haveHostPos = false;
+        hostNx = 0; hostNy = 0;
         for (const rec of cache.values()) {
           if (rec.bitmap && rec.bitmap.close) { try { rec.bitmap.close(); } catch (_) {} }
         }
@@ -1302,6 +1332,15 @@ const softCursor = (() => {
       px = x; py = y; overVideo = inside;
       redraw();
     },
+    // The host's real cursor moved (normalized 0..=65535 over the captured display). Recorded always;
+    // it only becomes the draw position while VIEW-ONLY (see `redraw`). A held control lease ignores it
+    // and keeps the local pointer, so the recorded value simply resumes tracking the moment control ends.
+    setHostPos(nx, ny) {
+      hostNx = nx; hostNy = ny; haveHostPos = true;
+      if (!controlling) redraw();
+    },
+    // The lease state flipped — repaint so the position source switches (host↔local) immediately.
+    onControllingChanged() { redraw(); },
   };
 })();
 
@@ -1319,6 +1358,10 @@ window.addEventListener("pointerleave", () => softCursor.setPos(0, 0, false));
 listen("cursor-shape", (e) => { softCursor.setShape(e.payload); });
 listen("cursor-cached", (e) => { softCursor.setCached(e.payload); });
 listen("cursor-hidden", () => { softCursor.setHidden(); });
+// The host's real cursor position (ADR-073, normalized 0..=65535). While view-only this drives the soft
+// cursor so the local user tracks exactly where the host's pointer is; while controlling it is recorded
+// but the local pointer wins (zero-latency touch feedback).
+listen("cursor-position", (e) => { softCursor.setHostPos(e.payload.x, e.payload.y); });
 
 // ── Remote control (Phase 3): forward this viewer's clicks/keys to the host's OS ─────────────────
 // Only when we hold the lease (`controlling`). The host re-checks every event (lease/generation/seq/
@@ -1345,6 +1388,10 @@ function setControlling(on) {
   if (banner) {
     banner.textContent = controlling ? "● CONTROLLING remote screen" : "● LIVE — viewing remote screen";
   }
+  // Switch the soft-cursor position source immediately: controlling → local pointer (zero-latency),
+  // view-only → the host's streamed real position. Repaint now so the change is visible without waiting
+  // for the next pointer/host move.
+  softCursor.onControllingChanged();
 }
 
 // Normalized 0..=65535 of the video content rect, or null if outside it.

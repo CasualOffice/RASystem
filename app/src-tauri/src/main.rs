@@ -337,6 +337,15 @@ struct CursorShapePayload {
     rgba: Vec<u8>,
 }
 
+/// Serialized cursor position for the `cursor-position` event. `x`/`y` are the host's real pointer
+/// normalized to `0..=65535` over the captured display; the webview maps them onto the video-content
+/// rect. Not a secret (Inv 8) — a plain coordinate pair, no pixels/keystrokes/clipboard.
+#[derive(serde::Serialize, Clone)]
+struct CursorPositionPayload {
+    x: u16,
+    y: u16,
+}
+
 impl ras_core::CursorSink for AppCursorSink {
     fn set_shape(&self, shape: ras_core::CursorShape) {
         // The webview MUST cache this shape by `id` (see the CursorSink cache contract) so a later
@@ -362,6 +371,16 @@ impl ras_core::CursorSink for AppCursorSink {
     fn hide(&self) {
         // The host OS cursor is hidden — the webview hides the soft cursor (drawing nothing).
         let _ = self.app.emit("cursor-hidden", ());
+    }
+
+    fn set_position(&self, x: u16, y: u16) {
+        // The host's real cursor moved (normalized `0..=65535` over the captured display). The webview
+        // maps this to the video-content rect and draws the soft cursor there while the viewer is NOT
+        // controlling (view-only tracks the host's real pointer); a held control lease keeps using the
+        // local pointer for zero-latency feedback. Position is not a secret (Inv 8) — a coordinate pair.
+        let _ = self
+            .app
+            .emit("cursor-position", CursorPositionPayload { x, y });
     }
 }
 
@@ -1979,13 +1998,22 @@ async fn serve_one(
         Box::new(audio_capture),
         Box::new(ras_audio_opus::OpusEncoder::new()),
     );
-    // Host-cursor-shape observer (ADR-073): the live OS cursor shape is streamed to the viewer, which draws
-    // it as a soft cursor over the video at zero latency (its `AppCursorSink` end is attached in
-    // `connect_to_host`). Display data, never input (outside Inv 6); always safe to wire (no capability, no
-    // consent gate). Because macOS/Linux capture runs `showsCursor=false` (the real cursor is no longer
-    // baked into frames), this channel IS the cursor the viewer sees. Wired only where a backend exists.
+    // Host-cursor observer (ADR-073): the live OS cursor shape AND position are streamed to the viewer,
+    // which draws it as a soft cursor over the video at zero latency (its `AppCursorSink` end is attached
+    // in `connect_to_host`). Display data, never input (outside Inv 6); always safe to wire (no
+    // capability, no consent gate). Because macOS/Linux capture runs `showsCursor=false` (the real cursor
+    // is no longer baked into frames), this channel IS the cursor the viewer sees — and the position leg
+    // is what makes VIEW-ONLY track the host's real pointer (not the local pointer).
+    //
+    // macOS uses the shape+position observer from `ras-media-macos` (`MacCursorObserver`, which reports
+    // `CursorFrame::Moved` from `NSEvent::mouseLocation`); the shape-only `ras-cursor-macos` observer
+    // never emitted position, so wiring it left view-only permanently on the local pointer. Position is
+    // normalized over the PRIMARY display here (`without_bounds`) — correct when the shared display is the
+    // primary (the common case); a per-display bounds seam (feeding `CaptureGeometry` to the observer) is
+    // the multi-monitor follow-up. Linux/Windows stay shape-only until the position observer has a bounds
+    // plumbing path (the X11 observer suppresses `Moved` without bounds, so wiring it would be inert).
     #[cfg(target_os = "macos")]
-    let host = host.with_cursor_observer(Box::new(ras_cursor_macos::MacCursorObserver::new()));
+    let host = host.with_cursor_observer(Box::new(ras_media_macos::MacCursorObserver::without_bounds()));
     #[cfg(target_os = "linux")]
     let host = host.with_cursor_observer(Box::new(ras_cursor_linux::X11CursorObserver::new()));
     #[cfg(target_os = "windows")]

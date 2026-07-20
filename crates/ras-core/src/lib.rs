@@ -2246,10 +2246,20 @@ mod e2e {
     /// control loop drains each one (deterministic ordering without sleeps).
     struct ScriptedCursor {
         frames: std::collections::VecDeque<crate::CursorFrame>,
+        /// Optional delay applied **only before the final scripted frame** — lets a test burst moves
+        /// (no delay) to exercise the ~60 Hz throttle's coalescing, then space the last move past the
+        /// interval so it is guaranteed to clear the throttle and land.
+        final_frame_delay: Option<std::time::Duration>,
     }
     #[async_trait::async_trait]
     impl crate::CursorObserver for ScriptedCursor {
         async fn next(&mut self) -> Option<crate::CursorFrame> {
+            // Space out only the last frame; burst the rest so several land inside one throttle window.
+            if self.frames.len() == 1 {
+                if let Some(d) = self.final_frame_delay {
+                    tokio::time::sleep(d).await;
+                }
+            }
             tokio::task::yield_now().await;
             self.frames.pop_front()
         }
@@ -2273,6 +2283,12 @@ mod e2e {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(format!("cached:{id}"));
+        }
+        fn set_position(&self, x: u16, y: u16) {
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(format!("pos:{x},{y}"));
         }
         fn hide(&self) {
             self.events
@@ -2311,7 +2327,10 @@ mod e2e {
             SyntheticEncoder::new(),
             Arc::new(FixedCaps(caps(&["screen.view"]))),
         )
-        .with_cursor_observer(Box::new(ScriptedCursor { frames: script }));
+        .with_cursor_observer(Box::new(ScriptedCursor {
+            frames: script,
+            final_frame_delay: None,
+        }));
         let controller = ControllerSession::new(
             ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
             ctrl_tp,
@@ -2345,6 +2364,87 @@ mod e2e {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec!["shape:1", "cached:1", "shape:2", "hidden"],
             "a repeated shape id must arrive as a cache reference, not a re-sent shape (ADR-073)"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
+    /// The host cursor observer streams **position** changes (`CursorFrame::Moved`) to the controller's
+    /// cursor sink as `set_position` updates. A burst of moves is throttled/coalesced (~60 Hz,
+    /// drop-newest) so it never floods control, yet a delivered move carries the correct position, and a
+    /// move spaced past the throttle interval is guaranteed to land (ADR-073, position channel).
+    #[tokio::test]
+    async fn cursor_positions_stream_to_the_controller_throttled() {
+        // A tight burst of distinct moves (arriving faster than the ~60 Hz throttle) followed by a final
+        // move spaced past the interval — the burst coalesces to at least one send, the spaced move
+        // always lands.
+        let mut frames = std::collections::VecDeque::new();
+        for i in 0..20u16 {
+            frames.push_back(crate::CursorFrame::Moved { x: i, y: i * 2 });
+        }
+        // Sentinel: yields after a > throttle-interval delay, so this position is guaranteed to pass.
+        frames.push_back(crate::CursorFrame::Moved { x: 4242, y: 2424 });
+        let script = frames;
+        let (host_tp, ctrl_tp) = loopback_pair();
+        // Burst the first 20 moves (no delay → several land inside one 16 ms throttle window, so they
+        // coalesce), then delay 25 ms (> the 16 ms throttle) before the FINAL move — the sentinel — so
+        // it always clears the throttle and is delivered.
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(&["screen.view"]))),
+        )
+        .with_cursor_observer(Box::new(ScriptedCursor {
+            frames: script,
+            final_frame_delay: Some(std::time::Duration::from_millis(25)),
+        }));
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let rec = Arc::new(RecordingCursor::default());
+        controller.attach_cursor_sink(rec.clone());
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+
+        // The sentinel position must arrive (throttled but delivered).
+        assert!(
+            wait_until(
+                || rec
+                    .events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .any(|e| e == "pos:4242,2424"),
+                2000
+            )
+            .await,
+            "the final host cursor position must reach the controller sink, got {:?}",
+            rec.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        );
+
+        let events = rec
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        // Every delivered event is a position update (this script has no shapes/hidden).
+        assert!(
+            events.iter().all(|e| e.starts_with("pos:")),
+            "only position updates expected, got {events:?}"
+        );
+        // Throttled: fewer position updates were delivered than moves were scripted (21 in, coalesced).
+        assert!(
+            events.len() < 21,
+            "position moves must be coalesced by the ~60 Hz throttle, delivered {} of 21: {events:?}",
+            events.len()
         );
 
         controller.disconnect(StopReason::UserRequested).await;

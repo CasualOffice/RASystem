@@ -26,6 +26,29 @@ pub(crate) fn norm_to_abs(v: f32) -> i32 {
     (f64::from(f) * f64::from(ABS_MAX)).round() as i32
 }
 
+/// Normalize a root-window pixel coordinate onto the wire's `0..=65535` range, given the captured
+/// display's origin and extent along that axis (all in root px). Used by the cursor observer to map an
+/// XFixes cursor position (which is in **root** coordinates) into the same normalized space the
+/// controller renders in — the inverse of the input backend's normalized→pixel map.
+///
+/// `pos` is the cursor's root coordinate; `origin` is the captured display's left/top; `extent` is its
+/// width/height. The fraction `(pos - origin) / extent` is clamped to `0.0..=1.0` (a cursor off the
+/// captured display pins to an edge) and scaled to `0..=65535`. A zero/negative/non-finite `extent`
+/// (degenerate bounds) maps everything to `0` (fail-safe — never a divide-by-zero or wild value).
+pub(crate) fn root_px_to_norm16(pos: i32, origin: i32, extent: i32) -> u16 {
+    if extent <= 0 {
+        return 0;
+    }
+    let frac = f64::from(pos - origin) / f64::from(extent);
+    let frac = if frac.is_finite() {
+        frac.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    // `frac` is in `[0.0, 1.0]`, so the product is in `[0.0, 65535.0]` — the `as u16` cannot wrap.
+    (frac * f64::from(u16::MAX)).round() as u16
+}
+
 /// Map a USB-HID Keyboard/Keypad usage (page 0x07) to a **Linux evdev keycode** (`KEY_A == 30`). This is
 /// the XTEST table (which emits X keycode = evdev + 8) **minus 8** per entry — uinput speaks raw evdev.
 /// An unmapped usage returns `None` and fails closed at the call site (never a wrong key — Inv 6).
@@ -216,5 +239,33 @@ mod tests {
         assert_eq!(norm_to_abs(-1.0), 0); // under-range clamps to 0
         assert_eq!(norm_to_abs(f32::NAN), 0); // non-finite → origin (Inv 6)
         assert_eq!(norm_to_abs(f32::INFINITY), 0);
+    }
+
+    #[test]
+    fn root_px_normalizes_over_display_bounds() {
+        // A 1920-wide display at the origin: left edge → 0, right edge → 65535, centre → ~half.
+        assert_eq!(root_px_to_norm16(0, 0, 1920), 0);
+        assert_eq!(root_px_to_norm16(1920, 0, 1920), u16::MAX);
+        assert_eq!(root_px_to_norm16(960, 0, 1920), 32768); // round(0.5 * 65535)
+    }
+
+    #[test]
+    fn root_px_respects_a_negative_origin_secondary_display() {
+        // A secondary 1280-wide display to the LEFT of the primary (negative root origin, ADR-081).
+        // Its left edge (root x = -1280) → 0, its right edge (root x = 0) → 65535.
+        assert_eq!(root_px_to_norm16(-1280, -1280, 1280), 0);
+        assert_eq!(root_px_to_norm16(0, -1280, 1280), u16::MAX);
+        assert_eq!(root_px_to_norm16(-640, -1280, 1280), 32768); // centre
+    }
+
+    #[test]
+    fn root_px_clamps_off_display_and_guards_degenerate_extent() {
+        // Off the captured display in either direction pins to an edge (never wraps or overflows).
+        assert_eq!(root_px_to_norm16(-100, 0, 1920), 0); // left of the display
+        assert_eq!(root_px_to_norm16(5000, 0, 1920), u16::MAX); // right of the display
+
+        // Degenerate / unset bounds → 0 (fail-safe, no divide-by-zero).
+        assert_eq!(root_px_to_norm16(500, 0, 0), 0); // zero extent
+        assert_eq!(root_px_to_norm16(500, 0, -10), 0); // negative extent
     }
 }

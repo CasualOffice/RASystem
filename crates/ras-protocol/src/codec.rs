@@ -273,6 +273,10 @@ fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
         }),
         ControlMsg::CursorCached { id } => Kind::CursorCached(pb::CursorCached { id }),
         ControlMsg::CursorHidden => Kind::CursorHidden(pb::CursorHidden {}),
+        ControlMsg::CursorPosition { x, y } => Kind::CursorPosition(pb::CursorPosition {
+            x: u32::from(x),
+            y: u32::from(y),
+        }),
         // `reveal()` at the wire boundary is the one sanctioned use — encoding, not logging.
         ControlMsg::ClipboardText { text } => {
             Kind::ClipboardText(pb::ClipboardText { text: text.0 })
@@ -402,6 +406,16 @@ fn cursor_shape_from_pb(c: pb::CursorShape) -> Result<ControlMsg, RasError> {
     })
 }
 
+/// Wire → Rust cursor position, fully validated (fail-closed). Both axes are normalized `0..=65535`
+/// over the shared display, so an on-wire `u32` outside `u16` range is a malformed message and is
+/// **refused** (never wrapped or clamped) — no panic.
+fn cursor_position_from_pb(c: pb::CursorPosition) -> Result<ControlMsg, RasError> {
+    let bad = |m: &'static str| RasError::fatal(ErrorCode::InvalidMessage, m);
+    let x = u16::try_from(c.x).map_err(|_| bad("cursor position x out of range"))?;
+    let y = u16::try_from(c.y).map_err(|_| bad("cursor position y out of range"))?;
+    Ok(ControlMsg::CursorPosition { x, y })
+}
+
 /// Wire → Rust clipboard text, fail-closed. The byte length is bounded by [`MAX_CLIPBOARD_BYTES`]
 /// (prost already guarantees the field is valid UTF-8); an oversized payload is **refused**, never
 /// truncated. Authorization is decided elsewhere (`ras_policy::clipboard_push_allowed`), never here.
@@ -490,6 +504,7 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
         Some(Kind::CursorShape(c)) => cursor_shape_from_pb(c),
         Some(Kind::CursorCached(c)) => Ok(ControlMsg::CursorCached { id: c.id }),
         Some(Kind::CursorHidden(_)) => Ok(ControlMsg::CursorHidden),
+        Some(Kind::CursorPosition(c)) => cursor_position_from_pb(c),
         Some(Kind::ClipboardText(c)) => clipboard_text_from_pb(c),
         Some(Kind::ChatMessage(c)) => chat_message_from_pb(c),
         Some(Kind::FileOffer(o)) => file_offer_from_pb(o),
@@ -1236,6 +1251,24 @@ mod tests {
         assert_roundtrip(&shape);
         assert_roundtrip(&ControlMsg::CursorCached { id: 42 });
         assert_roundtrip(&ControlMsg::CursorHidden);
+        assert_roundtrip(&ControlMsg::CursorPosition { x: 0, y: 0 });
+        assert_roundtrip(&ControlMsg::CursorPosition { x: 12345, y: 65535 });
+    }
+
+    #[test]
+    fn cursor_position_fail_closed_on_out_of_range() {
+        // A raw wire `u32` outside `u16` range is malformed → refused (no wrap/clamp, no panic).
+        let reject = |c: pb::CursorPosition| {
+            let m = pb::ControlMsg {
+                kind: Some(pb::control_msg::Kind::CursorPosition(c)),
+            };
+            assert_eq!(
+                control_from_pb(m).unwrap_err().code,
+                ErrorCode::InvalidMessage
+            );
+        };
+        reject(pb::CursorPosition { x: 70000, y: 0 });
+        reject(pb::CursorPosition { x: 0, y: 100000 });
     }
 
     #[test]
@@ -2225,6 +2258,7 @@ mod proptests {
             ),
             any::<u32>().prop_map(|id| ControlMsg::CursorCached { id }),
             Just(ControlMsg::CursorHidden),
+            (any::<u16>(), any::<u16>()).prop_map(|(x, y)| ControlMsg::CursorPosition { x, y }),
             // Clipboard text: arbitrary UTF-8, default proptest sizing (far below MAX_CLIPBOARD_BYTES),
             // so every generated value round-trips. Oversize refusal is covered by a by-example test.
             any::<String>().prop_map(|s| ControlMsg::ClipboardText { text: Redacted(s) }),

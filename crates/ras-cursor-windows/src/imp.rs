@@ -78,6 +78,12 @@ impl CursorObserver for WinCursorObserver {
                 Some(CursorFrame::Shape(s)) => Some(s.id),
                 // A hidden/too-large cursor collapses to a single sentinel so Hidden→Hidden is a repeat.
                 Some(CursorFrame::Hidden) => Some(0),
+                // This backend reports shape changes only; position (`Moved`) is emitted by the future
+                // position observer, never here. Forward it directly if it ever appears (the core's
+                // send-side throttle handles rate) — never dedup it against a shape id.
+                Some(CursorFrame::Moved { x, y }) => {
+                    return Some(CursorFrame::Moved { x: *x, y: *y })
+                }
                 None => None,
             };
 

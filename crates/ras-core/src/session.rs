@@ -66,6 +66,11 @@ const STATS_TICK: Duration = Duration::from_millis(250);
 /// decode latency) back to the host, feeding the host's ABR (design §2.3). Cold path.
 const FEEDBACK_TICK: Duration = Duration::from_millis(200);
 
+/// Minimum spacing between host→controller [`ControlMsg::CursorPosition`] sends (ADR-073, position
+/// channel). Cursor moves fire far more often than the ~60 Hz render cadence; coalescing them to one
+/// per interval keeps the advisory cursor channel from flooding control while staying visually smooth.
+const CURSOR_POSITION_MIN_INTERVAL: Duration = Duration::from_millis(16); // ~60 Hz
+
 /// Bounded grace an emergency stop gives the control loop to flush its final `Bye` to the peer
 /// before we stop waiting on it. Small by design: Invariant 4 requires the *local* stop to take
 /// effect within 250 ms, and the local media halt is already done (via the stop flag) before we
@@ -1366,6 +1371,9 @@ async fn cursor_pump(
     stop: Arc<AtomicBool>,
 ) {
     let mut cache = CursorCache::new();
+    // ~60 Hz throttle for the high-frequency position channel: coalesce moves to at most one send per
+    // interval (drop-newest), so a fast-moving cursor never floods the control channel.
+    let mut last_pos_sent: Option<tokio::time::Instant> = None;
     while !stop.load(Ordering::Relaxed) {
         let Some(frame) = observer.next().await else {
             break;
@@ -1377,6 +1385,22 @@ async fn cursor_pump(
             CursorFrame::Hidden => {
                 if tx.try_send(ControlMsg::CursorHidden).is_err() && tx.is_closed() {
                     break;
+                }
+            }
+            CursorFrame::Moved { x, y } => {
+                // Throttle: skip this move if we sent one within the last interval (advisory drop, not a
+                // queue). The final resting position always lands because moves keep arriving until the
+                // cursor is still, and the interval is far below human-perceptible cursor lag.
+                let now = tokio::time::Instant::now();
+                if let Some(prev) = last_pos_sent {
+                    if now.duration_since(prev) < CURSOR_POSITION_MIN_INTERVAL {
+                        continue;
+                    }
+                }
+                match tx.try_send(ControlMsg::CursorPosition { x, y }) {
+                    Ok(()) => last_pos_sent = Some(now),
+                    Err(mpsc::error::TrySendError::Full(_)) => {} // advisory — drop this update
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
             CursorFrame::Shape(shape) => {
@@ -2946,6 +2970,18 @@ async fn controller_control_loop(
                         .clone()
                     {
                         sink.hide();
+                    }
+                }
+                // Host cursor position (ADR-073, position channel). Display data, not input; routed to
+                // the attached cursor sink to move the overlay pointer client-side at zero latency.
+                Ok(ControlMsg::CursorPosition { x, y }) => {
+                    if let Some(sink) = inner
+                        .cursor_sink
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.set_position(x, y);
                     }
                 }
                 // Chat from the host (ADR-082): surface it for the controller UI. Content-bearing but

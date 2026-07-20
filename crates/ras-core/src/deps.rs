@@ -179,6 +179,15 @@ impl core::fmt::Debug for CursorShape {
 pub enum CursorFrame {
     /// The cursor now shows this shape.
     Shape(CursorShape),
+    /// The cursor **moved** to a new position, normalized `0..=65535` over the shared display (ADR-073,
+    /// position channel). Position changes are far more frequent than shape changes; the host send side
+    /// throttles them (~60 Hz, drop-newest) so they never backpressure the control channel.
+    Moved {
+        /// Normalized x over the shared display width (`0..=65535`).
+        x: u16,
+        /// Normalized y over the shared display height (`0..=65535`).
+        y: u16,
+    },
     /// The OS cursor is currently hidden — draw nothing.
     Hidden,
 }
@@ -221,6 +230,13 @@ pub trait CursorSink: Send + Sync {
     /// Reuse a previously-sent shape by `id` (the host sent no RGBA to save bandwidth). Resolvable
     /// whenever the cache contract above is honored.
     fn set_cached(&self, id: u32);
+    /// The host cursor moved to `(x, y)`, normalized `0..=65535` over the shared display (ADR-073,
+    /// position channel). **Sync + non-blocking** like the other methods — draw the overlay pointer at
+    /// the mapped position; a slow sink drops internally, never backpressures control. Default no-op so
+    /// existing sinks compile unchanged.
+    fn set_position(&self, x: u16, y: u16) {
+        let _ = (x, y);
+    }
     /// The OS cursor is hidden — draw nothing.
     fn hide(&self);
 }

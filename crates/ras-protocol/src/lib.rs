@@ -300,6 +300,16 @@ pub enum ControlMsg {
     },
     /// Host → controller: the OS cursor is currently hidden — draw nothing.
     CursorHidden,
+    /// Host → controller: the host's OS cursor **position**, normalized `0..=65535` over the shared
+    /// display (ADR-073, position channel). Position changes are far more frequent than shape changes,
+    /// so this rides a throttled (~60 Hz) drop-newest send that never backpressures control. Display
+    /// data, not input (outside Inv 6).
+    CursorPosition {
+        /// Normalized x over the shared display width (`0..=65535`).
+        x: u16,
+        /// Normalized y over the shared display height (`0..=65535`).
+        y: u16,
+    },
     /// Push clipboard **text** to the peer (ADR-076). An **explicit** user action — never auto-synced
     /// and (the load-bearing rule) never auto-**pasted**: the receiver only populates the OS clipboard,
     /// it does not inject a paste keystroke, which severs the clipboard-hijack→RCE chain (Reverse-RDP /
