@@ -116,6 +116,30 @@ Full report with citations lives in the workflow transcript; this is the durable
   (constrained-baseline — already `avc1.42E0xx`, no B-frames, CBR/ABR at target, dropframe under
   congestion). See fix **V1**.
 
+### A5. Cross-OS input synthesis parity — drag + double-click (verified vs enigo, the crate RustDesk ships)
+
+- **What RustDesk actually uses:** RustDesk's `rdev` fork does mouse via **`enigo`** (`en.mouse_down`/
+  `mouse_move_to`). So enigo is the real reference (study-only; read, never linked — Inv 18).
+- **macOS is the only OS that needs explicit code** (confirmed by reading `enigo/src/macos/macos_impl.rs`):
+  - **Drag:** `move_type()` — track pressed buttons, post `kCGEventLeftMouseDragged`/`RightMouseDragged`/
+    `OtherMouseDragged` (carrying the held button) instead of `MouseMoved`, else the drag doesn't track.
+  - **Double-click:** `nth_button_press()` stamps `kCGMouseEventClickState` — **time-only, same-button,
+    unbounded** count (no position slop, no cap). macOS does NOT click-count synthetic events for free.
+  - **➡ Ours (`ras-input-macos`) now matches exactly:** `motion_kind()` + `advance_click_count`
+    (time+same-button, unbounded). We also **dropped** the old `CGDisplayHideCursor`/dissociate warp
+    discipline (it hides the cursor from the baked capture and locks the owner out — Inv 1/4). ADR-100.
+- **Windows + Linux need nothing** (confirmed by reading `enigo/src/win/win_impl.rs` +
+  `linux/x11rb.rs`): enigo sends only `MOUSEEVENTF_*DOWN/UP` / XTEST press-release and **relies on the
+  OS** to aggregate rapid clicks into a double-click and to treat motion-during-hold as a drag. Adding
+  clickState/drag-type there would **double-count** — so it's deliberately absent.
+  - **➡ Our backends already match:** Windows `SendInput` (move+button combined, wheel signs correct);
+    Linux **XTEST** (button at the pointer position — correct because the controller now sends a
+    prime-move before each click); Linux **uinput/Wayland** (positions first with its own SYN frame, then
+    the button edge — the most robust of the three). Drag + double-click are OS-native on all of them.
+- **Shared across all three** (not OS-specific): continuous cursor-follow (controller JS), one baked
+  cursor (`show_cursor: true` on SCK/scap), wheel-direction signs. On-device row: the live two-machine
+  run (the `q` decode-queue HUD number is the lag diagnostic).
+
 ---
 
 ## Part B — Half-done implementation fix plan
