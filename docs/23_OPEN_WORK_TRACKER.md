@@ -18,7 +18,7 @@
 
 | # | Item | Fixability | State | Notes |
 |---|------|-----------|-------|-------|
-| 2.1 | **Two-way annotation** (host → controller) | `CODE-NOW` | ☐ | Mirror of ADR-097 (controller→host exists). Bidirectional `Annotate`; testable at codec + core loopback. |
+| 2.1 | **Two-way annotation** (host → controller) | `CODE-NOW` | ◐ | DONE (off-device). `HostSession::send_annotation` + controller routes inbound `Annotate`→`RemoteAnnotation`; sharer annotation toolbar on the overlay + controller renders host strokes. Loopback-tested; on-device render pending. |
 | 2.2 | **Multi-monitor cursor position** | `CODE-NOW`→`DEVICE` | ☐ | Observers normalize over the primary/root display; feed `CaptureGeometry` bounds so a secondary monitor maps right. Code off-device; true multi-monitor is on-device. |
 | 2.3 | **Presence / online-dots + "call" a contact** (gossip Phase B/C) | `BIG-NET` | ☐ | Unblocked by ADR-098's always-on endpoint. `ras-signal` engine built; needs gossip wiring + AccessRequestIntent prompt. Unverifiable off-device. |
 | 2.4 | **Video lag** (constant offset, Linux host) | `DEVICE` | ☐ | Software OpenH264 encoder (no Linux HW encoder). Needs on-device profiling to attack; guessing regresses. |
@@ -27,8 +27,8 @@
 
 | # | Item | Fixability | State | Notes |
 |---|------|-----------|-------|-------|
-| 3.1 | **macOS cursor-observer consolidation** | `CODE-NOW` | ☐ | Observer lives in `ras-media-macos` (dup name w/ dead `ras-cursor-macos`); move to `ras-cursor-macos` for symmetry with Linux/Windows. Host-compilable → verifiable. |
-| 3.2 | **Windows cursor position** | `CODE-NOW` (cross-compile) | ☐ | `ras-cursor-windows` is shape-only; add `Moved` via `GetCursorPos` (parallel to the Linux XFixes / macOS mouseLocation work). |
+| 3.1 | **macOS cursor-observer consolidation** | `CODE-NOW` | ◐ | DONE (host-verified). Complete observer moved into `ras-cursor-macos`; `ras-media-macos/cursor.rs` deleted + deps trimmed; app rewired to `ras_cursor_macos::MacCursorObserver`. Workspace clippy + app check green. |
+| 3.2 | **Windows cursor position** | `CODE-NOW` (cross-compile) | ◐ | DONE (CI-gated). `Moved` via `GetCursorPos` normalized over the virtual desktop (negative-origin-aware), shape-wins-then-Moved like Linux. Parse-clean + reviewed vs windows-rs 0.58; native compile is on `windows-latest` (ring blocks macOS cross-compile). |
 | 3.3 | **libei Wayland input** (unprivileged upgrade) | `BIG-NET` | ☐ | Replaces the `/dev/uinput` udev requirement (reis + ashpd portal). Intricate async handshake; unverifiable off-device. Upgrade from the shipped uinput path. |
 
 ## Part 4 — Engineering backlog

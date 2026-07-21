@@ -19,15 +19,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetObjectW, ReleaseDC,
     SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
     HGDIOBJ,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyIcon, DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL,
-    HCURSOR, ICONINFO,
+    DestroyIcon, DrawIconEx, GetCursorInfo, GetCursorPos, GetIconInfo, GetSystemMetrics,
+    CURSORINFO, CURSOR_SHOWING, DI_NORMAL, HCURSOR, ICONINFO, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use ras_core::{CursorFrame, CursorObserver, CursorShape};
@@ -42,21 +43,56 @@ const MAX_CURSOR_DIM: u32 = 256;
 /// observed shape fresh without installing a hook (which would demand a message loop / hook DLL).
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// A Windows host cursor observer: polls the global cursor (`GetCursorInfo`) for the live shape and
-/// reports each **change** as a [`CursorFrame`] over the [`CursorObserver`] seam. Deduped by a content
-/// hash of the RGBA bytes, so an unchanged cursor yields the same `id` (the core then sends a cache
-/// reference) and this observer stays quiet until the shape actually changes.
+/// A Windows host cursor observer: polls the global cursor (`GetCursorInfo` for the live shape,
+/// `GetCursorPos` for the live position) and reports each **change** as a [`CursorFrame`] over the
+/// [`CursorObserver`] seam. Shape changes are deduped by a content hash of the RGBA bytes, so an
+/// unchanged cursor yields the same `id` (the core then sends a cache reference); position changes are
+/// deduped against the last normalized position, so a still cursor stays quiet. A shape change wins over
+/// a position change in a single poll (mirrors `ras-cursor-linux`).
 pub struct WinCursorObserver {
-    /// The last `id` we emitted (content hash of the last shape's RGBA), so we only report changes.
+    /// The last `id` we emitted (content hash of the last shape's RGBA), so we only report shape changes.
     /// `None` before the first frame.
     last_id: Option<u32>,
+    /// The last normalized position we emitted, so we only report movement (`Moved`) on a real change.
+    last_pos: Option<(u16, u16)>,
+    /// Virtual-desktop origin + size in pixels (`SM_{X,Y,CX,CY}VIRTUALSCREEN`), read once at
+    /// construction, for normalizing the cursor's global position to `0..=65535`. The origin is
+    /// **negative-capable** on a multi-monitor layout (a display left/above the primary).
+    virt: (i32, i32, i32, i32),
 }
 
 impl WinCursorObserver {
     /// Create a cursor observer. Captures nothing until [`CursorObserver::next`] is first awaited.
     #[must_use]
     pub fn new() -> Self {
-        Self { last_id: None }
+        // SAFETY: `GetSystemMetrics` is a pure query with no arguments beyond a metric index.
+        let virt = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        };
+        Self {
+            last_id: None,
+            last_pos: None,
+            virt,
+        }
+    }
+
+    /// Read the live global cursor position (`GetCursorPos`) and normalize it to `0..=65535` over the
+    /// virtual desktop (matching the wire pointer units). Returns `None` if the position is unreadable
+    /// (so the caller leaves `last_pos` untouched and simply polls again) or the virtual desktop has a
+    /// zero dimension.
+    fn read_normalized_pos(&self) -> Option<(u16, u16)> {
+        let mut pt = POINT::default();
+        // SAFETY: `pt` is a valid, sized `POINT`; `GetCursorPos` only writes into it.
+        if unsafe { GetCursorPos(&mut pt) }.is_err() {
+            return None;
+        }
+        let (vx, vy, vw, vh) = self.virt;
+        Some((normalize_pos(pt.x, vx, vw), normalize_pos(pt.y, vy, vh)))
     }
 }
 
@@ -69,18 +105,18 @@ impl Default for WinCursorObserver {
 #[async_trait]
 impl CursorObserver for WinCursorObserver {
     async fn next(&mut self) -> Option<CursorFrame> {
-        // Poll until the cursor differs from what we last reported. The observer models a *stream of
-        // changes*, so we suppress repeats here (in addition to the core's send-side dedup) and never
-        // busy-spin.
+        // Poll until the cursor SHAPE or POSITION differs from what we last reported. The observer models
+        // a *stream of changes*, so we suppress repeats here (in addition to the core's send-side dedup)
+        // and never busy-spin. A shape change (incl. Shape↔Hidden) wins over a position change in a
+        // single poll; the core's send-side throttle rate-limits the frequent `Moved` stream.
         loop {
             let frame = capture_cursor_frame();
             let this_id = match &frame {
                 Some(CursorFrame::Shape(s)) => Some(s.id),
                 // A hidden/too-large cursor collapses to a single sentinel so Hidden→Hidden is a repeat.
                 Some(CursorFrame::Hidden) => Some(0),
-                // This backend reports shape changes only; position (`Moved`) is emitted by the future
-                // position observer, never here. Forward it directly if it ever appears (the core's
-                // send-side throttle handles rate) — never dedup it against a shape id.
+                // `capture_cursor_frame` only ever produces Shape/Hidden; a `Moved` would be a bug, but
+                // forward it directly (never dedup against a shape id) rather than mishandle it.
                 Some(CursorFrame::Moved { x, y }) => {
                     return Some(CursorFrame::Moved { x: *x, y: *y })
                 }
@@ -88,12 +124,26 @@ impl CursorObserver for WinCursorObserver {
             };
 
             match (frame, this_id) {
+                // Shape change (incl. Shape↔Hidden) takes priority — emit it and re-seed the position so
+                // the next poll only reports genuine movement.
                 (Some(frame), Some(id)) if self.last_id != Some(id) => {
                     self.last_id = Some(id);
+                    if let Some(pos) = self.read_normalized_pos() {
+                        self.last_pos = Some(pos);
+                    }
                     return Some(frame);
                 }
-                // Same as last time (or transiently unreadable): wait and poll again.
-                _ => tokio::time::sleep(POLL_INTERVAL).await,
+                // Same shape as last time (or transiently unreadable): check for a position-only change.
+                _ => {
+                    if let Some(pos) = self.read_normalized_pos() {
+                        if self.last_pos != Some(pos) {
+                            self.last_pos = Some(pos);
+                            return Some(CursorFrame::Moved { x: pos.0, y: pos.1 });
+                        }
+                    }
+                    // Nothing changed: wait and poll again.
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
             }
         }
     }
@@ -147,6 +197,20 @@ fn capture_cursor_frame() -> Option<CursorFrame> {
         // Empty / oversized / unreadable → nothing to draw.
         None => Some(CursorFrame::Hidden),
     }
+}
+
+/// Normalize a global cursor pixel coordinate to `0..=65535` over one virtual-desktop axis, given that
+/// axis's `origin` (negative-capable) and `extent` (pixels). The coordinate is first shifted into the
+/// desktop's local `0..extent` space, then scaled to the wire pointer range. Off-screen / out-of-range
+/// coordinates clamp to the edges; a zero `extent` (no desktop) maps to 0.
+fn normalize_pos(v: i32, origin: i32, extent: i32) -> u16 {
+    if extent <= 0 {
+        return 0;
+    }
+    // Shift into the desktop-local space and clamp to `0..extent`. `saturating_sub` guards the shift
+    // against an out-of-range coordinate (e.g. a stale read during a display reconfigure).
+    let local = v.saturating_sub(origin).clamp(0, extent) as u32;
+    ((local * 65535) / extent as u32) as u16
 }
 
 /// Clamp a hot-spot coordinate into `0..dim` and return it as a `u16` (`dim <= MAX_CURSOR_DIM`, so it
@@ -382,6 +446,28 @@ mod tests {
         assert_eq!(hash_rgba(&a), hash_rgba(&b));
         // Different bytes → (almost certainly) a different id.
         assert_ne!(hash_rgba(&a), hash_rgba(&c));
+    }
+
+    #[test]
+    fn normalize_pos_maps_over_virtual_desktop() {
+        // Origin 0, extent 1000: endpoints and midpoint map to 0 / ~half / max.
+        assert_eq!(normalize_pos(0, 0, 1000), 0);
+        assert_eq!(normalize_pos(1000, 0, 1000), 65535);
+        assert_eq!(normalize_pos(500, 0, 1000), 32767);
+        // Out-of-range coords clamp to the edges (never wrap / overflow).
+        assert_eq!(normalize_pos(-50, 0, 1000), 0);
+        assert_eq!(normalize_pos(5000, 0, 1000), 65535);
+        // Zero / negative extent (no desktop) maps to 0.
+        assert_eq!(normalize_pos(42, 0, 0), 0);
+    }
+
+    #[test]
+    fn normalize_pos_honors_negative_origin() {
+        // A display left/above the primary: origin -1920, extent 1920. The left edge is at x == -1920
+        // and the right edge at x == 0, so those map to 0 / max after the origin shift.
+        assert_eq!(normalize_pos(-1920, -1920, 1920), 0);
+        assert_eq!(normalize_pos(0, -1920, 1920), 65535);
+        assert_eq!(normalize_pos(-960, -1920, 1920), 32767);
     }
 
     #[test]

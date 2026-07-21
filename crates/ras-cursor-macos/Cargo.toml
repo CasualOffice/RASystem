@@ -32,13 +32,25 @@ objc2-foundation = { version = "0.3", features = [
   "NSData",
   "NSObject",
 ] }
+objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFCGTypes"] }
 objc2-app-kit = { version = "0.3", features = [
   "NSCursor",
   "NSImage",
   "NSImageRep",
-  "NSBitmapImageRep",
-  "NSGraphics",
-  "NSGraphicsContext",
+  "NSEvent",
+  "NSResponder",
+  "objc2-core-graphics",
+] }
+# Cursor shape rasterization: CGImageForProposedRect → CGBitmapContext draw → RGBA bytes; plus the
+# primary-display bounds (CGMainDisplayID/CGDisplayBounds) for the mouseLocation bottom-left→top-left
+# Y-flip.
+objc2-core-graphics = { version = "0.3", features = [
+  "CGImage",
+  "CGContext",
+  "CGColorSpace",
+  "CGBitmapContext",
+  "CGDirectDisplay",
+  "CGGeometry",
 ] }
 
 # FFI backend crate: unsafe confined here, wrapped in the safe `CursorObserver` trait surface

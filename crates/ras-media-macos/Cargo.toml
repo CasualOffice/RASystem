@@ -15,9 +15,6 @@ publish = false
 [dependencies]
 ras-media = { path = "../ras-media" }
 ras-protocol = { path = "../ras-protocol" }
-# `ras-core` supplies the `CursorObserver` seam (+ `CursorFrame`/`CursorShape`) the host cursor task
-# owns — this backend's `MacCursorObserver` (`cursor` module) reads the live OS cursor behind it.
-ras-core = { path = "../ras-core", default-features = false }
 bytes = "1"
 async-trait = "0.1"
 tokio = { version = "1", features = ["time"] }
@@ -28,28 +25,6 @@ tokio = { version = "1", features = ["time"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSError", "NSObject", "NSGeometry"] }
 objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFNumber", "CFDictionary"] }
-# Cursor observer (`cursor` module): NSCursor/NSImage for the shape, NSEvent::mouseLocation for the
-# position. Both permissive (MIT/Apache) — verified by cargo-deny (Inv 18).
-objc2-app-kit = { version = "0.3", features = [
-  "NSCursor",
-  "NSImage",
-  "NSImageRep",
-  "NSGraphicsContext",
-  "NSEvent",
-  "NSResponder",
-  "objc2-core-graphics",
-] }
-# Cursor shape rasterization: CGImageForProposedRect → CGBitmapContext draw → RGBA bytes; plus the
-# primary-display bounds (CGMainDisplayID/CGDisplayBounds) for the mouseLocation bottom-left→top-left
-# Y-flip.
-objc2-core-graphics = { version = "0.3", features = [
-  "CGImage",
-  "CGContext",
-  "CGColorSpace",
-  "CGBitmapContext",
-  "CGDirectDisplay",
-  "CGGeometry",
-] }
 objc2-screen-capture-kit = { version = "0.3", features = [
   "SCStream",
   "SCShareableContent",

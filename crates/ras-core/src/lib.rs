@@ -801,6 +801,61 @@ mod e2e {
         host.stop(StopReason::UserRequested).await;
     }
 
+    #[tokio::test]
+    async fn host_annotation_reaches_controller_as_a_lifecycle_event() {
+        use ras_protocol::{AnnotTool, AnnotateOp};
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(640, 480),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let _host_events = host_r.unwrap();
+        let mut ctrl_events = ctrl_r.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        // The host draws a two-point arrow on its side (ADR-097, host→controller direction). Annotation
+        // is display data (no capability), like the pointer — it must surface on the controller as a
+        // RemoteAnnotation lifecycle event for the overlay, mirroring the controller→host path.
+        host.send_annotation(AnnotateOp::Stroke {
+            tool: AnnotTool::Arrow,
+            color_rgb: 0x00ff_3b30,
+            points: vec![(1000, 2000), (60000, 40000)],
+        });
+
+        let mut seen = None;
+        for _ in 0..200 {
+            while let Ok(ev) = ctrl_events.try_recv() {
+                if let LifecycleEvent::RemoteAnnotation(op) = ev {
+                    seen = Some(op);
+                }
+            }
+            if seen.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            seen,
+            Some(AnnotateOp::Stroke {
+                tool: AnnotTool::Arrow,
+                color_rgb: 0x00ff_3b30,
+                points: vec![(1000, 2000), (60000, 40000)],
+            }),
+            "controller should receive the host's annotation stroke intact"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     /// End-to-end Phase-3 input: a controller requests the lease, the host consents + issues it, an
     /// authorized pointer move reaches the OS sink, an un-granted key is rejected at the gate (Inv 15),
     /// and an emergency stop flushes held keys + stales further input (Inv 4).

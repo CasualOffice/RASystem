@@ -994,6 +994,7 @@ listen("share-viewer", (e) => {
   // A connected viewer means a live session on the host side — chat/clipboard become usable.
   chat.setSessionLive(live);
   files.setHostLive(live); // host can receive a file while a viewer is connected
+  shareAnnotations.show(live); // sharer can point things out on their screen while a viewer is connected
 });
 // After a consent prompt (access / control-lease / file) is answered, decrement the open-prompt count
 // and slide main back out of the shared screen only once NO prompt remains open (see onConsentClosed).
@@ -1009,6 +1010,7 @@ listen("share-active", (e) => {
     if (w) w.style.display = "none"; // clear stale warning when sharing ends
     const pc = document.getElementById("peer-contact-banner");
     if (pc) pc.style.display = "none";
+    shareAnnotations.show(false); // hide the toolbar + return the overlay to click-through
   }
 });
 // A persistent, honest banner when OS-input control can't work on this machine (macOS Accessibility
@@ -1573,6 +1575,11 @@ const annotations = (function () {
   let strokes = [];
   let cur = null;
   let dpr = 1;
+  // Markup drawn by the HOST (Share role) and mirrored onto this viewer's video overlay (ADR-097).
+  // Stored normalized (0..=65535 over the video content rect) so it re-maps correctly as the window
+  // resizes; drawn under the viewer's own strokes. Bounded so a chatty host can't grow it unbounded.
+  let hostStrokes = [];
+  const MAX_HOST_STROKES = 256;
 
   function fit() {
     dpr = window.devicePixelRatio || 1;
@@ -1626,8 +1633,58 @@ const annotations = (function () {
     g.globalAlpha = 1;
   }
 
+  // Draw a HOST stroke: its points are normalized 0..=65535 over the video content rect. Map them into
+  // this canvas's device pixels (the canvas overlays the whole stage; strokes must land on the same
+  // video pixels the host drew over). Reuses the same tool geometry as `drawStroke`.
+  function drawHostStroke(s) {
+    const pts = s.points;
+    if (!pts || !pts.length) return;
+    const r = videoContentRect();
+    if (!r.width || !r.height) return;
+    const box = cv.getBoundingClientRect();
+    // r is in client px relative to the viewport; the canvas backing store is client px * dpr with its
+    // own top-left at box.left/box.top. Convert normalized → client → canvas-backing-store px.
+    const X = (n) => (r.left - box.left + (n / 65535) * r.width) * dpr;
+    const Y = (n) => (r.top - box.top + (n / 65535) * r.height) * dpr;
+    g.strokeStyle = s.color;
+    g.lineJoin = "round";
+    g.lineCap = "round";
+    if (s.tool === 1) {
+      g.globalAlpha = 0.35;
+      g.lineWidth = 18 * dpr;
+    } else {
+      g.globalAlpha = 1;
+      g.lineWidth = 3 * dpr;
+    }
+    const a = pts[0];
+    const b = pts[pts.length - 1];
+    g.beginPath();
+    if (s.tool === 3) {
+      g.strokeRect(X(a[0]), Y(a[1]), X(b[0]) - X(a[0]), Y(b[1]) - Y(a[1]));
+    } else if (s.tool === 2) {
+      g.moveTo(X(a[0]), Y(a[1]));
+      g.lineTo(X(b[0]), Y(b[1]));
+      g.stroke();
+      const ang = Math.atan2(Y(b[1]) - Y(a[1]), X(b[0]) - X(a[0]));
+      const head = 16 * dpr;
+      g.beginPath();
+      g.moveTo(X(b[0]), Y(b[1]));
+      g.lineTo(X(b[0]) - head * Math.cos(ang - Math.PI / 6), Y(b[1]) - head * Math.sin(ang - Math.PI / 6));
+      g.moveTo(X(b[0]), Y(b[1]));
+      g.lineTo(X(b[0]) - head * Math.cos(ang + Math.PI / 6), Y(b[1]) - head * Math.sin(ang + Math.PI / 6));
+      g.stroke();
+    } else {
+      g.moveTo(X(pts[0][0]), Y(pts[0][1]));
+      for (let i = 1; i < pts.length; i++) g.lineTo(X(pts[i][0]), Y(pts[i][1]));
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+  }
+
   function render() {
     g.clearRect(0, 0, cv.width, cv.height);
+    // Host markup first (drawn under the viewer's own strokes).
+    for (const s of hostStrokes) drawHostStroke(s);
     for (const s of strokes) drawStroke(s);
     if (cur) drawStroke(cur);
   }
@@ -1723,14 +1780,30 @@ const annotations = (function () {
 
   window.addEventListener("resize", fit);
 
+  // Apply a HOST annotation op (ADR-097) received over the viewer's lifecycle stream. `p` is the same
+  // JSON shape overlay.js consumes: { op, tool, color, points }. Content-safe (display markup only).
+  const colorHex = (n) => "#" + (((n | 0) & 0xffffff) >>> 0).toString(16).padStart(6, "0");
+  function applyRemote(p) {
+    if (!p) return;
+    if (p.op === "clear") hostStrokes = [];
+    else if (p.op === "undo") hostStrokes.pop();
+    else if (p.op === "stroke") {
+      hostStrokes.push({ tool: p.tool | 0, color: colorHex(p.color), points: p.points || [] });
+      if (hostStrokes.length > MAX_HOST_STROKES) hostStrokes.shift();
+    }
+    render();
+  }
+
   return {
     show(on) {
       bar.hidden = !on;
       if (on) fit();
     },
+    applyRemote,
     clear() {
       strokes = [];
       cur = null;
+      hostStrokes = [];
       tool = "off";
       cv.classList.remove("drawing");
       bar.querySelectorAll("button[data-tool]").forEach((b) => b.classList.remove("active"));
@@ -1738,6 +1811,88 @@ const annotations = (function () {
       if (off) off.classList.add("active");
       render();
     },
+  };
+})();
+
+// Host annotations mirrored onto the viewer's video overlay (ADR-097). The Rust side emits
+// `remote-annotation` on the viewer's lifecycle stream (from `LifecycleEvent::RemoteAnnotation`).
+// Content-safe display markup only — never logged (Inv 8).
+listen("remote-annotation", (e) => {
+  annotations.applyRemote(e.payload || {});
+});
+
+// ── Share-role annotation toolbar (ADR-097) ──────────────────────────────────────────────────────
+// The mirror of the connect-view annotation module, for the SHARER. The Share view has no video (the
+// sharer sees their own real screen), so the toolbar here only tracks the selected tool/color and
+// drives the transparent overlay (which covers exactly the captured display): selecting a tool sends
+// `host_annotate_mode` to make the overlay interactive so the sharer can draw on their screen; the
+// overlay then normalizes each stroke to the captured display rect and sends it to the viewer. Undo/
+// clear go straight through `host_annotate` (which also mirrors the op to the overlay). Not OS input,
+// no capability — display markup only, like the visual pointer.
+const shareAnnotations = (function () {
+  const bar = document.getElementById("share-tools");
+  if (!bar) return { show() {}, reset() {} };
+  let tool = "off";
+  let color = "#ff3b30";
+  const toolTag = (t) => (t === "hi" ? 1 : t === "arrow" ? 2 : t === "rect" ? 3 : 0);
+  const colorNum = (c) => parseInt(String(c).replace("#", ""), 16) & 0xffffff;
+
+  function pushMode() {
+    // `off` → overlay click-through; any drawing tool → overlay interactive with this tool/color.
+    invoke("host_annotate_mode", {
+      active: tool !== "off",
+      tool: toolTag(tool),
+      color: colorNum(color),
+    }).catch(() => {});
+  }
+
+  bar.querySelectorAll("button[data-htool]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      tool = btn.dataset.htool;
+      bar.querySelectorAll("button[data-htool]").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      pushMode();
+    });
+  });
+  bar.querySelectorAll(".hswatch").forEach((sw) => {
+    sw.addEventListener("click", () => {
+      color = sw.dataset.color;
+      bar.querySelectorAll(".hswatch").forEach((b) => b.classList.remove("active"));
+      sw.classList.add("active");
+      if (tool !== "off") pushMode(); // update the live pen color on the overlay
+    });
+  });
+  const hundo = document.getElementById("hundo");
+  if (hundo)
+    hundo.addEventListener("click", () => {
+      invoke("host_annotate", { op: "undo", tool: 0, color: 0, points: [] }).catch(() => {});
+    });
+  const hclear = document.getElementById("hclearannot");
+  if (hclear)
+    hclear.addEventListener("click", () => {
+      invoke("host_annotate", { op: "clear", tool: 0, color: 0, points: [] }).catch(() => {});
+    });
+  const firstSwatch = bar.querySelector(".hswatch");
+  if (firstSwatch) firstSwatch.classList.add("active");
+
+  function reset() {
+    tool = "off";
+    color = "#ff3b30";
+    bar.querySelectorAll("button[data-htool]").forEach((b) => b.classList.remove("active"));
+    const off = bar.querySelector('button[data-htool="off"]');
+    if (off) off.classList.add("active");
+    bar.querySelectorAll(".hswatch").forEach((b) => b.classList.remove("active"));
+    if (firstSwatch) firstSwatch.classList.add("active");
+    // Return the overlay to click-through (never leave it interactive after a session ends).
+    invoke("host_annotate_mode", { active: false, tool: 0, color: 0 }).catch(() => {});
+  }
+
+  return {
+    show(on) {
+      bar.hidden = !on;
+      if (!on) reset();
+    },
+    reset,
   };
 })();
 

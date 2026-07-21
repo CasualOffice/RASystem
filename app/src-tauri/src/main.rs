@@ -104,6 +104,12 @@ async fn drain_viewer_lifecycle(mut events: LifecycleStream, app: tauri::AppHand
             LifecycleEvent::ClipboardApplied { len } => {
                 let _ = app.emit("clipboard-received", len);
             }
+            // Annotation markup drawn by the HOST (Share role), mirrored onto this viewer's video
+            // overlay (ADR-097). Display data only — not OS input, no capability, like the visual
+            // pointer. The webview's annotation module renders it. Content-safe (never logged, Inv 8).
+            LifecycleEvent::RemoteAnnotation(op) => {
+                let _ = app.emit("remote-annotation", annotate_payload(&op));
+            }
             // The host authorized + consented to our file offer (ADR-086): start streaming chunks. The
             // UI listens for `file-accepted` to begin `file_chunk`. Content-free.
             LifecycleEvent::FileTransferAccepted => {
@@ -770,21 +776,18 @@ async fn send_pointer(
     Ok(())
 }
 
-/// Send annotation markup to render on the **host's** overlay (ADR-097). `op` is `"stroke"` (with
-/// `tool`/`color`/`points`), `"undo"`, or `"clear"`. Display data only — not OS input, no capability,
-/// like the visual pointer. `points` are normalized `0..=65535` `[x, y]`, bounded here and on the host.
-#[tauri::command]
-async fn annotate(
-    state: State<'_, AppState>,
-    op: String,
+/// Build a core [`ras_protocol::AnnotateOp`] from the webview's JSON args. Shared by the viewer-side
+/// [`annotate`] (Connect role) and the sharer-side [`host_annotate`] (Share role). `op` is `"stroke"`
+/// (with `tool`/`color`/`points`), `"undo"`, or `"clear"`. `points` are normalized `0..=65535` `[x, y]`
+/// and bounded here (`MAX_ANNOT_POINTS`) — the wire type re-bounds them on decode too.
+fn build_annotate_op(
+    op: &str,
     tool: u8,
     color: u32,
     points: Vec<[u16; 2]>,
-) -> Result<(), String> {
+) -> ras_protocol::AnnotateOp {
     use ras_protocol::{AnnotTool, AnnotateOp};
-    let controller = lock(&state.session).as_ref().map(|s| s.controller.clone());
-    let Some(c) = controller else { return Ok(()) };
-    let op = match op.as_str() {
+    match op {
         "undo" => AnnotateOp::Undo,
         "clear" => AnnotateOp::Clear,
         _ => {
@@ -805,8 +808,81 @@ async fn annotate(
                 points,
             }
         }
-    };
-    c.send_annotation(op);
+    }
+}
+
+/// Send annotation markup to render on the **host's** overlay (ADR-097), from the Connect (viewer)
+/// side. Display data only — not OS input, no capability, like the visual pointer. `points` are
+/// normalized `0..=65535` `[x, y]`, bounded here and on the host.
+#[tauri::command]
+async fn annotate(
+    state: State<'_, AppState>,
+    op: String,
+    tool: u8,
+    color: u32,
+    points: Vec<[u16; 2]>,
+) -> Result<(), String> {
+    let controller = lock(&state.session).as_ref().map(|s| s.controller.clone());
+    let Some(c) = controller else { return Ok(()) };
+    c.send_annotation(build_annotate_op(&op, tool, color, points));
+    Ok(())
+}
+
+/// Send annotation markup to render on the **viewer's** video overlay (ADR-097), from the Share
+/// (sharer) side — the mirror of [`annotate`]. Display data only — not OS input, no capability, like
+/// the visual pointer. `points` are normalized `0..=65535` `[x, y]` over the captured display rect,
+/// bounded here and on the wire. No-op when no viewer is connected.
+#[tauri::command]
+async fn host_annotate(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    op: String,
+    tool: u8,
+    color: u32,
+    points: Vec<[u16; 2]>,
+) -> Result<(), String> {
+    let host = lock(&state.share.session)
+        .as_ref()
+        .and_then(|s| s.host.clone());
+    let Some(h) = host else { return Ok(()) };
+    // Sharer undo/clear originate on the Share-view toolbar (not on the overlay canvas), so mirror the
+    // op to the overlay too, keeping the sharer's local markup in sync with what the viewer sees.
+    // Strokes originate on the overlay itself, so they are NOT echoed back (that would double them).
+    if op == "undo" || op == "clear" {
+        if let Some(ov) = app.get_webview_window("overlay") {
+            let _ = ov.emit("host-annot-op", op.clone());
+        }
+    }
+    h.send_annotation(build_annotate_op(&op, tool, color, points));
+    Ok(())
+}
+
+/// Toggle sharer-side annotation drawing (ADR-097, Share role). When `active` is true the sharer has
+/// selected a drawing tool on the Share view, so the always-on-top overlay (which covers exactly the
+/// captured display) is made **interactive** (`set_ignore_cursor_events(false)`) so the sharer can
+/// draw on their own screen; the selected `tool`/`color` are forwarded to the overlay via
+/// `host-annot-mode`. When `active` is false the overlay returns to click-through (view-only default,
+/// Inv 7 — the overlay never silently blocks the sharer's real desktop). The overlay's captured-window
+/// exclusion keeps this drawing UI out of the viewer's feed. No-op when no overlay exists.
+#[tauri::command]
+async fn host_annotate_mode(
+    app: tauri::AppHandle,
+    active: bool,
+    tool: u8,
+    color: u32,
+) -> Result<(), String> {
+    if let Some(ov) = app.get_webview_window("overlay") {
+        // Interactive while a tool is active; click-through otherwise. Best-effort.
+        let _ = ov.set_ignore_cursor_events(!active);
+        let _ = ov.emit(
+            "host-annot-mode",
+            HostAnnotModePayload {
+                active,
+                tool,
+                color: color & 0x00ff_ffff,
+            },
+        );
+    }
     Ok(())
 }
 
@@ -1095,6 +1171,10 @@ struct ShareSession {
 trait ShareControl: Send + Sync {
     fn send_chat(&self, text: String);
     fn send_clipboard_text(&self, text: String);
+    /// Send annotation markup to render on the **viewer's** video overlay (ADR-097). Display data
+    /// only — not OS input, no capability (mirrors the visual pointer). Points are normalized
+    /// `0..=65535` over the captured display rect and bounded here and by the wire type.
+    fn send_annotation(&self, op: ras_protocol::AnnotateOp);
 }
 
 impl<C, E> ShareControl for ras_core::HostSession<C, E>
@@ -1107,6 +1187,9 @@ where
     }
     fn send_clipboard_text(&self, text: String) {
         ras_core::HostSession::send_clipboard_text(self, text);
+    }
+    fn send_annotation(&self, op: ras_protocol::AnnotateOp) {
+        ras_core::HostSession::send_annotation(self, op);
     }
 }
 
@@ -1392,6 +1475,16 @@ struct AnnotatePayload {
     tool: u8,
     color: u32,
     points: Vec<[u16; 2]>,
+}
+
+/// Sharer annotation-mode toggle pushed to the overlay window (ADR-097). `active` turns the overlay
+/// interactive so the sharer can draw on the captured display; `tool`/`color` carry the selected pen.
+/// Display-only control (no secret).
+#[derive(Clone, serde::Serialize)]
+struct HostAnnotModePayload {
+    active: bool,
+    tool: u8,
+    color: u32,
 }
 
 /// Project a core [`ras_protocol::AnnotateOp`] into the overlay's JSON payload.
@@ -2005,16 +2098,16 @@ async fn serve_one(
     // is no longer baked into frames), this channel IS the cursor the viewer sees — and the position leg
     // is what makes VIEW-ONLY track the host's real pointer (not the local pointer).
     //
-    // macOS uses the shape+position observer from `ras-media-macos` (`MacCursorObserver`, which reports
-    // `CursorFrame::Moved` from `NSEvent::mouseLocation`); the shape-only `ras-cursor-macos` observer
-    // never emitted position, so wiring it left view-only permanently on the local pointer. Position is
+    // macOS uses the shape+position observer from `ras-cursor-macos` (`MacCursorObserver`, which reports
+    // `CursorFrame::Moved` from `NSEvent::mouseLocation`); the shape+position implementation was
+    // consolidated into `ras-cursor-macos` (was previously in `ras-media-macos`). Position is
     // normalized over the PRIMARY display here (`without_bounds`) — correct when the shared display is the
     // primary (the common case); a per-display bounds seam (feeding `CaptureGeometry` to the observer) is
     // the multi-monitor follow-up. Linux/Windows stay shape-only until the position observer has a bounds
     // plumbing path (the X11 observer suppresses `Moved` without bounds, so wiring it would be inert).
     #[cfg(target_os = "macos")]
     let host = host.with_cursor_observer(Box::new(
-        ras_media_macos::MacCursorObserver::without_bounds(),
+        ras_cursor_macos::MacCursorObserver::without_bounds(),
     ));
     #[cfg(target_os = "linux")]
     let host = host.with_cursor_observer(Box::new(ras_cursor_linux::X11CursorObserver::new()));
@@ -2355,6 +2448,8 @@ fn main() {
             disconnect,
             send_pointer,
             annotate,
+            host_annotate,
+            host_annotate_mode,
             send_chat,
             send_clipboard,
             file_begin,

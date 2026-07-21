@@ -948,6 +948,24 @@ where
         }
     }
 
+    /// Send annotation markup to render on the **controller's** overlay (ADR-097, host→controller
+    /// direction — the mirror of [`ControllerSession::send_annotation`]). Purely visual — **not OS
+    /// input**, no capability, like the remote pointer. Reuses the shared host outbound-control channel
+    /// (the same one the cursor task and [`Self::send_chat`] feed); the control loop forwards it over
+    /// the wire it owns. Best-effort — no-op before `start` / after teardown, or if the advisory
+    /// outbound queue is full; the controller bounds it on decode.
+    pub fn send_annotation(&self, op: ras_protocol::AnnotateOp) {
+        let tx = self
+            .inner
+            .outbound_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(ControlMsg::Annotate(op));
+        }
+    }
+
     /// Push the host's clipboard text to the controller (ADR-076, host→controller direction). Gated
     /// host-side on `clipboard.read` against the session grant (Inv 15 — the controller must have been
     /// authorized to read the host's clipboard); refused fail-closed otherwise, and the controller only
@@ -3024,6 +3042,19 @@ async fn controller_control_loop(
                         .clone()
                     {
                         sink.emit(outcome);
+                    }
+                }
+                // Annotation markup from the host (ADR-097, host→controller direction — the mirror of
+                // the controller→host path in `host_control_loop`). Purely visual, no capability; surface
+                // it as a `RemoteAnnotation` for the controller's overlay. Bounded on decode.
+                Ok(ControlMsg::Annotate(op)) => {
+                    if let Some(sink) = inner
+                        .lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.emit(LifecycleEvent::RemoteAnnotation(op));
                     }
                 }
                 Ok(_) => {}

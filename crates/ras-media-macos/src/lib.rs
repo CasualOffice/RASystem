@@ -13,14 +13,10 @@
 #[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
-mod cursor;
-#[cfg(target_os = "macos")]
 mod encode;
 
 #[cfg(target_os = "macos")]
 pub use capture::MacScreenCapture;
-#[cfg(target_os = "macos")]
-pub use cursor::{DisplayBounds, MacCursorObserver};
 #[cfg(target_os = "macos")]
 pub use encode::VideoToolboxEncoder;
 
