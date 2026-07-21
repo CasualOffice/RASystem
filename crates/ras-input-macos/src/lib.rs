@@ -63,21 +63,18 @@ mod macos {
     /// Running click aggregation for macOS double/triple-click. Unlike X11/Windows, macOS does NOT
     /// derive the click count for *synthetic* events — the poster must stamp `kCGMouseEventClickState`
     /// on the button-down (and its matching up), or every click reads as a fresh single click and
-    /// double-click never fires. We track the last down and advance the count when the next down is the
-    /// same button, close in time and space (Aqua's ~500 ms / a few px).
+    /// double-click never fires. Matches enigo's `nth_button_press` (the path RustDesk ships): purely
+    /// time + same-button, no position check, unbounded count (so triple/quad-click select word/line).
     #[derive(Debug, Clone, Copy)]
     struct ClickState {
         button: u8,
         at: Instant,
-        x: f64,
-        y: f64,
         count: i64,
     }
 
-    /// macOS double-click window and slop (Aqua defaults are ~500 ms; keep a small position tolerance
-    /// so a click that jitters by a pixel still counts as a double-click).
+    /// macOS double-click window (Aqua default ~500 ms; `NSEvent.doubleClickInterval` is the exact
+    /// user setting, but the default is a safe fixed value here — same order as enigo).
     const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
-    const DOUBLE_CLICK_SLOP: f64 = 5.0;
 
     /// A CGEvent-backed [`OsInputSink`]. All fields are plain data behind `Mutex`es (so the sink is
     /// `Send + Sync`); the non-`Send` `CGEventSource` is created per event, never stored.
@@ -267,21 +264,13 @@ mod macos {
     /// unit-tested without a display session). A down that follows the previous down on the SAME button
     /// within the double-click interval and position slop advances the count (capped at triple); any
     /// other down resets to a single click.
-    fn advance_click_count(
-        prev: Option<ClickState>,
-        button: u8,
-        at: Instant,
-        x: f64,
-        y: f64,
-    ) -> i64 {
+    fn advance_click_count(prev: Option<ClickState>, button: u8, at: Instant) -> i64 {
         match prev {
             Some(p)
                 if p.button == button
-                    && at.saturating_duration_since(p.at) <= DOUBLE_CLICK_INTERVAL
-                    && (x - p.x).abs() <= DOUBLE_CLICK_SLOP
-                    && (y - p.y).abs() <= DOUBLE_CLICK_SLOP =>
+                    && at.saturating_duration_since(p.at) <= DOUBLE_CLICK_INTERVAL =>
             {
-                (p.count + 1).min(3)
+                p.count + 1
             }
             _ => 1,
         }
@@ -388,12 +377,10 @@ mod macos {
                 let now = Instant::now();
                 let mut last = self.last_click.lock().unwrap_or_else(|e| e.into_inner());
                 if down {
-                    let count = advance_click_count(*last, tag, now, point.x, point.y);
+                    let count = advance_click_count(*last, tag, now);
                     *last = Some(ClickState {
                         button: tag,
                         at: now,
-                        x: point.x,
-                        y: point.y,
                         count,
                     });
                     count
@@ -792,55 +779,47 @@ mod macos {
         }
 
         #[test]
-        fn click_count_advances_for_a_fast_same_spot_double_click() {
+        fn click_count_advances_for_a_fast_same_button_double_click() {
             let t0 = Instant::now();
             // First click → single.
-            assert_eq!(advance_click_count(None, 0, t0, 10.0, 10.0), 1);
+            assert_eq!(advance_click_count(None, 0, t0), 1);
             let first = ClickState {
                 button: 0,
                 at: t0,
-                x: 10.0,
-                y: 10.0,
                 count: 1,
             };
-            // Second click, same button, +100ms, same spot → double.
+            // Second click, same button, +100ms → double (time-only, like enigo).
             let t1 = t0 + Duration::from_millis(100);
-            assert_eq!(advance_click_count(Some(first), 0, t1, 11.0, 9.0), 2);
+            assert_eq!(advance_click_count(Some(first), 0, t1), 2);
         }
 
         #[test]
-        fn click_count_resets_on_slow_far_or_different_button() {
+        fn click_count_resets_on_slow_or_different_button() {
             let t0 = Instant::now();
             let first = ClickState {
                 button: 0,
                 at: t0,
-                x: 10.0,
-                y: 10.0,
                 count: 1,
             };
             // Too slow (>500ms) → resets to single.
             let slow = t0 + Duration::from_millis(700);
-            assert_eq!(advance_click_count(Some(first), 0, slow, 10.0, 10.0), 1);
-            // Too far (>slop) → resets.
-            let fast = t0 + Duration::from_millis(100);
-            assert_eq!(advance_click_count(Some(first), 0, fast, 100.0, 10.0), 1);
+            assert_eq!(advance_click_count(Some(first), 0, slow), 1);
             // Different button → resets.
-            assert_eq!(advance_click_count(Some(first), 1, fast, 10.0, 10.0), 1);
+            let fast = t0 + Duration::from_millis(100);
+            assert_eq!(advance_click_count(Some(first), 1, fast), 1);
         }
 
         #[test]
-        fn click_count_caps_at_triple() {
+        fn click_count_is_unbounded_for_triple_and_beyond() {
             let t0 = Instant::now();
-            let triple = ClickState {
+            let double = ClickState {
                 button: 0,
                 at: t0,
-                x: 10.0,
-                y: 10.0,
-                count: 3,
+                count: 2,
             };
-            // A fourth fast click stays at 3 (macOS treats >3 as a fresh cycle; capping is safe).
+            // A third fast click advances to triple (word/line select), not capped.
             let t1 = t0 + Duration::from_millis(100);
-            assert_eq!(advance_click_count(Some(triple), 0, t1, 10.0, 10.0), 3);
+            assert_eq!(advance_click_count(Some(double), 0, t1), 3);
         }
     }
 }
