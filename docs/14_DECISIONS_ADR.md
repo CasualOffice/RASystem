@@ -1366,6 +1366,37 @@
     uinput injection is the on-device step** (a Linux box with the udev rule) — the analogue of the macOS
     on-device row. Deep-study capture + fix tracker in `docs/22`.
 
+- **ADR-100 · One baked cursor + continuous-follow input; drop the macOS cursor-hide/dissociate · Accepted.**
+  - **Context.** On-device testing (Mac host controlled from Linux) found the soft-cursor + sharer-side
+    annotation model regressing the real experience: the annotation overlay was made opaque + interactive
+    (`set_ignore_cursor_events(false)`) → a **white screen on the Mac** and **hidden context menus/files**;
+    the client-side soft cursor added a confusing second cursor; and the touch/tap input model (hover moved
+    only a virtual cursor, a click "tapped" at the point) made **clicks intermittent, keyboard dead** (a
+    click that didn't cleanly land never focused the target app), and **drag/double-click broken**. The
+    prior macOS **warp discipline** (RustDesk PR #10314 class: dissociate the hardware mouse + `CGDisplayHideCursor`
+    on every warp, ADR-068 era) was designed for the soft-cursor model (host cursor hidden, cursor drawn
+    controller-side) — but with a baked cursor it hides the cursor from the capture and blocks the owner
+    from grabbing it.
+  - **Decision.** Revert to the simple, proven model. **(1)** Capture the host's real cursor into the video
+    (`showsCursor=true` / scap `show_cursor: true`) — one cursor; drop the soft-cursor overlay + cursor-shape
+    app wiring (the `ras-cursor-*` crates + `ras-core` CursorSink/Observer seams stay, unwired). **(2)**
+    **Continuous cursor-follow** in the controller (every hover warps the host cursor), not touch/tap. **(3)**
+    macOS-only input correctness, validated against **enigo** (the crate RustDesk actually ships for macOS
+    mouse): drag posts the matching `*MouseDragged` type carrying the held button (`motion_kind`); double-click
+    stamps `kCGMouseEventClickState` via a time-only same-button aggregator (`advance_click_count`). X11 (XTEST)
+    and Windows (SendInput) track button-hold + aggregate clicks in the OS natively — unchanged. **(4)** Remove
+    the macOS cursor **hide + dissociate** so the shared cursor stays visible in the capture and the owner keeps
+    physical control (**Inv 1/4**); `begin_warp`/`end_warp` kept as balanced no-op seams. **(5)** Remove the
+    sharer-side annotation entirely; the overlay is never made interactive (always transparent + click-through).
+    Keep the viewer→host annotation + the remote-pointer "look here".
+  - **Trade-off / posture.** Reverses the PR #10314 warp discipline *for macOS*: two physical+remote users
+    could now fight over the one shared cursor (last-writer-wins) — acceptable and standard for remote desktop,
+    and strictly better than an invisible/owner-locked cursor. Off-device (compile + macOS unit tests incl.
+    click-count + drag `motion_kind`); the live two-machine input is the on-device row.
+  - **Status.** Implemented + gate-green (workspace + app clippy/test/fmt, cargo-deny, node --check). Shipped in
+    `v0.0.4-alpha`. Supersedes the soft-cursor/annotation direction of ADR-073/ADR-097 for the cursor+overlay
+    path. Model recorded in the memory note `input-cursor-model`.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +

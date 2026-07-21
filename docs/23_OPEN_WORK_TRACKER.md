@@ -52,3 +52,21 @@ before each push (lesson from the cursor workflow that mis-placed observers):
 
 `DEVICE` / `BIG-NET` / `HW` / `FUND` / `FUTURE` items are queued behind the on-device test + explicit
 go-aheads (presence/call and libei are the big ones; both need a device in the loop to de-risk).
+
+## Input + cursor rollback (v0.0.4-alpha, ADR-100)
+
+On-device testing showed the soft-cursor + sharer-annotation direction (2.1 host-side draw) *regressed*
+the experience — reverted to the simple proven model:
+
+| Symptom (on-device) | Root cause | Fix | State |
+|---|---|---|---|
+| White screen on Mac; hidden context-menu/files | Sharer-annotation made the overlay opaque + interactive | Removed sharer annotation; overlay always transparent + click-through | ◐ (fixed, on-device pending) |
+| Confusing multi-cursor | Client soft-cursor overlay | One cursor baked into the video (`showsCursor=true`); soft-cursor unwired | ◐ |
+| Clicks intermittent; keyboard dead | Touch/tap model — click didn't focus the target app | Continuous cursor-follow (controller-side) | ◐ |
+| Double-click / drag broken (macOS) | No `kCGMouseEventClickState`; `MouseMoved` during a hold | `advance_click_count` + `motion_kind` (`*MouseDragged`), **validated vs enigo/RustDesk** | ◐ |
+| Cursor could vanish / owner locked out | macOS warp hide+dissociate (PR #10314) vs baked cursor | Removed the hide/dissociate (Inv 1/4); `begin_warp`/`end_warp` = no-op seams | ◐ |
+| Lag (constant offset, Linux viewer) | Decoder tolerated ~100 ms backlog | Guard 6→3 (~50 ms) + `q` (decode-queue depth) in the HUD for profiling | ◐ + `DEVICE` |
+
+**2.1 note:** the *viewer→host* annotation + remote pointer are kept; only the *host→controller* (sharer)
+annotation was removed. All the above are compile + macOS-unit verified; the live two-machine run is the
+on-device confirmation (the `q` HUD number is the lag diagnostic).
