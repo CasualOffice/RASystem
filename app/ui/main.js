@@ -722,7 +722,6 @@ function setLive(isLive) {
   if (macMod) macMod.hidden = !isLive;
   chat.setSessionLive(isLive); // chat/clipboard are usable only while the viewer session is live
   files.setViewerLive(isLive); // the viewer can send a file only while its session is live
-  softCursor.setLive(isLive); // seed the soft cursor + hide the browser cursor over the video (ADR-073)
 }
 
 // Start a viewer session either from a pasted `ticket` or a saved `contactId` (ticketless, ADR-093).
@@ -994,7 +993,6 @@ listen("share-viewer", (e) => {
   // A connected viewer means a live session on the host side — chat/clipboard become usable.
   chat.setSessionLive(live);
   files.setHostLive(live); // host can receive a file while a viewer is connected
-  shareAnnotations.show(live); // sharer can point things out on their screen while a viewer is connected
 });
 // After a consent prompt (access / control-lease / file) is answered, decrement the open-prompt count
 // and slide main back out of the shared screen only once NO prompt remains open (see onConsentClosed).
@@ -1010,7 +1008,6 @@ listen("share-active", (e) => {
     if (w) w.style.display = "none"; // clear stale warning when sharing ends
     const pc = document.getElementById("peer-contact-banner");
     if (pc) pc.style.display = "none";
-    shareAnnotations.show(false); // hide the toolbar + return the overlay to click-through
   }
 });
 // A persistent, honest banner when OS-input control can't work on this machine (macOS Accessibility
@@ -1161,210 +1158,6 @@ window.addEventListener("pointerleave", () => {
   if (active) invoke("send_pointer", { x: 0, y: 0, visible: false });
 });
 
-// ── Soft cursor (ADR-073): draw the HOST's OS cursor shape over the video ──────────────────────────
-// The host capture now runs `showsCursor=false`, so the real cursor is NOT baked into the frames. The
-// host streams its cursor shape/cache/hidden out-of-band (Rust `AppCursorSink` → these events) and we
-// draw it here as a single soft cursor. POSITION source depends on the mode (see `redraw`): while
-// VIEW-ONLY (and the host has streamed a position over `cursor-position`) it tracks the HOST's real
-// pointer, mapped onto the video content rect; while CONTROLLING (we hold the lease) it uses the LOCAL
-// pointer for zero-latency touch-style feedback (ADR-097) — the host's OS cursor is being driven by our
-// own input. Combined with CSS `cursor:none` over the video, this yields EXACTLY ONE cursor.
-//
-// "Never zero" guarantee: the moment a session goes live we set `soft-cursor-active` (hiding the
-// browser cursor) AND seed a default arrow shape, so even before the first host shape arrives — or if
-// one never does — the user always sees a cursor. A view-only session that has not yet heard a host
-// position falls back to the local-pointer path (never a zero-cursor gap). `cursor-hidden` hides the
-// soft cursor while it would otherwise draw, but the browser cursor stays hidden over the video; a
-// genuinely hidden host cursor (e.g. a fullscreen video player) is the correct thing to mirror. Off the
-// video (local-pointer path), we neither draw nor hide (`soft-cursor-active` only affects `#screen`), so
-// the normal browser cursor shows on the chrome.
-const softCanvas = document.getElementById("softcursor");
-const softCtx = softCanvas.getContext("2d");
-const connectView = views.connect;
-
-const softCursor = (() => {
-  // FIFO cache by id, matching ras_core::CURSOR_CACHE_CAP so a `cursor-cached` reference always
-  // resolves (the cache contract: retain ≥ cap distinct shapes, evict oldest-first, no reorder on hit).
-  const CACHE_CAP = 128;
-  const cache = new Map(); // id -> { bitmap: ImageBitmap|null, hotspot_x, hotspot_y, width, height }
-  let current = null; // the shape to draw (from cache), or null → fall back to the default arrow
-  let hostHidden = false; // the host reported its cursor hidden → draw nothing while over the video
-  let overVideo = false; // the local pointer is inside the video content rect
-  let px = 0, py = 0; // last local pointer position (viewport px)
-  let live = false;
-  // The host's real cursor position, streamed over the `cursor-position` channel and normalized
-  // 0..=65535 over the captured display. Used as the draw position ONLY while NOT controlling (view-only
-  // tracks the host's real pointer); a held control lease switches back to the local pointer for
-  // zero-latency touch feedback. `haveHostPos` stays false until the first host position arrives, so a
-  // view-only session that has not yet heard a host move falls back to the local-pointer path (never
-  // zero cursor).
-  let hostNx = 0, hostNy = 0, haveHostPos = false;
-
-  // A crisp default arrow drawn in code (no asset), used until the first host shape arrives or if none
-  // ever does — so the user is never left with no cursor. Hotspot is the tip (0,0).
-  function drawDefaultArrow(x, y) {
-    softCtx.save();
-    softCtx.translate(x, y);
-    softCtx.beginPath();
-    softCtx.moveTo(0, 0);
-    softCtx.lineTo(0, 16);
-    softCtx.lineTo(4, 12);
-    softCtx.lineTo(7, 18);
-    softCtx.lineTo(9.5, 17);
-    softCtx.lineTo(6.5, 11);
-    softCtx.lineTo(11, 11);
-    softCtx.closePath();
-    softCtx.fillStyle = "#fff";
-    softCtx.strokeStyle = "#000";
-    softCtx.lineWidth = 1.4;
-    softCtx.lineJoin = "round";
-    softCtx.stroke();
-    softCtx.fill();
-    softCtx.restore();
-  }
-
-  function evictIfNeeded() {
-    while (cache.size > CACHE_CAP) {
-      const oldest = cache.keys().next().value; // insertion order = FIFO (Map preserves it)
-      const rec = cache.get(oldest);
-      if (rec && rec.bitmap && rec.bitmap.close) { try { rec.bitmap.close(); } catch (_) {} }
-      cache.delete(oldest);
-    }
-  }
-
-  function redraw() {
-    // Match the drawing surface to the video box so overlay px == screen px.
-    const w = softCanvas.clientWidth, h = softCanvas.clientHeight;
-    if (softCanvas.width !== w) softCanvas.width = w;
-    if (softCanvas.height !== h) softCanvas.height = h;
-    softCtx.clearRect(0, 0, softCanvas.width, softCanvas.height);
-    // POSITION SOURCE (the view-only-tracks-host / control-uses-local rule):
-    //   - While CONTROLLING (we hold the lease): use the LOCAL pointer for zero-latency touch feedback —
-    //     the host's OS cursor is being driven by our own input, so the local pointer IS where it goes.
-    //   - While VIEW-ONLY, once the host has streamed a position: track the HOST's real cursor, mapping
-    //     its normalized 0..=65535 onto the video content rect. The host owns where its cursor is, so we
-    //     draw it wherever the host reports — independent of the local pointer.
-    //   - View-only but no host position yet: fall back to the local pointer (never a zero-cursor gap).
-    const trackHost = !controlling && haveHostPos;
-    const box = softCanvas.getBoundingClientRect();
-    let x, y;
-    if (trackHost) {
-      // Map the host's normalized position onto the video content rect (viewport px), then to canvas px.
-      const r = videoContentRect();
-      x = r.left + (hostNx / 65535) * r.width - box.left;
-      y = r.top + (hostNy / 65535) * r.height - box.top;
-    } else {
-      // Coordinates relative to the canvas (its box is fixed at top:52 left:0, same as #screen).
-      x = px - box.left;
-      y = py - box.top;
-    }
-    // "Never zero, exactly one": the browser cursor is hidden over the video ONLY while the soft cursor
-    // is actually being drawn. In the LOCAL-pointer path this is gated on `overVideo` (as before) — the
-    // window between session-live and the first pointer move keeps the native browser cursor visible
-    // rather than hiding it with nothing drawn (a zero-cursor state, worse than the old baked cursor). In
-    // the HOST-tracking path (view-only) the soft cursor follows the host's real position wherever it is,
-    // so the draw gate does not depend on the local `overVideo` — the host cursor is always shown while
-    // live and not host-hidden. `hostHidden` is the one deliberate no-cursor case (the host itself hides
-    // its cursor, e.g. a fullscreen player) — we mirror it, and the native cursor shows as the fallback.
-    const drawing = live && !hostHidden && (trackHost || overVideo);
-    connectView.classList.toggle("soft-cursor-active", drawing);
-    if (!drawing) return;
-    if (current && current.bitmap) {
-      softCtx.drawImage(current.bitmap, x - current.hotspot_x, y - current.hotspot_y);
-    } else {
-      // No shape yet (or a cached shape whose bitmap failed to decode) → default arrow, tip at pointer.
-      drawDefaultArrow(x, y);
-    }
-  }
-
-  function useShape(id) {
-    const rec = cache.get(id);
-    if (rec) current = rec; // a hit does NOT reorder (host uses insertion order) — cache contract
-    // If we somehow don't have it (shouldn't happen under the contract), keep the last shape / arrow.
-    redraw();
-  }
-
-  return {
-    setLive(on) {
-      live = on;
-      // Note: the `soft-cursor-active` class (which hides the browser cursor over the video) is NOT
-      // toggled here — `redraw()` sets it only while a soft cursor is actually drawn, so we never hide
-      // the native cursor with nothing to replace it (the zero-cursor regression). redraw() runs below.
-      if (!on) {
-        current = null;
-        hostHidden = false;
-        overVideo = false;
-        haveHostPos = false;
-        hostNx = 0; hostNy = 0;
-        for (const rec of cache.values()) {
-          if (rec.bitmap && rec.bitmap.close) { try { rec.bitmap.close(); } catch (_) {} }
-        }
-        cache.clear();
-      }
-      redraw();
-    },
-    // A fresh host shape: decode its RGBA to an ImageBitmap, cache it by id, and show it. We MUST record
-    // it even under load (the cache contract) or a later `cursor-cached` would strand.
-    async setShape(p) {
-      hostHidden = false;
-      const { id, hotspot_x, hotspot_y, width, height, rgba } = p;
-      // Reserve the slot in insertion order immediately (so a rapid cached-ref for this id resolves and
-      // FIFO order is correct) with a null bitmap; fill the bitmap once decoded.
-      if (!cache.has(id)) {
-        cache.set(id, { bitmap: null, hotspot_x, hotspot_y, width, height });
-        evictIfNeeded();
-      }
-      current = cache.get(id);
-      redraw(); // draw the arrow at the right spot immediately; the bitmap replaces it once ready
-      try {
-        const arr = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
-        const img = new ImageData(new Uint8ClampedArray(arr), width, height); // top-down RGBA
-        const bmp = await createImageBitmap(img);
-        const rec = cache.get(id);
-        if (rec) { rec.bitmap = bmp; rec.hotspot_x = hotspot_x; rec.hotspot_y = hotspot_y; }
-        redraw();
-      } catch (_) {
-        // Decode failed → the default arrow already stands in; not fatal (cursor pixels are display-only).
-      }
-    },
-    setCached(id) { hostHidden = false; useShape(id); },
-    setHidden() { hostHidden = true; redraw(); },
-    // The local pointer moved (or entered/left the video) — reposition the soft cursor.
-    setPos(x, y, inside) {
-      px = x; py = y; overVideo = inside;
-      redraw();
-    },
-    // The host's real cursor moved (normalized 0..=65535 over the captured display). Recorded always;
-    // it only becomes the draw position while VIEW-ONLY (see `redraw`). A held control lease ignores it
-    // and keeps the local pointer, so the recorded value simply resumes tracking the moment control ends.
-    setHostPos(nx, ny) {
-      hostNx = nx; hostNy = ny; haveHostPos = true;
-      if (!controlling) redraw();
-    },
-    // The lease state flipped — repaint so the position source switches (host↔local) immediately.
-    onControllingChanged() { redraw(); },
-  };
-})();
-
-// Track the local pointer for the soft-cursor position (independent of the throttled send_pointer).
-window.addEventListener("pointermove", (e) => {
-  if (!active) return;
-  const r = videoContentRect();
-  const inside = r.width > 0 && r.height > 0 &&
-    e.clientX >= r.left && e.clientX <= r.left + r.width &&
-    e.clientY >= r.top && e.clientY <= r.top + r.height;
-  softCursor.setPos(e.clientX, e.clientY, inside);
-});
-window.addEventListener("pointerleave", () => softCursor.setPos(0, 0, false));
-
-listen("cursor-shape", (e) => { softCursor.setShape(e.payload); });
-listen("cursor-cached", (e) => { softCursor.setCached(e.payload); });
-listen("cursor-hidden", () => { softCursor.setHidden(); });
-// The host's real cursor position (ADR-073, normalized 0..=65535). While view-only this drives the soft
-// cursor so the local user tracks exactly where the host's pointer is; while controlling it is recorded
-// but the local pointer wins (zero-latency touch feedback).
-listen("cursor-position", (e) => { softCursor.setHostPos(e.payload.x, e.payload.y); });
-
 // ── Remote control (Phase 3): forward this viewer's clicks/keys to the host's OS ─────────────────
 // Only when we hold the lease (`controlling`). The host re-checks every event (lease/generation/seq/
 // capability, Inv 15) — this is a request, never authority. Coordinates are normalized to the video
@@ -1390,10 +1183,6 @@ function setControlling(on) {
   if (banner) {
     banner.textContent = controlling ? "● CONTROLLING remote screen" : "● LIVE — viewing remote screen";
   }
-  // Switch the soft-cursor position source immediately: controlling → local pointer (zero-latency),
-  // view-only → the host's streamed real position. Repaint now so the change is visible without waiting
-  // for the next pointer/host move.
-  softCursor.onControllingChanged();
 }
 
 // Normalized 0..=65535 of the video content rect, or null if outside it.
@@ -1820,81 +1609,6 @@ const annotations = (function () {
 listen("remote-annotation", (e) => {
   annotations.applyRemote(e.payload || {});
 });
-
-// ── Share-role annotation toolbar (ADR-097) ──────────────────────────────────────────────────────
-// The mirror of the connect-view annotation module, for the SHARER. The Share view has no video (the
-// sharer sees their own real screen), so the toolbar here only tracks the selected tool/color and
-// drives the transparent overlay (which covers exactly the captured display): selecting a tool sends
-// `host_annotate_mode` to make the overlay interactive so the sharer can draw on their screen; the
-// overlay then normalizes each stroke to the captured display rect and sends it to the viewer. Undo/
-// clear go straight through `host_annotate` (which also mirrors the op to the overlay). Not OS input,
-// no capability — display markup only, like the visual pointer.
-const shareAnnotations = (function () {
-  const bar = document.getElementById("share-tools");
-  if (!bar) return { show() {}, reset() {} };
-  let tool = "off";
-  let color = "#ff3b30";
-  const toolTag = (t) => (t === "hi" ? 1 : t === "arrow" ? 2 : t === "rect" ? 3 : 0);
-  const colorNum = (c) => parseInt(String(c).replace("#", ""), 16) & 0xffffff;
-
-  function pushMode() {
-    // `off` → overlay click-through; any drawing tool → overlay interactive with this tool/color.
-    invoke("host_annotate_mode", {
-      active: tool !== "off",
-      tool: toolTag(tool),
-      color: colorNum(color),
-    }).catch(() => {});
-  }
-
-  bar.querySelectorAll("button[data-htool]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      tool = btn.dataset.htool;
-      bar.querySelectorAll("button[data-htool]").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      pushMode();
-    });
-  });
-  bar.querySelectorAll(".hswatch").forEach((sw) => {
-    sw.addEventListener("click", () => {
-      color = sw.dataset.color;
-      bar.querySelectorAll(".hswatch").forEach((b) => b.classList.remove("active"));
-      sw.classList.add("active");
-      if (tool !== "off") pushMode(); // update the live pen color on the overlay
-    });
-  });
-  const hundo = document.getElementById("hundo");
-  if (hundo)
-    hundo.addEventListener("click", () => {
-      invoke("host_annotate", { op: "undo", tool: 0, color: 0, points: [] }).catch(() => {});
-    });
-  const hclear = document.getElementById("hclearannot");
-  if (hclear)
-    hclear.addEventListener("click", () => {
-      invoke("host_annotate", { op: "clear", tool: 0, color: 0, points: [] }).catch(() => {});
-    });
-  const firstSwatch = bar.querySelector(".hswatch");
-  if (firstSwatch) firstSwatch.classList.add("active");
-
-  function reset() {
-    tool = "off";
-    color = "#ff3b30";
-    bar.querySelectorAll("button[data-htool]").forEach((b) => b.classList.remove("active"));
-    const off = bar.querySelector('button[data-htool="off"]');
-    if (off) off.classList.add("active");
-    bar.querySelectorAll(".hswatch").forEach((b) => b.classList.remove("active"));
-    if (firstSwatch) firstSwatch.classList.add("active");
-    // Return the overlay to click-through (never leave it interactive after a session ends).
-    invoke("host_annotate_mode", { active: false, tool: 0, color: 0 }).catch(() => {});
-  }
-
-  return {
-    show(on) {
-      bar.hidden = !on;
-      if (!on) reset();
-    },
-    reset,
-  };
-})();
 
 // ── In-session chat + clipboard sync ─────────────────────────────────────────────────────────────
 // A compact, collapsible corner panel usable on BOTH roles while a session is live. It talks to the

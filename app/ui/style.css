@@ -95,25 +95,6 @@ body {
   pointer-events: auto;
   cursor: crosshair;
 }
-/* Soft cursor (ADR-073): host OS cursor shape drawn over the video. Same fixed box as #screen/#annot
-   so it aligns with the video content rect. Click-through — it never intercepts input. Above the
-   annotation layer so the remote cursor is always visible. */
-#softcursor {
-  position: fixed;
-  top: 52px;
-  left: 0;
-  width: 100vw;
-  height: calc(100vh - 52px);
-  pointer-events: none;
-  z-index: 6;
-}
-/* While a live session draws the soft cursor, hide the webview's OWN cursor over the video so there is
-   exactly one cursor (the soft one). Toggled by JS (`soft-cursor-active`) only while connected; when
-   off, the normal browser cursor returns. The annotation crosshair (when a tool is active) still wins
-   because `#annot.drawing` sets its own cursor and sits above the soft-cursor toggle target. */
-#connect-view.soft-cursor-active #screen {
-  cursor: none;
-}
 /* Floating annotation toolbar. */
 #tools {
   position: fixed;
@@ -160,59 +141,6 @@ body {
   border-color: #fff;
 }
 #tools .sep {
-  width: 1px;
-  height: 22px;
-  background: #33333f;
-  margin: 0 4px;
-}
-/* Sharer annotation toolbar (ADR-097) — mirrors #tools but lives inline in the Share view (not a
-   fixed overlay bar, since the Share view has no video canvas). */
-.sharetools {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 10px 0;
-  padding: 6px 8px;
-  border-radius: 10px;
-  background: rgba(22, 22, 28, 0.6);
-  border: 1px solid #2a2a34;
-}
-.sharetools .sharetools-label {
-  color: #b8b8c4;
-  font-size: 13px;
-  margin-right: 6px;
-}
-.sharetools button {
-  height: 30px;
-  min-width: 30px;
-  padding: 0 8px;
-  border-radius: 7px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: #e8e8ee;
-  font: 15px/1 ui-sans-serif, system-ui, sans-serif;
-  cursor: pointer;
-}
-.sharetools button:hover {
-  background: #2e2e3a;
-}
-.sharetools button.active {
-  background: #3a3a48;
-  border-color: #55556a;
-}
-.sharetools .hswatch {
-  width: 22px;
-  min-width: 22px;
-  height: 22px;
-  padding: 0;
-  border-radius: 50%;
-  border: 2px solid transparent;
-}
-.sharetools .hswatch.active {
-  border-color: #fff;
-}
-.sharetools .sep {
   width: 1px;
   height: 22px;
   background: #33333f;

@@ -261,11 +261,11 @@ impl ScreenCaptureBackend for MacScreenCapture {
             c.setWidth(dw as usize);
             c.setHeight(dh as usize);
             c.setPixelFormat(PIXEL_FORMAT_BGRA);
-            // Do NOT composite the OS cursor into captured frames (ADR-073): the live cursor shape is
-            // streamed out-of-band over the dedicated cursor-shape channel (`ras-cursor-macos`'s
-            // `CursorObserver` → `ras-core` → controller) and drawn client-side at zero latency. Baking
-            // it into the video too would double-draw it and lag behind the out-of-band shape.
-            c.setShowsCursor(false);
+            // Composite the OS cursor into the captured frames: the controller sees the host's real
+            // cursor in the video — ONE cursor, no soft-cursor overlay, no double-draw. (The separate
+            // cursor-shape channel + client-side soft cursor was a needless complication that regressed
+            // the experience; keep it simple.)
+            c.setShowsCursor(true);
             c.setMinimumFrameInterval(CMTime::new(1, self.target_fps as i32));
             c.setQueueDepth(3); // small; freshest-wins slot discards backlog anyway
             c

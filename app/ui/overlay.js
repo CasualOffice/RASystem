@@ -6,7 +6,6 @@
 // straight to the overlay. This never receives input (the window is click-through) — purely visual.
 
 const { listen } = window.__TAURI__.event;
-const { invoke } = window.__TAURI__.core;
 
 // Always-visible "remote active" indicator (Invariant 7). The in-app indicator + Stop live in the main
 // window, which the host user can minimize / move / occlude; this badge lives on the always-on-top,
@@ -82,77 +81,6 @@ listen("share-active", (e) => {
   if (!e.payload) annotStrokes = [];
 });
 
-// ── Sharer-side drawing (ADR-097) ────────────────────────────────────────────────────────────────
-// The Share role lets the SHARER draw on their OWN screen (over the captured display, which this
-// overlay covers exactly). The Share view's toolbar drives `host-annot-mode`: when a tool is active
-// the Rust side makes this overlay interactive (not click-through) so pointer events reach it; when
-// off, the overlay is click-through again (view-only default, Inv 7). Each completed stroke is drawn
-// locally (so the sharer sees it) AND sent to the viewer via `host_annotate`. Points are normalized
-// 0..=65535 over this canvas = the captured display rect (the same space the viewer maps into). This
-// UI is excluded from the shared capture, so the viewer never sees the overlay itself, only the
-// mirrored strokes on their video.
-let hostMode = { active: false, tool: 0, color: 0xff3b30 };
-let hostStrokes = [];
-let hostCur = null;
-listen("host-annot-mode", (e) => {
-  const p = e.payload || {};
-  hostMode = { active: !!p.active, tool: p.tool | 0, color: (p.color | 0) & 0xffffff };
-  cv.style.cursor = hostMode.active ? "crosshair" : "default";
-  if (!hostMode.active) hostCur = null;
-});
-// Clear sharer markup when the whole share ends.
-listen("share-active", (e) => {
-  if (!e.payload) {
-    hostStrokes = [];
-    hostCur = null;
-  }
-});
-// Undo/clear originate on the Share-view toolbar (not on this canvas); mirror them here so the
-// sharer's local markup matches what the viewer sees.
-listen("host-annot-op", (e) => {
-  if (e.payload === "clear") hostStrokes = [];
-  else if (e.payload === "undo") hostStrokes.pop();
-});
-
-// Normalize a pointer event to 0..=65535 over this overlay canvas (= the captured display rect).
-function hostNormPt(e) {
-  let nx = e.clientX / Math.max(1, window.innerWidth);
-  let ny = e.clientY / Math.max(1, window.innerHeight);
-  nx = Math.max(0, Math.min(1, nx));
-  ny = Math.max(0, Math.min(1, ny));
-  return [Math.round(nx * 65535), Math.round(ny * 65535)];
-}
-function sendHostStroke(s) {
-  const points = s.points.filter(Boolean);
-  if (!points.length) return;
-  invoke("host_annotate", { op: "stroke", tool: s.tool, color: s.color, points }).catch(() => {});
-}
-cv.addEventListener("pointerdown", (e) => {
-  if (!hostMode.active) return;
-  cv.setPointerCapture(e.pointerId);
-  hostCur = { tool: hostMode.tool, color: colorHex(hostMode.color), points: [hostNormPt(e)] };
-});
-cv.addEventListener("pointermove", (e) => {
-  if (!hostCur) return;
-  const n = hostNormPt(e);
-  if (hostCur.tool === 0 || hostCur.tool === 1) {
-    hostCur.points.push(n);
-  } else {
-    hostCur.points[1] = n; // arrow/rect keep only endpoints
-  }
-});
-function endHostStroke() {
-  if (!hostCur) return;
-  if (hostCur.points.length > 1 || hostCur.tool === 0 || hostCur.tool === 1) {
-    hostStrokes.push({ tool: hostCur.tool, color: hostCur.color, points: hostCur.points });
-    if (hostStrokes.length > MAX_ANNOT_STROKES) hostStrokes.shift();
-    sendHostStroke({ tool: hostCur.tool, color: hostMode.color, points: hostCur.points });
-  }
-  hostCur = null;
-}
-cv.addEventListener("pointerup", endHostStroke);
-cv.addEventListener("pointercancel", endHostStroke);
-
 // Draw one annotation stroke (tool: 0=pen, 1=highlighter, 2=arrow, 3=rect). Coords normalized.
 function drawAnnot(s) {
   const pts = s.points;
@@ -198,9 +126,6 @@ function draw(now) {
   g.clearRect(0, 0, cv.width, cv.height);
   // Viewer annotations first, so the live pointer cursor draws on top of them.
   for (const s of annotStrokes) drawAnnot(s);
-  // Sharer's own markup (drawn on their screen, mirrored to the viewer).
-  for (const s of hostStrokes) drawAnnot(s);
-  if (hostCur) drawAnnot(hostCur);
   const fresh = now - ptr.at < STALE_MS;
   if (ptr.visible && fresh) {
     const px = (ptr.x / 65535) * cv.width;

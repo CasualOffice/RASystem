@@ -132,27 +132,6 @@
           asks you for a separate Allow first.</span>
       </div>
 
-      <!-- Sharer annotation toolbar (ADR-097). Mirrors the connect-view tools: select a tool to draw
-           on YOUR screen (over the shared display); the marks appear on the viewer's video too. Hidden
-           until a viewer is connected. Selecting a tool makes the transparent overlay interactive so
-           you can draw; "Off" returns it to view-only (click-through). -->
-      <div id="share-tools" class="sharetools" hidden>
-        <span class="sharetools-label">Point things out on your screen:</span>
-        <button data-htool="off" class="active" title="Stop annotating (view only)">🚫</button>
-        <button data-htool="pen" title="Freehand pen">✏️</button>
-        <button data-htool="arrow" title="Arrow">↗</button>
-        <button data-htool="rect" title="Rectangle">▭</button>
-        <button data-htool="hi" title="Highlighter">🖍</button>
-        <span class="sep"></span>
-        <button class="hswatch" data-color="#ff3b30" style="background:#ff3b30" title="Red"></button>
-        <button class="hswatch" data-color="#ffcc00" style="background:#ffcc00" title="Yellow"></button>
-        <button class="hswatch" data-color="#34c759" style="background:#34c759" title="Green"></button>
-        <button class="hswatch" data-color="#0a84ff" style="background:#0a84ff" title="Blue"></button>
-        <span class="sep"></span>
-        <button id="hundo" title="Undo last">⤺</button>
-        <button id="hclearannot" title="Clear all annotations">Clear</button>
-      </div>
-
       <div id="consent" hidden>
         <div class="consent-card">
           <p class="consent-title">A viewer wants to see your screen</p>
@@ -250,10 +229,6 @@
       </div>
       <canvas id="screen"></canvas>
       <canvas id="annot"></canvas>
-      <!-- Soft cursor: the host's OS cursor shape (ADR-073) drawn over the video. The host capture runs
-           showsCursor=false, so the real cursor is NOT in the frame — this overlay is the one cursor the
-           viewer sees. Click-through (pointer-events:none) so it never intercepts input. -->
-      <canvas id="softcursor"></canvas>
       <div id="tools" hidden>
         <button data-tool="off" class="active" title="Stop annotating (interact with nothing — view only)">🚫</button>
         <button data-tool="pen" title="Freehand pen">✏️</button>
