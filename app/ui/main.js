@@ -126,7 +126,10 @@ let t0 = performance.now();
 let decErrors = 0;
 const MAX_DEC_RETRIES = 3;
 // Latency guard: max decoder backlog before we start dropping deltas to catch up (see the frame path).
-const DECODE_QUEUE_MAX = 6;
+// Tightened 6→3: 6 frames is ~100ms of tolerated backlog at 60fps, which on a slow decoder (WebKitGTK
+// on Linux) sits near-full and becomes a constant end-to-end offset. 3 (~50ms) skips-to-keyframe sooner
+// so latency stays live; the 400ms keyframe-request rate-limit below bounds any resulting request churn.
+const DECODE_QUEUE_MAX = 3;
 let lastLatencyKeyReq = 0;
 
 // Persistent, honest capability message (Inv 8: engine capability only, never stream content). Shown
@@ -320,7 +323,7 @@ function onFrame(bytes) {
     const dt = (performance.now() - t0) / 1000;
     hud.textContent =
       `render ${(decoded / dt).toFixed(1)} fps · rx ${received} · decoded ${decoded} · ` +
-      `gaps ${gaps} · id ${id}`;
+      `gaps ${gaps} · q ${decoder.decodeQueueSize} · id ${id}`;
   }
 }
 
@@ -1254,20 +1257,17 @@ controlBtn.addEventListener("click", async () => {
 // Pointer + keyboard forwarding. All guarded on `controlling`; when active they preventDefault so the
 // webview itself doesn't act on the input.
 //
-// TOUCH-STYLE control model (ADR-097 cursor model, from issue #5): while merely HOVERING (no button
-// held) we move only the *virtual* cursor on the host overlay (via trackPointer/send_pointer) and do
-// NOT drag the host's real OS cursor — that's what produced the "multi cursors + drag" ghosting when
-// both a real and a virtual cursor moved together. A click TAPS at the pointed spot (the OS sinks
-// position the button at nx,ny), and the real cursor follows only while a button is held (so drag /
-// marquee-select still work). Result: one clear virtual cursor for aiming; the real cursor engages
-// only on click/drag — like a touchscreen.
-let dragging = false;
+// Continuous cursor-follow (normal remote-desktop model): every hover move warps the host's real OS
+// cursor, so the one baked-in cursor (showsCursor=true on capture) tracks the controller's pointer.
+// This replaced the old touch/tap model — that only existed to avoid two fighting cursors under the
+// now-removed soft-cursor overlay; with a single shared cursor there is nothing to fight, and
+// continuous follow is what makes clicks land where you point, keeps hover states (menus/tooltips)
+// alive, and lets a click cleanly focus the target app (so keystrokes go somewhere).
 const heldButtons = new Set(); // buttons currently pressed on the host, for best-effort release
 let lastNx = 0;
 let lastNy = 0;
 window.addEventListener("pointermove", (e) => {
   if (!controlling) return;
-  if (!dragging) return; // hover: virtual cursor only (trackPointer); don't drag the real OS cursor
   const now = performance.now();
   if (now - lastMoveAt < 8) return; // ~120 Hz cap
   lastMoveAt = now;
@@ -1286,12 +1286,15 @@ function forwardButton(e, down) {
   const button = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
   lastNx = p.nx;
   lastNy = p.ny;
-  if (down) heldButtons.add(button);
-  else heldButtons.delete(button);
-  // Derive drag state from the buttons STILL held (PointerEvent.buttons is the post-event bitmask), so
-  // releasing one of several held buttons doesn't freeze an in-progress drag, and a plain hover never
-  // drags the host's real cursor (ADR-097 touch model).
-  dragging = e.buttons !== 0;
+  if (down) {
+    heldButtons.add(button);
+    // Prime the exact position first so the press lands where the cursor is shown and the target app
+    // has seen a hover before the click (some macOS controls need it). The button event carries the
+    // position too, but an explicit move avoids any drift from the throttled hover stream.
+    invoke("input_pointer_move", { nx: p.nx, ny: p.ny });
+  } else {
+    heldButtons.delete(button);
+  }
   invoke("input_pointer_button", { nx: p.nx, ny: p.ny, button, down });
 }
 window.addEventListener("pointerdown", (e) => forwardButton(e, true));

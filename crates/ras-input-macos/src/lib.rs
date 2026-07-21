@@ -22,6 +22,7 @@
 mod macos {
     use std::collections::HashSet;
     use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     use core_graphics::display::CGDisplay;
     use core_graphics::event::{
@@ -47,14 +48,6 @@ mod macos {
         // Current modifier/lock flags of an event-source state (HIDSystemState = 1). Returns a
         // CGEventFlags bitset; bit `kCGEventFlagMaskAlphaShift` (0x00010000) is CapsLock.
         fn CGEventSourceFlagsState(state_id: i32) -> u64;
-        // Decouple the hardware mouse from the on-screen cursor position (`connected == 0`) so an
-        // absolute warp does not fight the local user's physical mouse (the "two cursors" artifact).
-        // `connected != 0` re-couples it.
-        fn CGAssociateMouseAndMouseCursorPosition(connected: i32) -> i32;
-        // Hide / show the local cursor on a display while remote control is warping it.
-        fn CGDisplayHideCursor(display: u32) -> i32;
-        fn CGDisplayShowCursor(display: u32) -> i32;
-        fn CGMainDisplayID() -> u32;
     }
 
     /// Display bounds in global points, for normalized→pixel mapping.
@@ -67,19 +60,40 @@ mod macos {
         h: f64,
     }
 
+    /// Running click aggregation for macOS double/triple-click. Unlike X11/Windows, macOS does NOT
+    /// derive the click count for *synthetic* events — the poster must stamp `kCGMouseEventClickState`
+    /// on the button-down (and its matching up), or every click reads as a fresh single click and
+    /// double-click never fires. We track the last down and advance the count when the next down is the
+    /// same button, close in time and space (Aqua's ~500 ms / a few px).
+    #[derive(Debug, Clone, Copy)]
+    struct ClickState {
+        button: u8,
+        at: Instant,
+        x: f64,
+        y: f64,
+        count: i64,
+    }
+
+    /// macOS double-click window and slop (Aqua defaults are ~500 ms; keep a small position tolerance
+    /// so a click that jitters by a pixel still counts as a double-click).
+    const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+    const DOUBLE_CLICK_SLOP: f64 = 5.0;
+
     /// A CGEvent-backed [`OsInputSink`]. All fields are plain data behind `Mutex`es (so the sink is
     /// `Send + Sync`); the non-`Send` `CGEventSource` is created per event, never stored.
     #[derive(Debug, Default)]
     pub struct CgEventSink {
         pressed_keys: Mutex<HashSet<CGKeyCode>>,
         pressed_buttons: Mutex<HashSet<u8>>,
+        /// Last click, for macOS double/triple-click aggregation (see [`ClickState`]).
+        last_click: Mutex<Option<ClickState>>,
         last_point: Mutex<(f64, f64)>,
         displays: Mutex<Vec<DisplayBounds>>,
-        /// Warp-discipline guard (RustDesk PR #10314 class). `true` while we have dissociated the
-        /// hardware mouse from the cursor position and hidden the local cursor for an absolute warp.
-        /// Latched on the first warp of a control burst and released **only** by [`Self::end_warp`],
-        /// which the emergency-stop / teardown path (`release_all`) always calls — so a stop can
-        /// never leave the local cursor dissociated or hidden (Inv 4).
+        /// Warp-burst latch, retained as a balanced seam. In the single baked-cursor model this no
+        /// longer drives any OS effect (we do NOT dissociate the hardware mouse or hide the cursor —
+        /// the host's real cursor is captured and must stay visible + owner-controllable, Inv 1/4). It
+        /// is kept so `begin_warp`/`end_warp` and the emergency-stop teardown contract stay unchanged
+        /// and unit-tested; see [`Self::begin_warp`].
         cursor_dissociated: Mutex<bool>,
     }
 
@@ -170,22 +184,19 @@ mod macos {
             // Latch the flag under the lock and learn whether this is the `false → true` transition
             // (the only time we touch the OS). `latch_warp` is pure so the balance logic is unit-tested
             // without a display/login session; the FFI stays on-device.
-            let fire = latch_warp(
+            // Single baked-cursor model: the host's real cursor is composited into the capture
+            // (showsCursor=true) and MUST stay both visible and physically controllable by the host
+            // (Inv 1/4 — the owner can always grab the cursor to hit Stop). So we deliberately do NOT
+            // dissociate the hardware mouse or hide the cursor here (the old two-cursor soft-cursor
+            // fix); the injected MouseMoved events warp the shared cursor and the capture shows it.
+            // The latch is kept only as a balanced seam so the injection paths / release_all are
+            // unchanged and unit-tested.
+            let _ = latch_warp(
                 &mut self
                     .cursor_dissociated
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()),
             );
-            if fire {
-                // SAFETY: plain C predicates over a scalar/display-id; safe from any thread. The
-                // display id is the live main display. Return codes are best-effort (a non-zero
-                // CGError does not change our latched state — we still record `true` so the balancing
-                // `end_warp` unconditionally re-associates + unhides, never leaving the cursor stuck).
-                unsafe {
-                    CGAssociateMouseAndMouseCursorPosition(0);
-                    CGDisplayHideCursor(CGMainDisplayID());
-                }
-            }
         }
 
         /// Exit the cursor-warp state: re-couple the hardware mouse to the cursor and show the local
@@ -193,20 +204,33 @@ mod macos {
         /// [`OsInputSink::release_all`] calls it on **every** teardown path (emergency stop, lease end,
         /// session end), so a stop never leaves the local cursor hidden or dissociated (Inv 4).
         fn end_warp(&self) {
-            let fire = unlatch_warp(
+            // Balanced no-op counterpart to begin_warp: nothing to restore since we no longer hide or
+            // dissociate the cursor. Kept so release_all's teardown contract and the latch tests hold.
+            let _ = unlatch_warp(
                 &mut self
                     .cursor_dissociated
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()),
             );
-            if fire {
-                // SAFETY: as `begin_warp`. Unconditionally restore the local cursor even if a prior
-                // hide/dissociate call returned a CGError — showing/re-associating an already-shown/
-                // associated cursor is a harmless no-op on the OS side.
-                unsafe {
-                    CGAssociateMouseAndMouseCursorPosition(1);
-                    CGDisplayShowCursor(CGMainDisplayID());
-                }
+        }
+
+        /// Choose the CGEvent motion type for a move: if a button is currently held this is a DRAG and
+        /// macOS requires the matching `*MouseDragged` type carrying that button (else the drag doesn't
+        /// track); a plain hover is `MouseMoved`. Priority left > right > middle if several are held
+        /// (only one can drag at a time in practice). Tags: 0=left, 1=right, 2=middle (see `button_tag`).
+        fn motion_kind(&self) -> (CGEventType, CGMouseButton) {
+            let pressed = self
+                .pressed_buttons
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if pressed.contains(&0) {
+                (CGEventType::LeftMouseDragged, CGMouseButton::Left)
+            } else if pressed.contains(&1) {
+                (CGEventType::RightMouseDragged, CGMouseButton::Right)
+            } else if pressed.contains(&2) {
+                (CGEventType::OtherMouseDragged, CGMouseButton::Center)
+            } else {
+                (CGEventType::MouseMoved, CGMouseButton::Left)
             }
         }
     }
@@ -239,6 +263,30 @@ mod macos {
         })
     }
 
+    /// Pure click-count aggregation for macOS double/triple-click (kept out of the FFI path so it is
+    /// unit-tested without a display session). A down that follows the previous down on the SAME button
+    /// within the double-click interval and position slop advances the count (capped at triple); any
+    /// other down resets to a single click.
+    fn advance_click_count(
+        prev: Option<ClickState>,
+        button: u8,
+        at: Instant,
+        x: f64,
+        y: f64,
+    ) -> i64 {
+        match prev {
+            Some(p)
+                if p.button == button
+                    && at.saturating_duration_since(p.at) <= DOUBLE_CLICK_INTERVAL
+                    && (x - p.x).abs() <= DOUBLE_CLICK_SLOP
+                    && (y - p.y).abs() <= DOUBLE_CLICK_SLOP =>
+            {
+                (p.count + 1).min(3)
+            }
+            _ => 1,
+        }
+    }
+
     fn make_err() -> InputError {
         RasError::recoverable(ErrorCode::InputFailed, "CGEvent creation failed")
     }
@@ -264,16 +312,14 @@ mod macos {
     impl OsInputSink for CgEventSink {
         fn pointer_move(&self, display: u32, nx: f32, ny: f32) -> Result<(), InputError> {
             let point = self.to_point(display, nx, ny);
-            // Warp discipline (PR #10314): dissociate + hide the local cursor before an absolute warp
-            // so it does not fight the physical mouse. Balanced by `end_warp` in `release_all`.
             self.begin_warp();
-            let event = CGEvent::new_mouse_event(
-                source()?,
-                CGEventType::MouseMoved,
-                point,
-                CGMouseButton::Left,
-            )
-            .map_err(|()| make_err())?;
+            // While a button is held this motion is a DRAG, not a hover: macOS needs the matching
+            // *MouseDragged event type carrying the held button, or the drag doesn't track (text
+            // selection, window drag, sliders all break). `motion_kind` picks Dragged-vs-Moved from the
+            // currently-pressed button; a plain hover posts MouseMoved.
+            let (event_type, cg_button) = self.motion_kind();
+            let event = CGEvent::new_mouse_event(source()?, event_type, point, cg_button)
+                .map_err(|()| make_err())?;
             event.post(CGEventTapLocation::HID);
             Ok(())
         }
@@ -286,16 +332,12 @@ mod macos {
             let (bx, by, bw, bh) = self.desktop_bounds();
             let nx = (current.x + f64::from(dx)).clamp(bx, bx + (bw - 1.0).max(0.0));
             let ny = (current.y + f64::from(dy)).clamp(by, by + (bh - 1.0).max(0.0));
-            // This posts an absolute reposition too (MouseMoved at the computed point), so it is a warp:
-            // apply the same discipline. Balanced by `end_warp` in `release_all`.
             self.begin_warp();
-            let event = CGEvent::new_mouse_event(
-                source()?,
-                CGEventType::MouseMoved,
-                CGPoint::new(nx, ny),
-                CGMouseButton::Left,
-            )
-            .map_err(|()| make_err())?;
+            // Drag-aware, same as the absolute move: a held button makes this a *MouseDragged.
+            let (event_type, cg_button) = self.motion_kind();
+            let event =
+                CGEvent::new_mouse_event(source()?, event_type, CGPoint::new(nx, ny), cg_button)
+                    .map_err(|()| make_err())?;
             // Carry the relative delta too, so relative-aware apps (games, 3D viewers) see the motion,
             // not just the absolute reposition.
             event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, i64::from(dx));
@@ -337,6 +379,29 @@ mod macos {
             };
             let event = CGEvent::new_mouse_event(source()?, event_type, point, cg_button)
                 .map_err(|()| make_err())?;
+            // Stamp the click count so macOS recognizes double/triple-clicks. Synthetic events do NOT
+            // get this for free (X11/Windows aggregate clicks in the OS; macOS does not) — without it a
+            // rapid second click reads as another single click and double-click never fires. A down
+            // advances the run against the last click; the matching up carries the same count.
+            let tag = button_tag(button);
+            let click_state = {
+                let now = Instant::now();
+                let mut last = self.last_click.lock().unwrap_or_else(|e| e.into_inner());
+                if down {
+                    let count = advance_click_count(*last, tag, now, point.x, point.y);
+                    *last = Some(ClickState {
+                        button: tag,
+                        at: now,
+                        x: point.x,
+                        y: point.y,
+                        count,
+                    });
+                    count
+                } else {
+                    last.filter(|c| c.button == tag).map_or(1, |c| c.count)
+                }
+            };
+            event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
             event.post(CGEventTapLocation::HID);
             // Track pressed buttons for release_all.
             let mut pressed = self
@@ -724,6 +789,58 @@ mod macos {
             assert!((y - 0.0).abs() < 0.001);
             assert!((w - (1920.0 + 1280.0)).abs() < 0.001, "spans both displays");
             assert!((h - 1080.0).abs() < 0.001, "tallest display height");
+        }
+
+        #[test]
+        fn click_count_advances_for_a_fast_same_spot_double_click() {
+            let t0 = Instant::now();
+            // First click → single.
+            assert_eq!(advance_click_count(None, 0, t0, 10.0, 10.0), 1);
+            let first = ClickState {
+                button: 0,
+                at: t0,
+                x: 10.0,
+                y: 10.0,
+                count: 1,
+            };
+            // Second click, same button, +100ms, same spot → double.
+            let t1 = t0 + Duration::from_millis(100);
+            assert_eq!(advance_click_count(Some(first), 0, t1, 11.0, 9.0), 2);
+        }
+
+        #[test]
+        fn click_count_resets_on_slow_far_or_different_button() {
+            let t0 = Instant::now();
+            let first = ClickState {
+                button: 0,
+                at: t0,
+                x: 10.0,
+                y: 10.0,
+                count: 1,
+            };
+            // Too slow (>500ms) → resets to single.
+            let slow = t0 + Duration::from_millis(700);
+            assert_eq!(advance_click_count(Some(first), 0, slow, 10.0, 10.0), 1);
+            // Too far (>slop) → resets.
+            let fast = t0 + Duration::from_millis(100);
+            assert_eq!(advance_click_count(Some(first), 0, fast, 100.0, 10.0), 1);
+            // Different button → resets.
+            assert_eq!(advance_click_count(Some(first), 1, fast, 10.0, 10.0), 1);
+        }
+
+        #[test]
+        fn click_count_caps_at_triple() {
+            let t0 = Instant::now();
+            let triple = ClickState {
+                button: 0,
+                at: t0,
+                x: 10.0,
+                y: 10.0,
+                count: 3,
+            };
+            // A fourth fast click stays at 3 (macOS treats >3 as a fresh cycle; capping is safe).
+            let t1 = t0 + Duration::from_millis(100);
+            assert_eq!(advance_click_count(Some(triple), 0, t1, 10.0, 10.0), 3);
         }
     }
 }
