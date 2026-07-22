@@ -1139,6 +1139,10 @@ function videoContentRect() {
 
 function trackPointer(e) {
   if (!active) return;
+  // While CONTROLLING, the host's real OS cursor follows us (baked into the capture), so the virtual
+  // "look here" pointer would be a confusing SECOND cursor on the host. Suppress it — it's only useful
+  // view-only (to show the host where we're pointing). setControlling clears the last one on transition.
+  if (controlling) return;
   const now = performance.now();
   if (now - lastPointerAt < 40) return; // ~25 Hz is plenty for a pointer
   lastPointerAt = now;
@@ -1174,7 +1178,11 @@ let lastNum = null;
 
 function setControlling(on) {
   controlling = on && active;
-  if (!controlling) {
+  if (controlling) {
+    // Entering control: clear the virtual "look here" pointer on the host so it isn't a second cursor
+    // next to the real OS cursor we now drive (trackPointer is suppressed while controlling).
+    invoke("send_pointer", { x: 0, y: 0, visible: false }).catch(() => {});
+  } else {
     lastCaps = null;
     lastNum = null;
     releaseHeldButtons(); // don't leak a held button / stuck drag across control sessions (Inv 4-aligned)
