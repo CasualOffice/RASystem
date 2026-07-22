@@ -12,6 +12,9 @@ bytes = "1"
 # Iroh/QUIC transport. Pin EXACT (CLAUDE §6) — 1.0.2 is the version validated by spike/iroh-probe.
 # No `unstable-*` features.
 iroh = "=1.0.2"
+# Gossip presence (ADR-094): advertise its ALPN + expose the raw endpoint so the app can attach a
+# `Gossip` actor to this same endpoint. Same pin as `ras-signal` — one iroh in the tree.
+iroh-gossip = "0.101"
 tokio = { version = "1", features = ["io-util", "rt", "sync", "time", "macros"] }
 ras-protocol = { path = "../ras-protocol" }
 ras-media = { path = "../ras-media" }

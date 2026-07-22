@@ -115,7 +115,8 @@ jobs:
             libpulse-dev \
             libdbus-1-dev \
             libclang-dev \
-            pkg-config
+            pkg-config \
+            libvpx-dev
 
       - name: Cache cargo
         uses: actions/cache@v4

@@ -49,6 +49,33 @@ struct AppState {
     /// (no ticket), and the deny-by-default gate for messages/requests. `None` only if the data dir
     /// could not be opened at startup (contacts disabled, everything else still works).
     contacts: Option<Arc<ras_identity::FileContactBook>>,
+    /// The always-on iroh endpoint bound with the persistent identity seed in `.setup()`. Shared so
+    /// both the always-on `run_share` accept loop and a later `start_sharing` reuse the SAME endpoint —
+    /// a second same-seed endpoint would collide in iroh discovery (ADR-094/098). `None` where there is
+    /// no capture backend (no always-on loop) or the bind failed.
+    endpoint: Option<Arc<ras_transport_iroh::Endpoint>>,
+    /// The iroh-gossip actor hosted on the always-on endpoint, driving live **presence** dots for saved
+    /// contacts (ADR-094). `None` ⇒ presence is silently disabled (gossip bind/spawn failed, or no
+    /// capture backend so no always-on endpoint) — **contacts + sessions run fully regardless**
+    /// (FAIL-SAFE). Gossip must never break connectivity.
+    gossip: Option<iroh_gossip::net::Gossip>,
+    /// This machine's persistent identity (the contact id / endpoint id, ADR-092/093), read once at
+    /// startup and reused for every presence topic + beacon signing. `None` if the identity seed was
+    /// unavailable (⇒ presence off).
+    me: Option<ras_identity::ContactId>,
+    /// The persistent-identity keystore for signing presence beacons (ADR-094). Shared into every
+    /// per-contact presence task. `None` ⇒ presence off.
+    presence_ks: Option<Arc<dyn ras_identity::KeyStore>>,
+    /// The live presence state, fed by the per-contact gossip tasks and polled to emit UI updates.
+    /// Pure + clock-free (the poll loop passes `now`). Present even when `gossip` is `None` (just never
+    /// updated), so callers never branch on its existence.
+    presence: Arc<Mutex<ras_signal::presence::PresenceTracker>>,
+    /// One running presence task per saved contact, keyed by contact id. Dropping a handle aborts that
+    /// contact's beacon loop and leaves its topic — so add/remove/block spawn/drop a single task. `Arc`
+    /// so a spawned subscribe task can insert its handle once `spawn_presence` resolves.
+    presence_handles: Arc<
+        Mutex<std::collections::HashMap<ras_identity::ContactId, ras_signal::net::PresenceHandle>>,
+    >,
 }
 
 /// A connected viewer session: the controller + the iroh endpoint that must outlive it.
@@ -625,6 +652,9 @@ fn add_contact(
         last_seen_at: now,
         blocked: false,
     });
+    // Start live presence for the newly-saved contact (best-effort; a gossip failure just leaves the
+    // dot grey — never breaks the add). No-op if presence is disabled or already running for this id.
+    spawn_presence_for(&state, id);
     book.get(&id)
         .map(ContactDto::from)
         .ok_or_else(|| "failed to save contact".into())
@@ -634,7 +664,11 @@ fn add_contact(
 #[tauri::command]
 fn remove_contact(state: State<'_, AppState>, id: String) -> Result<(), String> {
     use ras_identity::{ContactBook, ContactId};
-    contacts_of(&state)?.remove(&ContactId::from_bytes(parse_contact_id(&id)?));
+    let cid = ContactId::from_bytes(parse_contact_id(&id)?);
+    contacts_of(&state)?.remove(&cid);
+    // Stop presence for the removed contact: drop the handle (aborts its beacon loop + leaves the
+    // topic) and clear its cached state so its dot goes dark. Best-effort; guarded for presence-off.
+    stop_presence_for(&state, &cid);
     Ok(())
 }
 
@@ -650,10 +684,168 @@ fn set_contact_blocked(
     let book = contacts_of(&state)?;
     if blocked {
         book.block(&cid);
+        // Blocked ⇒ stop beaconing to / observing them, and clear their dot (contacts-only, Inv 1).
+        stop_presence_for(&state, &cid);
     } else {
         book.unblock(&cid);
+        // Unblocked ⇒ resume live presence (best-effort; no-op if already running or presence off).
+        spawn_presence_for(&state, cid);
     }
     Ok(())
+}
+
+// ─── Gossip presence (ADR-094) ─────────────────────────────────────────────────────────────────────
+
+/// Beacon cadence: broadcast an "online" beacon every 10s.
+const PRESENCE_BEACON_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+/// Staleness window: a contact is "online" only if a beacon was seen within 30s (3× the beacon
+/// interval, so a couple of dropped beacons don't flap the dot — matches presence.rs guidance).
+const PRESENCE_FRESHNESS_MS: u64 = 30_000;
+/// How often the poll loop diffs the tracker and emits `presence` changes to the UI (well under the
+/// freshness window so a state change surfaces promptly without flooding the webview).
+const PRESENCE_POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Content-free presence update pushed to the UI: which saved contact just changed online/offline.
+/// No secret, no message text — just a public id + a bool (Inv 8).
+#[derive(serde::Serialize, Clone)]
+struct PresencePayload {
+    #[serde(rename = "contactId")]
+    contact_id: String,
+    online: bool,
+}
+
+/// Start the pairwise presence loop for one saved contact, storing the handle keyed by id. FAIL-SAFE:
+/// every step degrades to "no dot" rather than erroring — a missing gossip actor, an unavailable
+/// identity, an already-running task, or a failed gossip subscribe all just leave that contact's dot
+/// grey. Never touches session/share state.
+fn spawn_presence_for(state: &AppState, contact: ras_identity::ContactId) {
+    // Presence disabled (no gossip / no identity) ⇒ nothing to do; contacts still work (FAIL-SAFE).
+    let (Some(gossip), Some(me), Some(ks), Some(book)) = (
+        state.gossip.as_ref(),
+        state.me,
+        state.presence_ks.as_ref(),
+        state.contacts.as_ref(),
+    ) else {
+        return;
+    };
+    // Don't beacon to ourselves, and never re-spawn a task that's already running for this id.
+    if contact == me {
+        return;
+    }
+    match state.presence_handles.lock() {
+        Ok(handles) if handles.contains_key(&contact) => return,
+        Ok(_) => {}
+        Err(_) => return,
+    }
+    // The contact id IS its endpoint id / pubkey (ADR-092/093), so it bootstraps the pairwise topic.
+    let Ok(peer) = iroh::EndpointId::from_bytes(contact.as_bytes()) else {
+        return;
+    };
+    let topic = ras_signal::presence::pairwise_topic(&me, &contact);
+    let gossip = gossip.clone();
+    let ks: Arc<dyn ras_identity::KeyStore> = ks.clone();
+    let book: Arc<dyn ras_identity::ContactBook> = book.clone();
+    let tracker = state.presence.clone();
+    let handles = state.presence_handles.clone();
+    let params = ras_signal::net::PresenceParams {
+        beacon_every: PRESENCE_BEACON_EVERY,
+        freshness_ms: PRESENCE_FRESHNESS_MS,
+    };
+    // `spawn_presence` awaits the initial gossip subscribe, so drive it on the async runtime and stash
+    // the handle once it resolves. A failed subscribe simply never inserts a handle (dot stays grey).
+    tauri::async_runtime::spawn(async move {
+        match ras_signal::net::spawn_presence(&gossip, topic, peer, ks, book, tracker, params).await
+        {
+            Ok(handle) => {
+                if let Ok(mut map) = handles.lock() {
+                    // Guard against a racing add/unblock inserting first: keep the earliest, drop ours.
+                    map.entry(contact).or_insert(handle);
+                }
+            }
+            // FAIL-SAFE: presence for this one contact just doesn't start; everything else runs.
+            Err(e) => log::warn!("presence: subscribe failed for a contact: {:?}", e.code),
+        }
+    });
+}
+
+/// Stop presence for one contact: abort its beacon loop (drop the handle) and clear its cached
+/// presence so the dot goes dark. Best-effort; no-op if presence is off or no task was running.
+fn stop_presence_for(state: &AppState, contact: &ras_identity::ContactId) {
+    if let Ok(mut map) = state.presence_handles.lock() {
+        map.remove(contact); // Drop = abort beacon loop + leave topic.
+    }
+    if let Ok(mut t) = state.presence.lock() {
+        t.forget(contact);
+    }
+}
+
+/// The presence poll loop: every [`PRESENCE_POLL_EVERY`] read the tracker, diff against the last
+/// emitted state, and emit a `presence` event to the UI **only for contacts whose online/offline state
+/// CHANGED** (so the webview isn't flooded). Runs for the app's lifetime once gossip is up. FAIL-SAFE:
+/// it only *reads* the tracker — it can never touch session/share state or break connectivity.
+async fn presence_poll_loop(
+    app: tauri::AppHandle,
+    tracker: Arc<Mutex<ras_signal::presence::PresenceTracker>>,
+) {
+    use std::collections::HashMap;
+    // Last emitted online-state per contact, so we emit only transitions.
+    let mut last: HashMap<ras_identity::ContactId, bool> = HashMap::new();
+    loop {
+        tokio::time::sleep(PRESENCE_POLL_EVERY).await;
+        let now = now_ms();
+        let online: std::collections::HashSet<ras_identity::ContactId> = match tracker.lock() {
+            Ok(t) => t
+                .online_now(now, PRESENCE_FRESHNESS_MS)
+                .into_iter()
+                .collect(),
+            Err(_) => continue,
+        };
+        // Emit newly-online transitions.
+        for id in &online {
+            if last.get(id) != Some(&true) {
+                last.insert(*id, true);
+                let _ = app.emit(
+                    "presence",
+                    PresencePayload {
+                        contact_id: hex_id(id.as_bytes()),
+                        online: true,
+                    },
+                );
+            }
+        }
+        // Emit newly-offline transitions (previously true, now absent from the online set).
+        let now_offline: Vec<ras_identity::ContactId> = last
+            .iter()
+            .filter(|(id, &was_online)| was_online && !online.contains(id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in now_offline {
+            last.insert(id, false);
+            let _ = app.emit(
+                "presence",
+                PresencePayload {
+                    contact_id: hex_id(id.as_bytes()),
+                    online: false,
+                },
+            );
+        }
+    }
+}
+
+/// Snapshot of the currently-online saved contacts (hex ids), so the UI can paint initial dots on
+/// entering the contacts view before the next diff tick. Content-free (public ids only, Inv 8).
+/// Returns an empty list when presence is disabled.
+#[tauri::command]
+fn list_online(state: State<'_, AppState>) -> Vec<String> {
+    let now = now_ms();
+    match state.presence.lock() {
+        Ok(t) => t
+            .online_now(now, PRESENCE_FRESHNESS_MS)
+            .into_iter()
+            .map(|id| hex_id(id.as_bytes()))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Connect to a **saved contact by identity — no ticket** (ADR-093). Builds an id-only target that iroh
@@ -679,6 +871,69 @@ async fn connect_to_contact(
     // An id-only ticket: no direct addrs / relay — iroh discovery resolves the live address by id.
     let target = ras_core::transport::EndpointAddr::new(ras_core::transport::EndpointId(bytes));
     connect_to_host(app, state, target.to_ticket(), on_frame, on_audio).await
+}
+
+/// Send a signed **out-of-session text message** to a saved contact over the signal ALPN (ADR-095).
+///
+/// **Online-only, best-effort.** iroh-gossip/relays have no store-and-forward, so a dial to an offline
+/// contact fails; there is NO durable mailbox (explicitly out of scope). A failed delivery is surfaced
+/// as a benign "not delivered — contact appears offline" state, never a false success. Do not over-claim
+/// delivery.
+///
+/// Security: contacts-only, enforced twice — the receiver's `verify_signed` gate AND this pre-dial guard
+/// (a stranger's / blocked contact's message is never even dialed). Signed with the persistent contact
+/// identity, so the receiver's contacts check keys on the right pubkey. The body is a secret (Inv 8):
+/// wrapped in `Redacted`, passed straight to `send_signal` (which never logs it) — NEVER formatted or
+/// logged here, not even in an error.
+#[tauri::command]
+async fn send_message(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    contact_id: String,
+    text: String,
+) -> Result<(), String> {
+    use ras_core::identity::SoftwareKeyStore;
+    use ras_identity::{ContactBook, ContactId};
+    use ras_protocol::Redacted;
+    use ras_signal::SignalPayload;
+
+    let bytes = parse_contact_id(&contact_id)?;
+    let cid = ContactId::from_bytes(bytes);
+    // Contacts-only pre-dial guard (defense-in-depth; the receiver enforces it too). Never dial an
+    // identity the user hasn't saved or has blocked.
+    if !contacts_of(&state)?.is_active_contact(&cid) {
+        return Err("not a saved contact (or blocked)".into());
+    }
+    // Sign with the persistent contact identity so the receiver's contacts-only check keys on the right
+    // pubkey (endpoint id == contact id == signing key).
+    let seed = identity_seed(&app).ok_or("identity unavailable")?;
+    let ks = SoftwareKeyStore::from_seed(seed);
+    // The always-on endpoint, published into state at bind. Fails cleanly before it is bound.
+    let ep = state
+        .endpoint
+        .clone()
+        .ok_or("not reachable yet — try again in a moment")?;
+    // An id-only target: iroh discovery resolves the live address by id when the contact is online.
+    let peer =
+        iroh::EndpointId::from_bytes(&bytes).map_err(|_| "invalid contact id".to_string())?;
+    let target = iroh::EndpointAddr::new(peer);
+    // Build the payload — the body goes straight in wrapped as `Redacted`; NEVER formatted/logged (Inv 8).
+    // `MAX_SIGNAL_TEXT` is enforced by `encode_signed` inside `send_signal`; an over-long body returns
+    // `InvalidMessage`, which we map to a stable "too long" string WITHOUT echoing the text.
+    let payload = SignalPayload::DirectMessage {
+        issued_at: now_ms(),
+        text: Redacted(text),
+    };
+    ras_signal::net::send_signal(ep.iroh(), target, &ks, &payload)
+        .await
+        .map_err(|e| {
+            if e.code == ras_protocol::ErrorCode::InvalidMessage {
+                "message too long".to_string()
+            } else {
+                // Offline / not-acknowledged: honest best-effort, never a false success (no mailbox).
+                "not delivered — contact appears offline".to_string()
+            }
+        })
 }
 
 /// Forward the viewer's pointer position to the host for its remote-pointer overlay ("look here").
@@ -1315,6 +1570,23 @@ struct FileOfferPayload {
     size: u64,
 }
 
+/// An inbound contact message surfaced to the webview (ADR-095). `text` is the revealed plaintext body
+/// for display ONLY — it crosses only the local Tauri IPC to the app's own webview (the same trust
+/// boundary the in-session `chat-message` string already crosses), and is NEVER logged (Inv 8). It
+/// lives only here + in the DOM; there is no on-disk copy.
+#[derive(Clone, serde::Serialize)]
+struct MessagePayload {
+    contact_id: String,
+    text: String,
+    at: u64,
+}
+
+/// Freshness / replay bound for an inbound out-of-session message (ADR-095): a signed message whose
+/// `issued_at` is more than this far from local wall-clock (in either direction) is refused by
+/// `verify_signed`. 5 minutes tolerates modest clock skew while bounding replay; a message from a
+/// badly-skewed peer is refused (the sender learns it — `recv_signal` withholds the ACK).
+const MAX_SIGNAL_AGE_MS: u64 = 5 * 60_000;
+
 /// Pointer position pushed to the overlay window (normalized 0..=65535).
 #[derive(Clone, serde::Serialize)]
 struct PointerPayload {
@@ -1457,6 +1729,15 @@ async fn start_sharing(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
     if lock(&state.share.session).is_some() {
         return Ok(());
     }
+    // Reuse the always-on persistent endpoint (bound once in `.setup()`); never bind a second same-seed
+    // endpoint (it would collide in iroh discovery). In the always-on model this command is a no-op
+    // after startup (the session slot is already `Some`), but keep it correct if a Stop cleared it.
+    let Some(endpoint) = state.endpoint.clone() else {
+        let _ = app.emit("share-status", "Network endpoint unavailable.");
+        return Err("network endpoint unavailable".into());
+    };
+    let gossip = state.gossip.clone();
+    let contacts = state.contacts.clone();
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     *lock(&state.share.session) = Some(ShareSession {
         stop: stop_tx,
@@ -1464,7 +1745,7 @@ async fn start_sharing(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
     });
     let consent = state.share.consent.clone();
     tauri::async_runtime::spawn(async move {
-        run_share(app, stop_rx, consent).await;
+        run_share(app, stop_rx, consent, endpoint, gossip, contacts).await;
     });
     Ok(())
 }
@@ -1481,7 +1762,10 @@ async fn start_sharing(app: tauri::AppHandle, _state: State<'_, AppState>) -> Re
 }
 
 /// Construct the platform's capture + encoder pair for a share session (ADR-063). macOS uses the
-/// zero-copy hardware path; Linux/Windows use scap capture + the OpenH264 software encoder.
+/// zero-copy hardware path (VideoToolbox H.264); Linux/Windows use scap capture + the VP9 software
+/// encoder (`ras-media-vpx`) — WebKitGTK/WebView2 decode VP9 where they often can't decode the H.264
+/// the OpenH264 path emitted. The scap capture now stamps `VideoCodec::Vp9` in its `StreamConfig`
+/// (`ras-media-scap`), so the capture-declared codec and the VP9 encoder's bytes agree end-to-end.
 #[cfg(target_os = "macos")]
 fn make_backends() -> (
     ras_media_macos::MacScreenCapture,
@@ -1493,7 +1777,20 @@ fn make_backends() -> (
     )
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+// Linux host: VP9 (WebKitGTK can't reliably decode H.264 — the black-screen fix). The scap capture
+// stamps `VideoCodec::Vp9` on Linux so the declared codec matches the VP9 bytes.
+#[cfg(target_os = "linux")]
+fn make_backends() -> (ras_media_scap::ScapCapture, ras_media_vpx::VpxEncoder) {
+    (
+        ras_media_scap::ScapCapture::new(),
+        ras_media_vpx::VpxEncoder::new(), // VP9
+    )
+}
+
+// Windows host: OpenH264 (WebView2 decodes H.264 natively; no libvpx dependency on Windows). Cross-OS
+// decode for Linux *viewers* of a Windows/macOS host is delivered by codec negotiation (follow-up), not
+// by the host's default encoder here.
+#[cfg(target_os = "windows")]
 fn make_backends() -> (
     ras_media_scap::ScapCapture,
     ras_media_openh264::OpenH264Encoder,
@@ -1509,31 +1806,26 @@ async fn run_share(
     app: tauri::AppHandle,
     mut stop: tokio::sync::watch::Receiver<bool>,
     consent: Arc<LocalConsent>,
+    // The always-on endpoint, pre-bound in `.setup()` with the persistent identity seed. Passed in (not
+    // bound here) so ONE endpoint serves session + bootstrap + gossip — a second same-seed endpoint
+    // would collide in iroh discovery (ADR-094/098). `identity_seed` is read exactly once, at bind.
+    endpoint: Arc<ras_transport_iroh::Endpoint>,
+    // The gossip actor attached to that same endpoint, or `None` if gossip setup failed (⇒ presence
+    // off, sharing/contacts on — FAIL-SAFE). The accept loop routes `GOSSIP_ALPN` connections to it.
+    gossip: Option<iroh_gossip::net::Gossip>,
+    // The durable contacts book, so the accept loop can verify an inbound SIGNAL_ALPN message
+    // contacts-only (deny-by-default, ADR-095). `None` ⇒ contacts storage unavailable, so inbound
+    // signals are dropped (FAIL-SAFE — a message can never arrive from an unverifiable book).
+    contacts: Option<Arc<ras_identity::FileContactBook>>,
 ) {
-    use ras_transport_iroh::Endpoint as IrohEndpoint;
-
     let _ = app.emit("share-active", true);
     let _ = app.emit(
         "share-status",
         "Starting… contacting a relay for a reachable address.",
     );
-    // This machine's persistent identity (ADR-092/093): a stable seed ⇒ a stable EndpointId, so a
-    // contact who saved this machine reaches it by name across restarts. `None` ⇒ the data dir is
-    // unavailable, and we fall back to an ephemeral identity (a saved contact would need a fresh ticket).
+    // The persistent identity seed drove the pre-bound endpoint; re-read it here only to derive the
+    // host application keystore/grant issuer below (same seed ⇒ host_id == endpoint id == contact id).
     let id_seed = identity_seed(&app);
-    let bound = match id_seed {
-        Some(seed) => IrohEndpoint::bind_with_key(&seed).await,
-        None => IrohEndpoint::bind().await,
-    };
-    let endpoint = match bound {
-        Ok(e) => Arc::new(e),
-        Err(_) => {
-            log::error!("share: endpoint bind failed");
-            let _ = app.emit("share-status", "Failed to bind a network endpoint.");
-            let _ = app.emit("share-active", false);
-            return;
-        }
-    };
     // Wait for relay connectivity, but NEVER hang forever. `endpoint.online()` returns only once a
     // home relay reports connected; on a machine that can't reach one (offline, captive portal,
     // corporate firewall blocking relay UDP/hosts, or the relay is down) it loops indefinitely — and
@@ -1612,14 +1904,50 @@ async fn run_share(
             _ = stop.changed() => { if *stop.borrow() { break } else { continue } },
             a = endpoint.accept() => a,
         };
-        // A new connection arrived: the previously-held bootstrap has done its job (the controller is
-        // dialing now, so its grant is delivered). `.take()` both reads the slot and drops the old
-        // connection, closing the QUIC link cleanly before we handle the new one.
-        drop(pending_bootstrap.take());
+        // NOTE: a held bootstrap connection must be kept alive until the controller's *session dial*
+        // arrives (the grant-drain fix — QUIC retransmits the grant until then; dropping early discards
+        // un-acked grant bytes on a real-RTT link). So we do NOT drop it unconditionally here: a gossip
+        // presence dial or a signal message arriving in the grant-delivery window must NOT evict the
+        // held bootstrap. Only a *bootstrap* (a new controller supersedes the old) or a *session*
+        // connection (the controller proved delivery) drops it — in those two arms below.
         match accepted {
-            // Route by negotiated ALPN: a bootstrap connection runs consent + issuance; a session
-            // connection presents the resulting grant and streams frames.
+            // Route by negotiated ALPN. A GOSSIP_ALPN connection is an inbound presence dial: hand it to
+            // the Gossip actor (fire-and-forget, spawned so it never blocks the accept loop that also
+            // serves screen sessions — the latency invariant) (ADR-094). FAIL-SAFE: the `let _ =`
+            // swallows any gossip error, so a hostile/broken gossip connection can never stall or crash
+            // the accept loop. Does NOT touch `pending_bootstrap` — a presence dial is not the
+            // controller's session dial, so a held grant keeps draining. `is_gossip`/`is_signal`/
+            // `is_bootstrap` are mutually exclusive; a session is none of them.
+            Ok(Some(session)) if session.is_gossip() => {
+                if let Some(g) = gossip.as_ref() {
+                    let conn = session.into_connection();
+                    let g = g.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = g.handle_connection(conn).await;
+                    });
+                }
+                // else: presence disabled ⇒ drop the connection; sessions/contacts unaffected.
+            }
+            // A SIGNAL_ALPN connection carries one signed out-of-session message from a contact
+            // (ADR-095). Verify it contacts-only and surface it; no consent, no grant, no pixels — it
+            // authorizes nothing (Inv 9). Spawned so a slow/hostile signal never blocks the accept loop
+            // that also serves screen sessions (the latency invariant). FAIL-SAFE: the whole arm no-ops
+            // if the contacts book is unavailable (a message can't be verified without it).
+            Ok(Some(session)) if session.is_signal() => {
+                if let Some(book) = contacts.clone() {
+                    let sig_app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        handle_signal(&sig_app, session, book).await;
+                    });
+                }
+                // else: contacts storage unavailable ⇒ drop the connection; sessions unaffected.
+                // Does NOT touch `pending_bootstrap` — a signal is not the controller's session dial.
+            }
+            // A bootstrap connection runs consent + issuance; a session connection presents the
+            // resulting grant and streams frames. A NEW bootstrap supersedes any held one (drop it
+            // first, closing that stale link), then this one's grant is held pending its session dial.
             Ok(Some(session)) if session.is_bootstrap() => {
+                drop(pending_bootstrap.take());
                 pending_bootstrap = handle_bootstrap(
                     &app,
                     session,
@@ -1632,6 +1960,10 @@ async fn run_share(
                 .await;
             }
             Ok(Some(session)) => {
+                // The controller's session dial: it proves the grant was delivered, so the held
+                // bootstrap connection has done its job — drop it (closing that QUIC link cleanly)
+                // before serving the session.
+                drop(pending_bootstrap.take());
                 serve_one(&app, &endpoint, session, host_id, &consent, &mut stop).await;
             }
             Ok(None) => break, // endpoint closed
@@ -1684,6 +2016,63 @@ fn host_excluded_windows(app: &tauri::AppHandle) -> Vec<ras_media::WindowId> {
 #[cfg(not(target_os = "macos"))]
 fn host_excluded_windows(_app: &tauri::AppHandle) -> Vec<ras_media::WindowId> {
     Vec::new()
+}
+
+/// Handle a **signal-ALPN** connection (ADR-095): read one signed out-of-session message from a
+/// contact, verify it (signature → contacts-only, deny-by-default → freshness) via
+/// [`ras_signal::net::recv_signal`], and surface a verified [`SignalPayload::DirectMessage`] to the
+/// webview as a `message` event. Far simpler than the bootstrap handler: no consent, no grant, no
+/// pixels — a delivered message authorizes nothing (Inv 9). `recv_signal` ACKs **only** on success, so
+/// a stranger's / blocked / stale / forged signal is dropped un-ACKed (the sender learns it was
+/// refused). The body is `.reveal()`d exactly once, at the event emit — the single sanctioned display
+/// boundary (mirrors `LifecycleEvent::ChatMessage`); it is never logged (Inv 8).
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+async fn handle_signal(
+    app: &tauri::AppHandle,
+    session: ras_transport_iroh::Session,
+    book: Arc<ras_identity::FileContactBook>,
+) {
+    use ras_identity::ContactBook;
+    use ras_signal::SignalPayload;
+    match ras_signal::net::recv_signal(
+        session.connection(),
+        book.as_ref() as &dyn ContactBook,
+        now_ms(),
+        MAX_SIGNAL_AGE_MS,
+    )
+    .await
+    {
+        Ok(verified) => match verified.payload {
+            SignalPayload::DirectMessage { text, .. } => {
+                // `.reveal()` here is the sole display boundary for the body — emitted only to our own
+                // webview over local IPC, never to a log/trace (Inv 8).
+                let _ = app.emit(
+                    "message",
+                    MessagePayload {
+                        contact_id: hex_id(verified.sender.as_bytes()),
+                        text: text.reveal().to_string(),
+                        at: now_ms(),
+                    },
+                );
+                // Gentle attention + a content-free notification — never the message text (Inv 8),
+                // matching the in-session chat pattern.
+                alert_user(
+                    app,
+                    false,
+                    "Casual RAS — new message",
+                    "You have a new message.",
+                );
+            }
+            // An access-request intent raises a consent prompt elsewhere; presence beacons arrive via
+            // gossip, not this ALPN. Neither is wired here (out of this increment's scope).
+            SignalPayload::AccessRequestIntent { .. } | SignalPayload::PresenceBeacon { .. } => {}
+        },
+        // Bad signature / non-contact / stale: content-free warning only (never the sender key detail
+        // beyond a short id, never the body). `recv_signal` already withheld the ACK.
+        Err(_) => {
+            log::warn!("signal: inbound message refused");
+        }
+    }
 }
 
 /// Handle a **bootstrap-ALPN** connection (Phase 2): read the controller's `ClientHello` +
@@ -2265,6 +2654,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             connect_to_host,
             connect_to_contact,
+            send_message,
             my_identity,
             list_contacts,
             add_contact,
@@ -2297,6 +2687,7 @@ fn main() {
             check_for_updates,
             install_update,
             read_diagnostics,
+            list_online,
         ])
         .setup(|app| {
             log::info!(
@@ -2323,6 +2714,63 @@ fn main() {
             // accept loop merely listens. The user can turn reachability off with Stop and back on with
             // Share. Only started where a capture backend exists (the accept loop serves screen frames).
             let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+
+            // ── Presence identity + always-on endpoint + gossip (ADR-094) ──
+            // Read the persistent identity seed ONCE (the endpoint id == the contact id == the beacon
+            // signing key). `me`/`presence_ks` are the pair that drives every presence topic + signed
+            // beacon. All optional: any failure ⇒ presence off, everything else on (FAIL-SAFE).
+            let id_seed = identity_seed(app.handle());
+            let (me, presence_ks): (
+                Option<ras_identity::ContactId>,
+                Option<Arc<dyn ras_identity::KeyStore>>,
+            ) = match id_seed {
+                Some(seed) => {
+                    use ras_core::identity::{KeyStore, SoftwareKeyStore};
+                    let ks = SoftwareKeyStore::from_seed(seed);
+                    let cid = ras_identity::ContactId::from_bytes(ks.public_key());
+                    (
+                        Some(cid),
+                        Some(Arc::new(ks) as Arc<dyn ras_identity::KeyStore>),
+                    )
+                }
+                None => (None, None),
+            };
+
+            // Bind the always-on endpoint here (with the persistent seed) and attach a Gossip actor to
+            // the SAME endpoint, so one endpoint serves session + bootstrap + gossip. Only where a
+            // capture backend exists (that's where the always-on accept loop runs). Every step is
+            // fail-safe: a bind/spawn failure leaves `endpoint`/`gossip` = `None` → presence off, and
+            // `run_share` simply isn't started (no always-on reachability that run), never a crash.
+            #[allow(unused_mut)]
+            let mut endpoint: Option<Arc<ras_transport_iroh::Endpoint>> = None;
+            #[allow(unused_mut)]
+            let mut gossip: Option<iroh_gossip::net::Gossip> = None;
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            {
+                let bound = tauri::async_runtime::block_on(async {
+                    match id_seed {
+                        Some(seed) => ras_transport_iroh::Endpoint::bind_with_key(&seed).await,
+                        None => ras_transport_iroh::Endpoint::bind().await,
+                    }
+                });
+                match bound {
+                    Ok(ep) => {
+                        let ep = Arc::new(ep);
+                        // Attach gossip to the raw endpoint (ADR-094). `spawn` returns a `Gossip`
+                        // directly; if it ever fails to build, presence stays off while sharing/contacts
+                        // still run on this same endpoint (FAIL-SAFE — set below only on success).
+                        gossip = Some(iroh_gossip::net::Gossip::builder().spawn(ep.raw()));
+                        endpoint = Some(ep);
+                    }
+                    Err(_) => {
+                        log::error!("startup: always-on endpoint bind failed — reachability off");
+                    }
+                }
+            }
+
+            let presence = Arc::new(Mutex::new(ras_signal::presence::PresenceTracker::new()));
+            let presence_handles = Arc::new(Mutex::new(std::collections::HashMap::new()));
+
             app.manage(AppState {
                 session: Mutex::new(None),
                 share: ShareState {
@@ -2333,17 +2781,61 @@ fn main() {
                     consent: consent.clone(),
                 },
                 contacts,
+                endpoint: endpoint.clone(),
+                gossip: gossip.clone(),
+                me,
+                presence_ks,
+                presence: presence.clone(),
+                presence_handles,
             });
+
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             {
-                let reach_app = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    run_share(reach_app, stop_rx, consent).await;
-                });
+                if let Some(ep) = endpoint.clone() {
+                    let reach_app = app.handle().clone();
+                    let reach_gossip = gossip.clone();
+                    // Route inbound SIGNAL_ALPN messages contacts-only (ADR-095). Read the book back
+                    // from managed state (the local `contacts` was moved into `AppState`).
+                    let reach_contacts = app.state::<AppState>().contacts.clone();
+                    tauri::async_runtime::spawn(async move {
+                        run_share(
+                            reach_app,
+                            stop_rx,
+                            consent,
+                            ep,
+                            reach_gossip,
+                            reach_contacts,
+                        )
+                        .await;
+                    });
+                } else {
+                    // No endpoint ⇒ no always-on accept loop this run; contacts + Connect still work.
+                    let _ = (stop_rx, consent);
+                }
             }
             #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             {
                 let _ = (stop_rx, consent); // no capture backend ⇒ no accept loop
+                let _ = (&endpoint, &gossip);
+            }
+
+            // Spawn live presence per saved active contact + the poll→UI loop (ADR-094). All fail-safe:
+            // if gossip is off these are no-ops; one bad contact never breaks the others or the app.
+            {
+                let state = app.state::<AppState>();
+                if gossip.is_some() {
+                    if let Some(book) = state.contacts.as_ref() {
+                        use ras_identity::ContactBook;
+                        for c in book.list() {
+                            if !c.blocked {
+                                spawn_presence_for(&state, c.id);
+                            }
+                        }
+                    }
+                    // The poll loop emits `presence` UI events on state changes for the app's lifetime.
+                    let poll_app = app.handle().clone();
+                    tauri::async_runtime::spawn(presence_poll_loop(poll_app, presence.clone()));
+                }
             }
 
             // Keep the overlay hidden at startup. Do NOT call `set_ignore_cursor_events` here: on

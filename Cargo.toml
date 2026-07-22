@@ -3,7 +3,11 @@
 resolver = "2"
 members = ["crates/*"]
 # The Phase-S spike is a throwaway with heavy/Windows-only deps; keep it out of the clean workspace.
-exclude = ["spike", "app/src-tauri"]
+# ras-media-vpx links system libvpx (bindgen/pkg-config) and is a LINUX-ONLY encode path (the WebKitGTK
+# H.264-decode fix). Excluding it keeps the workspace build (which CI runs on ubuntu/windows/macOS)
+# free of a libvpx system dependency on Windows/macOS, where it is neither built nor needed. It is a
+# path dependency of the app under `cfg(target_os = "linux")` and is tested via its own manifest in CI.
+exclude = ["spike", "app/src-tauri", "crates/ras-media-vpx"]
 
 [workspace.package]
 version = "0.0.1"

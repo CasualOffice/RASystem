@@ -71,6 +71,11 @@ pub struct StreamConfig {
 pub enum VideoCodec {
     /// H.264 Annex-B, Constrained Baseline, no B-frames. Default.
     H264AnnexB,
+    /// VP9, raw WebCodecs bitstream (NOT Annex-B). No SPS/PPS; keyframes are self-describing.
+    /// Software path (`ras-media-vpx`) for engines that decode VP9 but not our H.264 (WebKitGTK).
+    Vp9,
+    /// VP8, raw WebCodecs bitstream (NOT Annex-B). Fallback for engines lacking VP9.
+    Vp8,
 }
 
 impl VideoCodec {
@@ -95,6 +100,13 @@ impl VideoCodec {
                 let mbs = width.div_ceil(16) as u64 * height.div_ceil(16) as u64;
                 format!("avc1.42E0{:02X}", h264_level_idc_for_mbs(mbs))
             }
+            VideoCodec::Vp9 => {
+                // "vp09.PP.LL.BD" — profile 00 (8-bit 4:2:0), level derived from dimensions, bit
+                // depth 08. Profile 0 is the universally-decodable VP9 profile and matches an 8-bit
+                // BGRA→I420 software encode. VP9/VP8 are NOT Annex-B: no SPS/PPS, no `description`.
+                format!("vp09.00.{:02}.08", vp9_level_for_dims(width, height))
+            }
+            VideoCodec::Vp8 => "vp8".to_string(),
         }
     }
 }
@@ -127,6 +139,36 @@ const fn h264_level_idc_for_mbs(mbs: u64) -> u8 {
         i += 1;
     }
     0x3E
+}
+
+/// VP9 level as the two-digit code used in "vp09.PP.LL.BD" (e.g. 40 = level 4.0). Picks the smallest
+/// level whose `MaxLumaPictureSize` covers `width*height`. Frame-size bound only (mirrors the H.264
+/// helper's rationale — the level only sizes the decoder's buffers, so rounding up is harmless).
+/// Saturates at 62 (level 6.2). The returned `u32` formats with `{:02}` to the `LL` digits ("40", "31").
+#[must_use]
+const fn vp9_level_for_dims(width: u32, height: u32) -> u32 {
+    let px = width as u64 * height as u64;
+    // (level_code, MaxLumaPictureSize) from the VP9 spec Annex-A level table, ascending.
+    const LEVELS: [(u32, u64); 10] = [
+        (10, 36_864),     // 1
+        (11, 73_728),     // 1.1
+        (20, 122_880),    // 2
+        (21, 245_760),    // 2.1
+        (30, 552_960),    // 3
+        (31, 983_040),    // 3.1
+        (40, 2_228_224),  // 4   (covers 1080p)
+        (41, 2_228_224),  // 4.1 (bitrate-bound, same picture size)
+        (50, 8_912_896),  // 5   (covers 4K)
+        (62, 35_651_584), // 6.2 (saturating)
+    ];
+    let mut i = 0;
+    while i < LEVELS.len() {
+        if px <= LEVELS[i].1 {
+            return LEVELS[i].0;
+        }
+        i += 1;
+    }
+    62
 }
 
 /// The one color-space enum. Limited-range BT.709 is the desktop-encoder default.
@@ -456,6 +498,24 @@ mod tests {
             VideoCodec::H264AnnexB.webcodecs_string(3840, 2160),
             "avc1.42E033"
         );
+    }
+
+    #[test]
+    fn vp9_and_vp8_webcodecs_string_by_dimensions() {
+        // 1080p → level 4.0 (2_073_600 px ≤ 2_228_224) → "vp09.00.40.08".
+        assert_eq!(
+            VideoCodec::Vp9.webcodecs_string(1920, 1080),
+            "vp09.00.40.08"
+        );
+        // 720p → level 3.1 (921_600 px ≤ 983_040) → "vp09.00.31.08".
+        assert_eq!(VideoCodec::Vp9.webcodecs_string(1280, 720), "vp09.00.31.08");
+        // 4K → level 5 (8_294_400 px ≤ 8_912_896) → "vp09.00.50.08".
+        assert_eq!(
+            VideoCodec::Vp9.webcodecs_string(3840, 2160),
+            "vp09.00.50.08"
+        );
+        // VP8 is the bare string regardless of dimensions.
+        assert_eq!(VideoCodec::Vp8.webcodecs_string(1920, 1080), "vp8");
     }
 
     fn sample_config() -> StreamConfig {

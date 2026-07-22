@@ -37,6 +37,13 @@ pub const ALPN: &[u8] = b"casual-ras/1";
 /// protocol id, and a peer can never present bootstrap traffic on the session path or vice versa.
 pub const BOOTSTRAP_ALPN: &[u8] = b"casual-ras/bootstrap/1";
 
+/// Contact-signaling ALPN (ADR-095) — direct signed messages / access-request intents between saved
+/// contacts, out of session. Kept byte-identical to `ras_signal::net::SIGNAL_ALPN` (the same literal),
+/// declared locally so this transport crate does not take a `ras-signal` dependency (avoids a
+/// transport→signal cycle). The app's accept loop routes a connection negotiating this ALPN to
+/// `ras_signal::net::recv_signal`, never to a media session (Inv 9 — separate planes).
+pub const SIGNAL_ALPN: &[u8] = b"casual-ras/signal/1";
+
 /// Ed25519 public key of a peer (newtype over `iroh::EndpointId`, the 1.x rename of `NodeId`).
 /// This is identity — authenticates *who*, never *what they may do*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -278,8 +285,17 @@ impl Endpoint {
         let transport = QuicTransportConfig::builder()
             .default_path_keep_alive_interval(std::time::Duration::from_secs(5))
             .build();
+        // Advertise the gossip + signal ALPNs alongside session + bootstrap so one endpoint can also
+        // host iroh-gossip presence (ADR-094) and accept inbound contact-signaling connections
+        // (ADR-095). Additive: extra advertised ALPNs never change how the session/bootstrap ALPNs
+        // negotiate; inbound gossip/signal dials would otherwise be rejected at the TLS layer.
         let mut builder = IrohEndpoint::builder(presets::N0)
-            .alpns(vec![ALPN.to_vec(), BOOTSTRAP_ALPN.to_vec()])
+            .alpns(vec![
+                ALPN.to_vec(),
+                BOOTSTRAP_ALPN.to_vec(),
+                iroh_gossip::net::GOSSIP_ALPN.to_vec(),
+                SIGNAL_ALPN.to_vec(),
+            ])
             .transport_config(transport);
         if let Some(secret) = key {
             builder = builder.secret_key(secret);
@@ -295,6 +311,27 @@ impl Endpoint {
     #[must_use]
     pub fn id(&self) -> EndpointId {
         EndpointId(*self.inner.id().as_bytes())
+    }
+
+    /// The raw underlying `iroh::Endpoint`, for attaching an iroh-gossip actor to the **same** endpoint
+    /// (`Gossip::builder().spawn(raw)`, ADR-094). `iroh::Endpoint` is `Clone` (an `Arc` inside), so this
+    /// shares the one bound endpoint rather than binding a second (a second same-seed endpoint would
+    /// collide in iroh discovery). Do **not** open sessions on it — sessions ride this wrapper's
+    /// [`connect`](Self::connect)/[`accept`](Self::accept); this accessor exists only for the gossip
+    /// actor, whose inbound connections the app's manual accept loop routes to it.
+    #[must_use]
+    pub fn raw(&self) -> IrohEndpoint {
+        self.inner.clone()
+    }
+
+    /// The raw underlying `iroh::Endpoint` by reference, for the `ras-signal` signaling API only
+    /// (`ras_signal::net::send_signal` dials from it, ADR-095). Authenticates identity, never authority
+    /// (Inv 9) — a dialed signal connection is contacts-gated + signature-verified at the app layer, not
+    /// by the transport. Do **not** open sessions on it; sessions ride this wrapper's
+    /// [`connect`](Self::connect)/[`accept`](Self::accept).
+    #[must_use]
+    pub fn iroh(&self) -> &IrohEndpoint {
+        &self.inner
     }
 
     /// The local bound socket address(es) — direct-path hints for a same-network / test dialer.
@@ -1137,6 +1174,44 @@ impl Session {
     #[must_use]
     pub fn is_bootstrap(&self) -> bool {
         self.conn.alpn() == BOOTSTRAP_ALPN
+    }
+
+    /// Whether this connection negotiated the gossip ALPN (`iroh_gossip::net::GOSSIP_ALPN`), i.e. it is
+    /// an inbound iroh-gossip presence dial the accept loop must hand to `Gossip::handle_connection`
+    /// (ADR-094) rather than to a media session. Fail-closed like [`is_bootstrap`](Self::is_bootstrap):
+    /// an absent/unrecognized ALPN is treated as **not** gossip. `is_gossip` and `is_bootstrap` are
+    /// mutually exclusive (distinct ALPN constants), and a session connection is neither — so the accept
+    /// loop's gossip/bootstrap/session arms partition inbound connections cleanly.
+    #[must_use]
+    pub fn is_gossip(&self) -> bool {
+        self.conn.alpn() == iroh_gossip::net::GOSSIP_ALPN
+    }
+
+    /// Whether this connection negotiated the [`SIGNAL_ALPN`] (contact signaling — direct signed
+    /// messages / access-request intents, ADR-095), i.e. an inbound dial the accept loop must hand to
+    /// `ras_signal::net::recv_signal` rather than to a media session. Fail-closed like
+    /// [`is_bootstrap`](Self::is_bootstrap)/[`is_gossip`](Self::is_gossip): an absent/unrecognized ALPN
+    /// is treated as **not** signal. Mutually exclusive with the other ALPN checks (distinct constants),
+    /// so the accept loop's signal/gossip/bootstrap/session arms partition inbound connections cleanly.
+    #[must_use]
+    pub fn is_signal(&self) -> bool {
+        self.conn.alpn() == SIGNAL_ALPN
+    }
+
+    /// The raw `iroh::Connection` by reference, to hand to `ras_signal::net::recv_signal`. Only valid
+    /// for a **signal-routed** connection ([`is_signal`](Self::is_signal) is true); a session/bootstrap
+    /// connection must be served through this wrapper's channels instead.
+    #[must_use]
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Consume the wrapper and return the raw `iroh::Connection`, to hand to `Gossip::handle_connection`.
+    /// Only valid for a **gossip-routed** connection ([`is_gossip`](Self::is_gossip) is true); a
+    /// session/bootstrap connection must be served through this wrapper's channels instead.
+    #[must_use]
+    pub fn into_connection(self) -> Connection {
+        self.conn
     }
 
     /// The reliable **bootstrap** channel over one bidi QUIC stream, carrying `BootstrapMsg`. Here the

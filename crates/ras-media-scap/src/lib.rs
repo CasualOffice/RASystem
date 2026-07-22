@@ -150,6 +150,15 @@ mod imp {
     #[must_use]
     fn default_stream_config(width: u32, height: u32, fps: u32) -> StreamConfig {
         StreamConfig {
+            // The declared codec MUST match the paired encoder's bytes (see `make_backends` in the app):
+            // the capture declares the codec, the encoder produces it, they must never disagree.
+            //   • Linux host → VP9 (`ras-media-vpx`): WebKitGTK can't reliably decode our H.264, but
+            //     decodes VP9 — the black-screen fix.
+            //   • Windows host → H.264 (`ras-media-openh264`): WebView2 decodes H.264 natively and
+            //     Windows has no libvpx dependency.
+            #[cfg(target_os = "linux")]
+            codec: VideoCodec::Vp9,
+            #[cfg(not(target_os = "linux"))]
             codec: VideoCodec::H264AnnexB,
             width,
             height,

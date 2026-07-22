@@ -4169,6 +4169,7 @@ version = "0.0.1"
 dependencies = [
  "bytes",
  "iroh",
+ "iroh-gossip",
  "ras-media",
  "ras-protocol",
  "tokio",

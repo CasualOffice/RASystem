@@ -288,6 +288,33 @@
     </section>
 
     <!-- ── In-session chat + clipboard (shown only while a session is live, both roles) ─────────── -->
+    <!-- Per-contact message thread (out-of-session messaging, ADR-095). Session-independent — usable
+         even with no live screen session. Mirrors the chat bubble DOM (chat-msg / chat-text / chat-time)
+         but is keyed per contact. The body lives only in the DOM + an in-memory map; never persisted,
+         never logged (Inv 8). -->
+    <section id="msg-panel" class="msg-panel" hidden aria-label="Contact messages" role="dialog"
+      aria-modal="false">
+      <header id="msg-head">
+        <span id="msg-title" class="msg-title">Messages</span>
+        <button id="msg-close" type="button" title="Close" aria-label="Close messages">×</button>
+      </header>
+      <div id="msg-body">
+        <div id="msg-log" role="log" aria-live="polite" aria-relevant="additions"
+          aria-label="Messages with this contact">
+          <p id="msg-empty" class="chat-empty">No messages yet — say hi 👋</p>
+        </div>
+        <div id="msg-notice" class="chat-notice" hidden role="status" aria-live="polite">
+          <span id="msg-notice-text" class="chat-notice-text"></span>
+        </div>
+        <form id="msg-form" autocomplete="off">
+          <label for="msg-input" class="sr-only">Type a message</label>
+          <textarea id="msg-input" rows="1" placeholder="Message…  (Enter to send)"
+            maxlength="2048" autocomplete="off" spellcheck="false"></textarea>
+          <button id="msg-send" type="submit" title="Send message">Send</button>
+        </form>
+      </div>
+    </section>
+
     <section id="chat-panel" class="chat-collapsed" hidden aria-label="Session chat">
       <header id="chat-head">
         <button id="chat-toggle" type="button" aria-expanded="false" aria-controls="chat-body"

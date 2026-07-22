@@ -56,6 +56,13 @@ ras-core = { path = "../../crates/ras-core", default-features = false }
 ras-identity = { path = "../../crates/ras-identity" }
 # Contact signaling (ADR-094/095): the SIGNAL_ALPN send/recv + gossip presence runtime.
 ras-signal = { path = "../../crates/ras-signal" }
+# iroh-gossip actor + TopicId/GOSSIP_ALPN so the app can host presence on its always-on endpoint
+# (ADR-094). Same `=1.0.2` iroh pin as the transport crate — one iroh in the tree (Inv 18 holds;
+# cargo-deny already clears the gossip tree via the ras-signal note).
+iroh-gossip = "0.101"
+# `iroh::EndpointId` to derive a presence peer id from a saved contact's pubkey. Same `=1.0.2` pin as
+# the transport/gossip crates — one iroh in the tree, no new license surface.
+iroh = "=1.0.2"
 ras-media = { path = "../../crates/ras-media" }
 ras-protocol = { path = "../../crates/ras-protocol" }
 ras-transport-iroh = { path = "../../crates/ras-transport-iroh" }
@@ -78,7 +85,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 
 # Per-platform sharing backends (ADR-063). macOS uses the zero-copy hardware path
 # (ScreenCaptureKit + VideoToolbox); Linux (PipeWire) and Windows (WGC) capture via scap and encode
-# with the OpenH264 software encoder. The Connect (viewer) role is decode-only and works everywhere.
+# with the VP9 software encoder (`ras-media-vpx`) — WebKitGTK/WebView2 decode VP9 where they often
+# can't decode the H.264 the OpenH264 path emitted (the Linux black-screen fix). The Connect (viewer)
+# role is decode-only and works everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
 ras-media-macos = { path = "../../crates/ras-media-macos" }
 # Phase-3 OS-input backend: the Share role feeds the viewer's input to CGEvent through this. macOS-only
@@ -95,9 +104,14 @@ objc2 = "0.6"
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 ras-media-scap = { path = "../../crates/ras-media-scap" }
+# OpenH264 is the Windows encode path (WebView2 decodes H.264 natively — no VP9 needed there).
 ras-media-openh264 = { path = "../../crates/ras-media-openh264" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# VP9 software encoder — the LINUX encode path (see make_backends). WebKitGTK on Linux often can't
+# decode the H.264 OpenH264 emitted (the black-screen/lag fix); it decodes VP9 natively. Links system
+# libvpx (bindgen/pkg-config), so it is deliberately Linux-only + excluded from the root workspace.
+ras-media-vpx = { path = "../../crates/ras-media-vpx" }
 # Phase-3 OS-input backend for Linux (ADR-070): XTEST over pure-Rust x11rb. Feeds the viewer's input
 # to the X server on X11/Xwayland sessions.
 ras-input-linux = { path = "../../crates/ras-input-linux" }

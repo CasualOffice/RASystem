@@ -1,0 +1,52 @@
+[package]
+name = "ras-media-vpx"
+# NOTE: excluded from the root workspace (see root Cargo.toml [workspace].exclude) because it links
+# system libvpx and is a Linux-only encode path — so it CANNOT inherit `workspace.package` fields and
+# must set them concretely. Keep these in sync with the workspace defaults.
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+authors = ["Casual RAS authors"]
+publish = false
+
+# Cross-platform software VP8/VP9 encoder (libvpx) behind the `ras-media` VideoEncoderBackend trait.
+# Royalty-free alternative to the OpenH264 H.264 path, chosen for Linux: WebKitGTK reliably decodes
+# VP8/VP9 (it often cannot decode H.264), libvpx realtime is what RustDesk (study-only) ships, and the
+# codecs are patent-unencumbered. VP9 is the default (better compression + temporal SVC for graceful
+# frame-shedding under bandwidth); VP8 is selectable.
+#
+# Licensing (Invariant 18 — no GPL/LGPL/AGPL/SSPL):
+#   env-libvpx-sys   MPL-2.0          (allow-listed in deny.toml; permissive, non-copyleft-viral)
+#   system libvpx    BSD-3-Clause     (external C lib; `brew install libvpx` — a *build* dependency)
+# Both permissive; neither copyleft. The `-sys` crate finds libvpx via pkg-config at build time (no
+# vendored/bundled source), so there is no in-tree copyleft C either.
+#
+# We bind `env-libvpx-sys` directly rather than the safe `vpx-encode` (MIT) wrapper: that wrapper
+# hard-codes `flags=0`/VBR and exposes no forced-keyframe, no CBR, no temporal SVC, and no runtime
+# bitrate — all four of which are load-bearing here (realtime CBR, forced-IDR-on-demand, VP9 temporal
+# SVC for frame-shedding, live keyframe-free `set_bitrate`). So the encoder FFI lives in this crate.
+#
+# FFI-bearing: the workspace `unsafe_code = deny` is relaxed here (CONTRIBUTING §5). All `unsafe` is
+# confined to this crate (the borrowed-surface dereference + the libvpx codec calls).
+
+[dependencies]
+ras-media = { path = "../ras-media" }
+ras-protocol = { path = "../ras-protocol" }
+bytes = "1"
+# Bindings to the system libvpx (MPL-2.0 wrapper; links BSD-3 libvpx via pkg-config). Lib name is
+# `vpx_sys`. The `generate` feature (bindgen, BSD-3 — permissive) is ON: the crate only ships
+# pre-generated bindings up to libvpx 1.13.0, and modern systems (Homebrew's 1.15.2, current distros)
+# have newer libvpx for which the no-`generate` path *panics* at build ("Expected file
+# vpx-ffi-<ver>.rs not found"). Generating against the installed headers is version-robust and
+# ABI-correct. bindgen needs libclang, which is already present in CI (installed for `scap`, ADR-063)
+# and ships with the macOS Command Line Tools.
+env-libvpx-sys = { version = "5.1", features = ["generate"] }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }

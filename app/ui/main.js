@@ -1,8 +1,9 @@
 // Casual RAS — unified desktop app (ADR-062).
 //
 // One webview, two roles chosen from a home screen:
-//   • Connect (viewer): receive encoded H.264 access units on a binary Tauri Channel, decode each
-//     with a WebCodecs VideoDecoder, and render to a canvas. No pixels ever cross JSON IPC.
+//   • Connect (viewer): receive encoded video access units (H.264 from macOS, VP9 from Linux/Windows)
+//     on a binary Tauri Channel, decode each with a WebCodecs VideoDecoder, and render to a canvas.
+//     No pixels ever cross JSON IPC.
 //   • Share (host): start/stop sharing, approve/deny a viewer, watch the live indicator. The Rust
 //     side emits share-ticket / share-status / share-active / share-viewer / consent-request events.
 //
@@ -159,8 +160,8 @@ function toBytes(msg) {
 }
 
 const FATAL_VIDEO_MSG =
-  "This system's browser engine can't decode the video (H.264/WebCodecs is unavailable in " +
-  "WebKitGTK on Linux). The macOS and Windows viewers work; Linux viewing is not yet supported.";
+  "This system's browser engine can't decode the video stream (the negotiated codec isn't " +
+  "supported by this webview's WebCodecs implementation).";
 
 function buildDecoder(cfg) {
   canvas.width = cfg.width;
@@ -214,10 +215,13 @@ function baselineCodec(codec) {
 }
 
 function decoderConfig(cfg) {
-  // No `description` ⇒ Annex-B input (our encoder re-sends SPS/PPS in-band on every IDR — the
-  // Chromium annexb path). The codec string is coerced to Baseline to match the emitted stream.
+  // No `description` ⇒ the decoder reads the codec's native in-band framing: Annex-B for H.264 (our
+  // encoder re-sends SPS/PPS in-band on every IDR — the Chromium annexb path), and raw self-describing
+  // frames for VP9/VP8 (no parameter sets, no avcC). Only H.264 gets the Baseline profile coercion;
+  // a "vp09.*"/"vp8" codec string is passed through verbatim — it is NOT Annex-B and must not be mangled.
+  const isH264 = /^avc1\./.test(cfg.codec || "");
   return {
-    codec: baselineCodec(cfg.codec),
+    codec: isH264 ? baselineCodec(cfg.codec) : cfg.codec,
     codedWidth: cfg.width,
     codedHeight: cfg.height,
     optimizeForLatency: true,
@@ -832,16 +836,31 @@ function renderContacts(list) {
   for (const c of list) {
     const li = document.createElement("li");
     li.className = "contact-row" + (c.blocked ? " blocked" : "");
+    // Stable hook so the "presence" event listener can find this row by contact id (hex, matching
+    // ContactDto.id from hex_id on the Rust side).
+    li.dataset.contactId = c.id;
 
     const info = document.createElement("div");
     info.className = "contact-info";
+    // Live presence dot (ADR-094): grey/offline by default; the "presence" event flips data-online.
+    const dot = document.createElement("span");
+    dot.className = "presence-dot";
+    dot.dataset.online = "false";
+    dot.title = "Presence — green when this contact is online";
     const name = document.createElement("div");
     name.className = "contact-name";
     name.textContent = c.label + (c.blocked ? " (blocked)" : "");
+    // Unread-message badge (ADR-095): bumped when a message arrives for a thread that isn't open.
+    const unread = document.createElement("span");
+    unread.className = "contact-unread";
+    unread.dataset.contactId = c.id;
+    unread.hidden = true;
+    name.appendChild(unread);
     const code = document.createElement("div");
     code.className = "contact-code";
     code.textContent = c.code.slice(0, 14) + "…"; // verification-code prefix; full value on hover
     code.title = c.code;
+    info.appendChild(dot);
     info.appendChild(name);
     info.appendChild(code);
 
@@ -858,6 +877,18 @@ function renderContacts(list) {
     connectContactBtn.addEventListener("click", () => {
       showView("connect");
       startSession({ contactId: c.id });
+    });
+
+    // Message thread affordance (ADR-095) — session-independent, contacts-only symmetry with Connect
+    // (disabled while blocked).
+    const messageBtn = document.createElement("button");
+    messageBtn.textContent = "Message";
+    messageBtn.disabled = c.blocked;
+    messageBtn.title = c.blocked
+      ? "Unblock to message"
+      : "Send a message (works when they're online)";
+    messageBtn.addEventListener("click", () => {
+      messages.openThread(c.id, c.label);
     });
 
     const blockBtn = document.createElement("button");
@@ -884,13 +915,50 @@ function renderContacts(list) {
     });
 
     actions.appendChild(connectContactBtn);
+    actions.appendChild(messageBtn);
     actions.appendChild(blockBtn);
     actions.appendChild(removeBtn);
     li.appendChild(info);
     li.appendChild(actions);
     contactsList.appendChild(li);
   }
+  // Repaint dots from the current online snapshot right after a re-render (rows were recreated).
+  paintPresenceSnapshot();
+  // Repaint unread-message badges too (rows were recreated, so the old badges are gone).
+  messages.repaintBadges();
 }
+
+// Set one contact row's presence dot. No-op if the row isn't rendered (not in the contacts view).
+function setPresenceDot(contactId, online) {
+  const row = contactsList.querySelector(
+    `.contact-row[data-contact-id="${contactId}"]`,
+  );
+  if (row) {
+    const dot = row.querySelector(".presence-dot");
+    if (dot) dot.dataset.online = String(!!online);
+  }
+}
+
+// Ask Rust for the currently-online contacts and paint their dots (initial state before the first
+// diff tick, and after a re-render). Best-effort: presence-off / errors just leave dots grey.
+async function paintPresenceSnapshot() {
+  try {
+    const online = await invoke("list_online");
+    const set = new Set(online);
+    for (const row of contactsList.querySelectorAll(".contact-row")) {
+      setPresenceDot(row.dataset.contactId, set.has(row.dataset.contactId));
+    }
+  } catch (_) {
+    /* presence unavailable — dots stay grey */
+  }
+}
+
+// Live presence updates (ADR-094): the Rust poll loop emits only on state changes. Content-free
+// payload — a public contact id + a bool, never any secret (Inv 8).
+listen("presence", (e) => {
+  const { contactId, online } = e.payload;
+  setPresenceDot(contactId, online);
+});
 
 contactAddForm.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1893,6 +1961,172 @@ const chat = (function () {
 
   return { setSessionLive };
 })();
+
+// ── Per-contact out-of-session messaging (ADR-095) ─────────────────────────────────────────────────
+// A signed text message to a saved contact, delivered over the signal ALPN whether or not a screen
+// session is live. Fixed Rust contract:
+//   invoke("send_message", { contactId, text })  — deliver one message (online-only, best-effort)
+//   listen("message", { contactId, text, at })    — an inbound message from a contact
+// The body lives ONLY in the DOM + an in-memory per-contact map; it is never persisted to
+// localStorage and never console.log'd (Inv 8) — matching in-session chat, which is not persisted.
+const messages = (function () {
+  const panel = document.getElementById("msg-panel");
+  const titleEl = document.getElementById("msg-title");
+  const closeBtn = document.getElementById("msg-close");
+  const log = document.getElementById("msg-log");
+  const form = document.getElementById("msg-form");
+  const input = document.getElementById("msg-input");
+  const notice = document.getElementById("msg-notice");
+  const noticeText = document.getElementById("msg-notice-text");
+
+  // contactId -> [{ text, mine, at }]. In-memory only (never persisted — Inv 8).
+  const threads = new Map();
+  // contactId -> unread count (badge on the contact row when that thread isn't the open one).
+  const unread = new Map();
+  let openId = null;
+  let noticeTimer = null;
+
+  function timeLabel(at) {
+    const d = at ? new Date(at) : new Date();
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  // Append a message bubble. `text` goes in via textContent — never interpolated into HTML, never
+  // logged (Inv 8). Reuses the chat bubble classes for identical styling.
+  function appendBubble(text, mine, at) {
+    const emptyNode = document.getElementById("msg-empty");
+    if (emptyNode) emptyNode.remove();
+    const bubble = document.createElement("div");
+    bubble.className = "chat-msg " + (mine ? "me" : "them");
+    const txt = document.createElement("span");
+    txt.className = "chat-text";
+    txt.textContent = text;
+    bubble.appendChild(txt);
+    const t = document.createElement("span");
+    t.className = "chat-time";
+    t.textContent = timeLabel(at);
+    bubble.appendChild(t);
+    log.appendChild(bubble);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function renderThread(id) {
+    log.textContent = "";
+    const history = threads.get(id) || [];
+    if (history.length === 0) {
+      const p = document.createElement("p");
+      p.id = "msg-empty";
+      p.className = "chat-empty";
+      p.textContent = "No messages yet — say hi 👋";
+      log.appendChild(p);
+      return;
+    }
+    for (const m of history) appendBubble(m.text, m.mine, m.at);
+  }
+
+  // Inline, non-modal note in the thread (e.g. offline / too long). Auto-dismisses.
+  function showNotice(text) {
+    noticeText.textContent = text;
+    notice.hidden = false;
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      notice.hidden = true;
+    }, 4000);
+  }
+
+  function setUnreadBadge(id) {
+    const n = unread.get(id) || 0;
+    for (const badge of document.querySelectorAll(
+      `.contact-unread[data-contact-id="${id}"]`,
+    )) {
+      badge.hidden = n === 0;
+      badge.textContent = n > 9 ? "9+" : String(n);
+    }
+  }
+
+  function openThread(id, label) {
+    openId = id;
+    titleEl.textContent = "Messages · " + (label || "contact");
+    unread.set(id, 0);
+    setUnreadBadge(id);
+    renderThread(id);
+    notice.hidden = true;
+    panel.hidden = false;
+    input.focus();
+  }
+
+  function close() {
+    openId = null;
+    panel.hidden = true;
+  }
+  closeBtn.addEventListener("click", close);
+
+  async function send() {
+    const id = openId;
+    if (!id) return;
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    input.style.height = "auto";
+    input.focus();
+    // Optimistically show the outgoing bubble; only remove nothing on failure (the message may still
+    // have raced) — surface a non-modal note instead.
+    const entry = { text, mine: true, at: Date.now() };
+    const history = threads.get(id) || [];
+    history.push(entry);
+    threads.set(id, history);
+    appendBubble(entry.text, true, entry.at);
+    try {
+      await invoke("send_message", { contactId: id, text });
+    } catch (e) {
+      // Offline / too long (stable strings from Rust) — inline note, never an alert, never console.
+      showNotice(String(e && e.message ? e.message : e));
+    }
+  }
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    send();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      send();
+    }
+  });
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 96) + "px";
+  });
+
+  // An inbound message from `contactId`. Append to that thread; if it isn't the open thread, bump its
+  // unread badge on the contact row. `text` is display-ready plaintext (revealed host-side, Inv 8).
+  function receive(contactId, text, at) {
+    if (!text) return;
+    const history = threads.get(contactId) || [];
+    history.push({ text, mine: false, at });
+    threads.set(contactId, history);
+    if (openId === contactId) {
+      appendBubble(text, false, at);
+    } else {
+      unread.set(contactId, (unread.get(contactId) || 0) + 1);
+      setUnreadBadge(contactId);
+    }
+  }
+
+  // Repaint every rendered contact's unread badge (called after a contacts re-render recreates rows).
+  function repaintBadges() {
+    for (const id of unread.keys()) setUnreadBadge(id);
+  }
+
+  return { openThread, receive, repaintBadges };
+})();
+
+// Inbound out-of-session message from a contact (ADR-095). Content-free routing here; the body is
+// display-ready plaintext handed to the thread module, never logged (Inv 8).
+listen("message", (e) => {
+  const { contactId, text, at } = e.payload || {};
+  messages.receive(contactId, text, at);
+});
 
 // ── File transfer ────────────────────────────────────────────────────────────────────────────────
 // Two halves over a fixed Rust contract (a file's *contents* are never console.log'd — Inv 8):

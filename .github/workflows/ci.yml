@@ -25,13 +25,22 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libdbus-1-dev libclang-dev pkg-config
+          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libdbus-1-dev libclang-dev pkg-config libvpx-dev
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --all
+      # ras-media-vpx is a LINUX-ONLY encode path that links system libvpx; it is excluded from the
+      # workspace so the Windows/macOS builds above need no libvpx. Build + test it on its own manifest
+      # on Linux (where libvpx-dev is installed), incl. fmt/clippy so it stays gated.
+      - name: ras-media-vpx (Linux VP9 encoder)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo fmt --manifest-path crates/ras-media-vpx/Cargo.toml -- --check
+          cargo clippy --manifest-path crates/ras-media-vpx/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/ras-media-vpx/Cargo.toml
       - name: bench (hot-path smoke + sanity ceiling)
         # Not a precise perf gate — runs the hand-rolled micro-benchmarks so a gross regression
         # (hang / O(n²) / alloc storm) trips the loose per-op sanity ceiling. Prints ns/op baselines.
