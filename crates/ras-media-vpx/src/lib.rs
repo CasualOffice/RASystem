@@ -34,6 +34,14 @@ use ras_media::{
 use ras_protocol::{ErrorCode, KeyframeReason, RasError};
 use vpx_sys as ffi;
 
+/// Codec capabilities of this backend (libvpx software encode). Used by the app to build the host's
+/// [`ras_grant::HostEncodeCaps`] for codec negotiation.
+pub const SUPPORTS_H264: bool = false;
+/// This backend encodes VP9.
+pub const SUPPORTS_VP9: bool = true;
+/// This backend also encodes VP8.
+pub const SUPPORTS_VP8: bool = true;
+
 /// Default target bitrate advertised in [`StreamConfig`], in bits/sec. The encoder is built CBR at
 /// this value and retargeted at runtime by the ABR via [`VpxEncoder::set_bitrate`].
 const DEFAULT_BITRATE_BPS: u32 = 8_000_000;

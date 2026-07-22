@@ -93,6 +93,13 @@ jobs:
       # nasm builds OpenH264's x86 assembly (Linux/Windows sharing backends) on x86 runners.
       - uses: ilammy/setup-nasm@v1
 
+      # macOS libvpx: the app links ras-media-vpx on macOS now (codec negotiation — a macOS host can
+      # encode VP9 for WebKitGTK viewers that can't decode our H.264). ras-media-vpx finds libvpx via
+      # pkg-config at build time, so the macOS app bundle needs Brew's libvpx present.
+      - name: macOS VPX dep
+        if: matrix.os == 'macos-latest'
+        run: brew install libvpx pkg-config
+
       # WebView + bundling system deps for Tauri v2 on Linux (webkit2gtk 4.1).
       #
       # PipeWire: scap 0.0.8 hard-requires the `pipewire`/`libspa` 0.8 crates, whose `libspa-sys`

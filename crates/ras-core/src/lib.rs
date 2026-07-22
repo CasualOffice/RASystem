@@ -565,6 +565,49 @@ mod e2e {
         assert_eq!(host.state(), SessionState::Terminated);
     }
 
+    /// Codec negotiation (Inv 9 — media capability, not authorization): a `HostSessionConfig` with a
+    /// negotiated codec must stamp that codec into the `StreamConfig` the capture announces, so the
+    /// controller's decoder is configured for the codec the encoder actually produces (never a
+    /// black-screen from a codec mismatch). Uses the synthetic backend, which honors `opts.codec`.
+    #[tokio::test]
+    async fn negotiated_codec_reaches_the_controller_decoder() {
+        let (host_tp, ctrl_tp) = loopback_pair();
+
+        let host = HostSession::new(
+            // The app would compute this via `ras_grant::select_encode_codec(viewer_prefs, caps)`;
+            // here we assert the plumbing carries it end-to-end to the decoder config.
+            HostSessionConfig::new(MonitorId(0)).with_codec(ras_media::VideoCodec::Vp9),
+            host_tp,
+            SyntheticCaptureBackend::new(1280, 720),
+            SyntheticEncoder::new(),
+            Arc::new(AllowAllValidator),
+        );
+        let target = EndpointAddr::new(EndpointId([0u8; 32]));
+        let controller = ControllerSession::new(ControllerSessionConfig::new(target), ctrl_tp);
+
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        host_r.unwrap();
+        ctrl_r.unwrap();
+
+        let sink = CountingFrameSink::new();
+        controller
+            .attach_renderer(Arc::new(sink.clone()))
+            .await
+            .unwrap();
+        assert!(
+            wait_until(|| sink.is_configured(), 300).await,
+            "renderer must be configured"
+        );
+        assert_eq!(
+            sink.configured_codec(),
+            ras_media::VideoCodec::Vp9,
+            "the negotiated codec must reach the controller's decoder config"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     /// A renderer attached **after** the stream has started (already past its first keyframe, P-frames
     /// flowing) must still receive a keyframe as its first frame — its fresh decoder cannot decode a
     /// P-frame (the [`FrameSink::configure`] contract). The video loop must re-gate on attach (backlog

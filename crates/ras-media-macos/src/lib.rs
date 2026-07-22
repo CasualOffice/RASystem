@@ -20,6 +20,13 @@ pub use capture::MacScreenCapture;
 #[cfg(target_os = "macos")]
 pub use encode::VideoToolboxEncoder;
 
+/// Codec capabilities of this platform's *hardware* encoder path (VideoToolbox = H.264 only). VP9
+/// on macOS is delivered by the software `ras-media-vpx` encoder over a CPU-BGRA capture surface
+/// (codec negotiation), so the app advertises VP9 separately; this constant is about VideoToolbox.
+pub const SUPPORTS_H264: bool = true;
+/// VideoToolbox does not encode VP9 (the app pairs macOS VP9 with `ras-media-vpx`, not this crate).
+pub const SUPPORTS_VP9: bool = false;
+
 #[cfg(target_os = "macos")]
 pub(crate) use imp::*;
 
@@ -34,12 +41,19 @@ mod imp {
     /// hook in `ras-core` retargets it per RTT via [`ras_media::VideoEncoderBackend::set_bitrate`].
     pub(crate) const DEFAULT_BITRATE_BPS: u32 = 8_000_000;
 
-    /// The single-monitor [`StreamConfig`] the macOS backends negotiate. H.264 Annex-B, limited-range
-    /// BT.709, per-frame-stream video transport (the post-spike default).
+    /// The single-monitor [`StreamConfig`] the macOS backends negotiate. `codec` is the negotiated
+    /// codec (codec negotiation) — H.264 Annex-B on the zero-copy VideoToolbox path, or VP9/VP8 when a
+    /// WebKitGTK viewer needs the software libvpx path. Limited-range BT.709, per-frame-stream video
+    /// transport (the post-spike default).
     #[must_use]
-    pub(crate) fn default_stream_config(width: u32, height: u32, fps: u32) -> StreamConfig {
+    pub(crate) fn default_stream_config(
+        width: u32,
+        height: u32,
+        fps: u32,
+        codec: VideoCodec,
+    ) -> StreamConfig {
         StreamConfig {
-            codec: VideoCodec::H264AnnexB,
+            codec,
             width,
             height,
             fps,

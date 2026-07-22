@@ -22,6 +22,12 @@ use ras_media::{
 };
 use ras_protocol::{ErrorCode, KeyframeReason, RasError};
 
+/// Codec capabilities of this backend (OpenH264 software encode = H.264 only). Used by the app to
+/// build the host's [`ras_grant::HostEncodeCaps`] for codec negotiation.
+pub const SUPPORTS_H264: bool = true;
+/// This backend does not encode VP9.
+pub const SUPPORTS_VP9: bool = false;
+
 /// Default target bitrate advertised in [`StreamConfig`]. The encoder is built in bitrate rate-control
 /// mode at this value and retargeted at runtime by the ABR via [`OpenH264Encoder::set_bitrate`].
 const DEFAULT_BITRATE_BPS: u32 = 8_000_000;

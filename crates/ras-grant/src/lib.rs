@@ -31,8 +31,20 @@ pub use ras_bootstrap::{NonceCache, UnixMillis};
 pub type GrantError = RasError;
 
 /// Wire/format versions this crate emits and accepts (bumped only on a breaking layout change).
-const REQUEST_VERSION: u8 = 1;
+///
+/// v2 (codec negotiation) appends the optional `viewer_codec_prefs` list after `nonce`. Decode
+/// accepts **both** v1 (no prefs → empty list, old viewers) and v2 (with prefs) so the change is
+/// backward-compatible; we always *emit* v2. The prefs are a **media capability**, not an
+/// authorization input (Inv 9): they only pick the encode codec so the viewer gets a decodable
+/// stream; they never widen the grant, lease, or consent.
+const REQUEST_VERSION: u8 = 2;
+/// The prior layout (no codec prefs). Still decodable so an older signed request round-trips.
+const REQUEST_VERSION_V1: u8 = 1;
 const GRANT_VERSION: u32 = 1;
+
+/// Bound on the viewer's advertised codec-preference list (DoS on decode). The universe is tiny
+/// (H.264 / VP9 / VP8), so four is generous.
+const MAX_VIEWER_CODECS: usize = 4;
 
 /// Maximum lifetime of an [`AccessRequest`] (`docs/04 §4`: `expires_at ≤ issued_at + 5 min`).
 pub const MAX_REQUEST_TTL_MS: u64 = 5 * 60 * 1000;
@@ -144,6 +156,103 @@ impl<'a> Cur<'a> {
     }
 }
 
+// ── Codec negotiation (media capability, NOT authorization — Inv 9) ───────────────────────────────
+
+/// A video codec the **viewer** can decode, as carried in [`AccessRequest::viewer_codec_prefs`].
+/// The wire tag is a `u8` so the list stays compact and version-stable. This is intentionally a
+/// *decode-capability advertisement*, decoupled from `ras_media::VideoCodec` (which the app maps to
+/// when picking an encoder) so `ras-grant` needs no dependency on the media crate.
+///
+/// Unknown tags are dropped fail-closed on decode (never silently accepted as a codec), matching the
+/// "unknown capabilities are denied" posture — but note this list authorizes nothing; a dropped tag
+/// just means "the host won't consider that codec", never a security downgrade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VideoDecodeCodec {
+    /// H.264 (Annex-B). Wire tag `0`.
+    H264 = 0,
+    /// VP9. Wire tag `1`.
+    Vp9 = 1,
+    /// VP8. Wire tag `2`.
+    Vp8 = 2,
+}
+
+impl VideoDecodeCodec {
+    /// The wire tag.
+    #[must_use]
+    pub const fn tag(self) -> u8 {
+        self as u8
+    }
+
+    /// Parse a wire tag, or `None` for an unknown value (dropped fail-closed).
+    #[must_use]
+    pub const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::H264),
+            1 => Some(Self::Vp9),
+            2 => Some(Self::Vp8),
+            _ => None,
+        }
+    }
+}
+
+/// What the host platform's encoders can actually produce. Set by the app per-OS at the call site
+/// (macOS: H.264 + VP9; Linux: VP9 + VP8; Windows: H.264). Purely a build/runtime capability — never
+/// an authorization input (Inv 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostEncodeCaps {
+    /// The host can encode H.264 (macOS VideoToolbox / Windows+Linux OpenH264).
+    pub h264: bool,
+    /// The host can encode VP9 (systems with libvpx: macOS + Linux).
+    pub vp9: bool,
+    /// The host can encode VP8 (systems with libvpx: macOS + Linux).
+    pub vp8: bool,
+}
+
+impl HostEncodeCaps {
+    /// The host's fail-safe default codec when the viewer expressed no usable preference: **VP9 if
+    /// this host can encode it** (universally decodable on WebKitGTK + WebView2 + WKWebView), else
+    /// H.264 (the only remaining path, e.g. Windows). This is what guarantees "never black-screen":
+    /// a viewer that advertised nothing still gets the most broadly decodable stream this host can
+    /// produce.
+    #[must_use]
+    pub const fn default_codec(self) -> VideoDecodeCodec {
+        if self.vp9 {
+            VideoDecodeCodec::Vp9
+        } else if self.h264 {
+            VideoDecodeCodec::H264
+        } else {
+            // A host that can encode neither is a misconfiguration; VP8 is the last resort.
+            VideoDecodeCodec::Vp8
+        }
+    }
+}
+
+/// Pick the encode codec for a session from the viewer's decode preferences and the host's encode
+/// capabilities. **Pure, deterministic, and authorization-free** (Inv 9): it never reads the grant,
+/// lease, or consent — codec choice is a media concern only.
+///
+/// Rules (fail-safe):
+/// 1. Walk the viewer's preferences in order; return the first codec **this host can encode**.
+/// 2. If none match (empty list, all-unknown, or all-unencodable), return
+///    [`HostEncodeCaps::default_codec`] — VP9 where possible, so the viewer never black-screens.
+///
+/// Documented limitation (not a crash): a Windows host (no libvpx) serving a VP9-only Linux viewer
+/// falls through to H.264; the Linux viewer then surfaces its existing honest fatal "can't decode"
+/// error rather than hanging silently.
+#[must_use]
+pub fn select_encode_codec(viewer_prefs: &[u8], host: HostEncodeCaps) -> VideoDecodeCodec {
+    for &tag in viewer_prefs {
+        match VideoDecodeCodec::from_tag(tag) {
+            Some(VideoDecodeCodec::H264) if host.h264 => return VideoDecodeCodec::H264,
+            Some(VideoDecodeCodec::Vp9) if host.vp9 => return VideoDecodeCodec::Vp9,
+            Some(VideoDecodeCodec::Vp8) if host.vp8 => return VideoDecodeCodec::Vp8,
+            _ => continue, // unknown tag, or a codec this host can't encode → try the next
+        }
+    }
+    host.default_codec()
+}
+
 // ── AccessRequest (docs/04 §4) ──────────────────────────────────────────────────────────────────
 
 /// A controller's signed request for access (`docs/04 §4`). Endpoint-bound (Inv 3/9), short-lived,
@@ -174,6 +283,14 @@ pub struct AccessRequest {
     pub expires_at: UnixMillis,
     /// One-time replay nonce (host nonce cache).
     pub nonce: [u8; 16],
+    /// The viewer's video-decode preferences, most-preferred first, as [`VideoDecodeCodec`] tags
+    /// (`0` = H.264, `1` = VP9, `2` = VP8). **Empty = "no preference / old viewer"** → the host
+    /// fails safe to the most-universally-decodable codec (VP9). This is a **media capability, not
+    /// an authorization input** (Inv 9): it only selects the encode codec so the viewer never
+    /// black-screens; it never widens the grant/lease/consent. Covered by the signature (it is part
+    /// of the signed body) so it cannot be tampered en route, but it is only *trusted* after the
+    /// signature verifies, like every other field.
+    pub viewer_codec_prefs: Vec<u8>,
     /// Controller Ed25519 signature over `REQUEST_CTX || body`.
     pub signature: [u8; 64],
 }
@@ -204,6 +321,15 @@ impl AccessRequest {
         v.extend_from_slice(&self.issued_at.to_be_bytes());
         v.extend_from_slice(&self.expires_at.to_be_bytes());
         v.extend_from_slice(&self.nonce);
+        // v2: the viewer's decode-codec preferences (count-prefixed, bounded). Emitted always; an
+        // empty list is the "no preference" sentinel. Placed after `nonce`, before the capabilities,
+        // matching the wire spec. Covered by the signature (part of the signed body).
+        let count =
+            u32::try_from(self.viewer_codec_prefs.len().min(MAX_VIEWER_CODECS)).unwrap_or(0);
+        v.extend_from_slice(&count.to_be_bytes());
+        for &tag in self.viewer_codec_prefs.iter().take(MAX_VIEWER_CODECS) {
+            v.push(tag);
+        }
         put_caps(v, &self.requested_capabilities);
     }
 
@@ -215,7 +341,9 @@ impl AccessRequest {
     }
 
     /// Build and **sign** a request with `keystore` (the controller identity). `controller_id` is set
-    /// to the keystore's public key so the signature is self-consistent.
+    /// to the keystore's public key so the signature is self-consistent. Advertises **no** codec
+    /// preferences (the host fails safe to VP9); callers that can probe their decoder should use
+    /// [`Self::signed_with_codecs`].
     #[allow(clippy::too_many_arguments)] // a faithful docs/04 §4 record; a builder is churn here
     pub fn signed<K: KeyStore>(
         keystore: &K,
@@ -230,6 +358,48 @@ impl AccessRequest {
         expires_at: UnixMillis,
         nonce: [u8; 16],
     ) -> Result<Self, GrantError> {
+        Self::signed_with_codecs(
+            keystore,
+            request_id,
+            protocol_version,
+            host_id,
+            controller_display_name,
+            controller_endpoint_id,
+            requested_capabilities,
+            reason,
+            issued_at,
+            expires_at,
+            nonce,
+            Vec::new(),
+        )
+    }
+
+    /// Like [`Self::signed`], but also advertises the viewer's `viewer_codec_prefs` (most-preferred
+    /// first; see [`VideoDecodeCodec`]). Unknown tags and anything past [`MAX_VIEWER_CODECS`] are
+    /// dropped so a malformed probe result can never bloat or break the signed body. The prefs are a
+    /// media capability only (Inv 9) — they influence codec selection, never authorization.
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_codecs<K: KeyStore>(
+        keystore: &K,
+        request_id: [u8; 16],
+        protocol_version: u32,
+        host_id: [u8; 32],
+        controller_display_name: String,
+        controller_endpoint_id: [u8; 32],
+        requested_capabilities: CapabilitySet,
+        reason: String,
+        issued_at: UnixMillis,
+        expires_at: UnixMillis,
+        nonce: [u8; 16],
+        viewer_codec_prefs: Vec<u8>,
+    ) -> Result<Self, GrantError> {
+        // Normalize up front so `self.viewer_codec_prefs` == what will be signed & sent: keep only
+        // known tags, bounded, preserving preference order.
+        let viewer_codec_prefs: Vec<u8> = viewer_codec_prefs
+            .into_iter()
+            .filter(|&t| VideoDecodeCodec::from_tag(t).is_some())
+            .take(MAX_VIEWER_CODECS)
+            .collect();
         let mut req = Self {
             request_id,
             protocol_version,
@@ -242,6 +412,7 @@ impl AccessRequest {
             issued_at,
             expires_at,
             nonce,
+            viewer_codec_prefs,
             signature: [0u8; 64],
         };
         req.signature = keystore.sign(&req.signing_input())?;
@@ -262,7 +433,10 @@ impl AccessRequest {
     /// Does **not** verify the signature; that is [`validate_access_request`]'s job.
     pub fn decode(bytes: &[u8]) -> Result<Self, ErrorCode> {
         let mut c = Cur::new(bytes);
-        if c.u8()? != REQUEST_VERSION {
+        // Accept both the current v2 layout (with codec prefs) and the prior v1 (without): a v1 signed
+        // request must still round-trip, and the prefs are additive. Any other version is unsupported.
+        let version = c.u8()?;
+        if version != REQUEST_VERSION && version != REQUEST_VERSION_V1 {
             return Err(ErrorCode::UnsupportedVersion);
         }
         let request_id = c.arr::<16>()?;
@@ -275,6 +449,25 @@ impl AccessRequest {
         let issued_at = c.u64()?;
         let expires_at = c.u64()?;
         let nonce = c.arr::<16>()?;
+        // v2 only: the bounded, count-prefixed codec-preference list. Unknown tags are dropped
+        // fail-closed (never surfaced as a codec); an over-long count fails the decode.
+        let viewer_codec_prefs = if version == REQUEST_VERSION {
+            let count = c.u32()? as usize;
+            if count > MAX_VIEWER_CODECS {
+                return Err(ErrorCode::InvalidMessage);
+            }
+            let mut prefs = Vec::with_capacity(count);
+            for _ in 0..count {
+                let tag = c.u8()?;
+                if VideoDecodeCodec::from_tag(tag).is_some() {
+                    prefs.push(tag);
+                }
+                // else: drop the unknown tag but keep decoding — it authorizes nothing (Inv 9).
+            }
+            prefs
+        } else {
+            Vec::new()
+        };
         let requested_capabilities = c.caps()?;
         let signature = c.arr::<64>()?;
         c.end()?;
@@ -290,6 +483,7 @@ impl AccessRequest {
             issued_at,
             expires_at,
             nonce,
+            viewer_codec_prefs,
             signature,
         })
     }

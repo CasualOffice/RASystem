@@ -307,6 +307,13 @@ pub struct CaptureOptions {
     pub target_fps: u32,
     /// Exclude our own overlay/consent windows (privacy + no capture feedback loop).
     pub excluded_window_ids: Vec<WindowId>,
+    /// The **negotiated** codec the capture must declare in the [`StreamConfig`] it returns from
+    /// [`ScreenCaptureBackend::start`], so the capture's declared codec matches the paired encoder's
+    /// bytes end-to-end (the viewer reads this to configure its decoder). `None` (the default) means
+    /// "use this backend's platform default" — additive, so existing callers are unchanged. This is a
+    /// media capability only (the app selects it from the viewer's decode prefs); it never affects
+    /// authorization (Inv 9).
+    pub codec: Option<VideoCodec>,
 }
 
 /// The captured display's bounds in the desktop's global coordinate space, **logical units**

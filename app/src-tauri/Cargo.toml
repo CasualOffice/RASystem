@@ -90,6 +90,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 # role is decode-only and works everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
 ras-media-macos = { path = "../../crates/ras-media-macos" }
+# macOS can now ALSO encode VP9 for Linux/WebKitGTK viewers that can't decode our H.264 (codec
+# negotiation, follow-up to ADR-063). The macOS SCK capture exposes a CPU-BGRA surface in VP9 mode so
+# this software encoder can consume it; VideoToolbox H.264 stays the default hardware path. Links Brew
+# libvpx at build time (`brew install libvpx`); still workspace-excluded (it's a `-sys` crate).
+ras-media-vpx = { path = "../../crates/ras-media-vpx" }
 # Phase-3 OS-input backend: the Share role feeds the viewer's input to CGEvent through this. macOS-only
 # (the parallel Windows/Linux backends are later).
 ras-input-macos = { path = "../../crates/ras-input-macos" }

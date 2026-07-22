@@ -419,6 +419,156 @@ async fn issuing_with_no_grantable_capability_errors() {
     assert_eq!(err.code, ErrorCode::CapabilityDenied);
 }
 
+// ── Codec negotiation (media capability, NOT authorization — Inv 9) ───────────────────────────────
+
+const MAC: HostEncodeCaps = HostEncodeCaps {
+    h264: true,
+    vp9: true,
+    vp8: true,
+};
+const LINUX: HostEncodeCaps = HostEncodeCaps {
+    h264: false,
+    vp9: true,
+    vp8: true,
+};
+const WINDOWS: HostEncodeCaps = HostEncodeCaps {
+    h264: true,
+    vp9: false,
+    vp8: false,
+};
+
+#[test]
+fn codec_prefs_round_trip_and_are_signature_covered() {
+    let fx = Fixture::new();
+    // H.264 first, VP9 fallback.
+    let prefs = vec![VideoDecodeCodec::H264.tag(), VideoDecodeCodec::Vp9.tag()];
+    let req = AccessRequest::signed_with_codecs(
+        &fx.controller,
+        [1u8; 16],
+        PROTOCOL_VERSION,
+        fx.host_id,
+        "Viewer".into(),
+        CTRL_EP,
+        caps(&["screen.view"]),
+        "help".into(),
+        NOW,
+        NOW + 1000,
+        [9u8; 16],
+        prefs.clone(),
+    )
+    .unwrap();
+    let decoded = AccessRequest::decode(&req.encode()).unwrap();
+    assert_eq!(decoded.viewer_codec_prefs, prefs);
+    assert_eq!(decoded, req);
+    // The prefs are part of the signed body: tampering with them breaks the signature.
+    let mut fx2 = Fixture::new();
+    assert!(validate_access_request(&req, &fx.host_id, &CTRL_EP, NOW, &mut fx2.nonces).is_ok());
+    let mut bad = req.clone();
+    bad.viewer_codec_prefs = vec![VideoDecodeCodec::Vp8.tag()];
+    assert_eq!(
+        validate_access_request(&bad, &fx.host_id, &CTRL_EP, NOW, &mut fx2.nonces),
+        Err(ErrorCode::SignatureInvalid),
+        "codec prefs are covered by the signature"
+    );
+}
+
+#[test]
+fn signed_with_codecs_drops_unknown_and_bounds_length() {
+    let fx = Fixture::new();
+    // 99 is unknown; the list is also over-long — both must be normalized before signing.
+    let prefs = vec![99, VideoDecodeCodec::Vp9.tag(), 200, 0, 1, 2, 0, 1];
+    let req = AccessRequest::signed_with_codecs(
+        &fx.controller,
+        [1u8; 16],
+        PROTOCOL_VERSION,
+        fx.host_id,
+        "V".into(),
+        CTRL_EP,
+        caps(&["screen.view"]),
+        "r".into(),
+        NOW,
+        NOW + 1000,
+        [9u8; 16],
+        prefs,
+    )
+    .unwrap();
+    assert!(
+        req.viewer_codec_prefs.len() <= 4,
+        "bounded to MAX_VIEWER_CODECS"
+    );
+    assert!(
+        req.viewer_codec_prefs
+            .iter()
+            .all(|t| VideoDecodeCodec::from_tag(*t).is_some()),
+        "only known tags survive"
+    );
+    // First surviving tag is VP9 (the unknown 99 was dropped, preserving order).
+    assert_eq!(
+        req.viewer_codec_prefs.first(),
+        Some(&VideoDecodeCodec::Vp9.tag())
+    );
+    // And it still round-trips.
+    assert_eq!(AccessRequest::decode(&req.encode()).unwrap(), req);
+}
+
+#[test]
+fn v1_request_still_decodes_with_empty_prefs() {
+    // The default `signed` builder advertises no prefs (v2, count=0) → decodes to empty.
+    let fx = Fixture::new();
+    let req = fx.request(&["screen.view"]);
+    let decoded = AccessRequest::decode(&req.encode()).unwrap();
+    assert!(decoded.viewer_codec_prefs.is_empty());
+}
+
+#[test]
+fn select_prefers_viewer_order_within_host_capability() {
+    // macOS can do both: viewer preferring H.264 gets H.264.
+    assert_eq!(
+        select_encode_codec(
+            &[VideoDecodeCodec::H264.tag(), VideoDecodeCodec::Vp9.tag()],
+            MAC
+        ),
+        VideoDecodeCodec::H264
+    );
+    // Viewer preferring VP9 gets VP9.
+    assert_eq!(
+        select_encode_codec(
+            &[VideoDecodeCodec::Vp9.tag(), VideoDecodeCodec::H264.tag()],
+            MAC
+        ),
+        VideoDecodeCodec::Vp9
+    );
+}
+
+#[test]
+fn select_fails_safe_to_vp9_when_no_pref() {
+    // Empty prefs / all-unknown → the host's default (VP9 where encodable): never a black screen.
+    assert_eq!(select_encode_codec(&[], MAC), VideoDecodeCodec::Vp9);
+    assert_eq!(select_encode_codec(&[], LINUX), VideoDecodeCodec::Vp9);
+    assert_eq!(select_encode_codec(&[255, 254], MAC), VideoDecodeCodec::Vp9);
+    // Windows (no VP9) defaults to H.264.
+    assert_eq!(select_encode_codec(&[], WINDOWS), VideoDecodeCodec::H264);
+}
+
+#[test]
+fn windows_vp9_only_viewer_falls_through_to_h264_documented_limitation() {
+    // A VP9-only Linux viewer on a Windows host: Windows can't encode VP9, so it serves H.264.
+    // The Linux viewer then surfaces its honest "can't decode" error — never a silent hang.
+    assert_eq!(
+        select_encode_codec(&[VideoDecodeCodec::Vp9.tag()], WINDOWS),
+        VideoDecodeCodec::H264
+    );
+}
+
+#[test]
+fn linux_h264_only_viewer_falls_through_to_vp9_documented_limitation() {
+    // Symmetric: an H.264-only viewer on a Linux host (no H.264 encode) gets VP9.
+    assert_eq!(
+        select_encode_codec(&[VideoDecodeCodec::H264.tag()], LINUX),
+        VideoDecodeCodec::Vp9
+    );
+}
+
 // ── Property / fuzz: decoders never panic on hostile bytes ───────────────────────────────────────
 
 proptest! {

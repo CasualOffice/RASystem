@@ -132,7 +132,12 @@ pub(crate) fn config_to_wire(c: &StreamConfig) -> StreamConfigWire {
 
 fn wire_to_config(w: &StreamConfigWire) -> StreamConfig {
     StreamConfig {
-        codec: VideoCodec::H264AnnexB,
+        // Recover the codec enum from the WebCodecs string the host announced (codec negotiation): a
+        // `vp09.*` string is VP9, `vp8` is VP8, anything else (`avc1.*`) is our H.264. This keeps the
+        // Rust-side `StreamConfig.codec` faithful to what the encoder produces — the JS viewer already
+        // reads the raw string to configure WebCodecs, but the native decode path + any Rust consumer
+        // must not silently see H.264 for a VP9 stream. Unrecognized ⇒ H.264 (the historical default).
+        codec: codec_from_webcodecs(&w.codec),
         width: w.width,
         height: w.height,
         fps: w.fps,
@@ -147,6 +152,20 @@ fn wire_to_config(w: &StreamConfigWire) -> StreamConfig {
         } else {
             VideoTransportKind::PerFrameStream
         },
+    }
+}
+
+/// Map a WebCodecs codec string back to the [`VideoCodec`] enum (inverse of
+/// [`VideoCodec::webcodecs_string`]). Prefix-based so it is level/profile-agnostic: `vp09*` → VP9,
+/// `vp8` → VP8, everything else (notably `avc1*`) → H.264. Unrecognized strings fall through to
+/// H.264, the historical default (fail-safe: never a decode-crashing unknown enum).
+fn codec_from_webcodecs(s: &str) -> VideoCodec {
+    if s.starts_with("vp09") {
+        VideoCodec::Vp9
+    } else if s == "vp8" || s.starts_with("vp08") {
+        VideoCodec::Vp8
+    } else {
+        VideoCodec::H264AnnexB
     }
 }
 
@@ -177,6 +196,12 @@ pub struct HostSessionConfig {
     /// the presented grant's `host_id`/`issuer` match. `[0u8; 32]` for the `insecure-no-auth` path
     /// (the no-op validator ignores it).
     pub host_id: [u8; 32],
+    /// The **negotiated** video codec (codec negotiation, Inv 9 — a media capability, not an
+    /// authorization input). Passed to the capture backend so its declared [`StreamConfig`] matches
+    /// the paired encoder's bytes and the viewer can decode. `None` (default) ⇒ the backend's platform
+    /// default. The app selects this from the viewer's decode preferences via
+    /// [`ras_grant::select_encode_codec`] and pairs the matching encoder.
+    pub codec: Option<VideoCodec>,
 }
 
 impl HostSessionConfig {
@@ -189,7 +214,17 @@ impl HostSessionConfig {
             reconnect_window: Duration::from_secs(10),
             excluded_window_ids: Vec::new(),
             host_id: [0u8; 32],
+            codec: None,
         }
+    }
+
+    /// Set the negotiated video codec (codec negotiation). The capture backend stamps it into the
+    /// announced [`StreamConfig`]; the app pairs the matching encoder. `None` keeps the platform
+    /// default. Media capability only — never affects authorization (Inv 9).
+    #[must_use]
+    pub fn with_codec(mut self, codec: VideoCodec) -> Self {
+        self.codec = Some(codec);
+        self
     }
 
     /// Set the host-owned windows to exclude from capture (overlay / consent / indicator).
@@ -621,6 +656,9 @@ where
             monitor: inner.config.monitor,
             target_fps: HOST_TARGET_FPS,
             excluded_window_ids: inner.config.excluded_window_ids.clone(),
+            // The negotiated codec (codec negotiation): the capture stamps it so its declared config
+            // matches the encoder's bytes. `None` ⇒ platform default (fully backward-compatible).
+            codec: inner.config.codec,
         };
         let (mut capture, mut encoder) = inner
             .backends

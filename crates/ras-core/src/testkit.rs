@@ -542,6 +542,10 @@ struct CountingState {
     /// resolution change must update these, or the decoder keeps decoding at the old size.
     configured_width: AtomicU32,
     configured_height: AtomicU32,
+    /// The codec of the most recent `configure`, as its `VideoCodec` wire discriminant (0=H264,
+    /// 1=VP9, 2=VP8), or `u32::MAX` before any configure. Lets a test assert the *negotiated* codec
+    /// reached the controller's decoder.
+    configured_codec: AtomicU32,
     pushed: AtomicU64,
     keyframes: AtomicU64,
     last_frame_id: AtomicU64,
@@ -592,6 +596,15 @@ impl CountingFrameSink {
     pub fn configured_height(&self) -> u32 {
         self.inner.configured_height.load(Ordering::Relaxed)
     }
+    /// The codec of the most recent `configure` call (call only after `is_configured()`).
+    #[must_use]
+    pub fn configured_codec(&self) -> ras_media::VideoCodec {
+        match self.inner.configured_codec.load(Ordering::Relaxed) {
+            1 => ras_media::VideoCodec::Vp9,
+            2 => ras_media::VideoCodec::Vp8,
+            _ => ras_media::VideoCodec::H264AnnexB,
+        }
+    }
     /// The config width of the most recently pushed frame.
     #[must_use]
     pub fn last_width(&self) -> u32 {
@@ -624,6 +637,14 @@ impl FrameSink for CountingFrameSink {
         self.inner
             .configured_height
             .store(config.height, Ordering::Relaxed);
+        let codec_tag = match config.codec {
+            ras_media::VideoCodec::Vp9 => 1,
+            ras_media::VideoCodec::Vp8 => 2,
+            _ => 0, // H264AnnexB (and any future variant defaults to the H.264 slot for the test)
+        };
+        self.inner
+            .configured_codec
+            .store(codec_tag, Ordering::Relaxed);
         Ok(())
     }
     fn push(&self, frame: EncodedFrame) -> PushResult {

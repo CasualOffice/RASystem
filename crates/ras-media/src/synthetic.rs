@@ -59,6 +59,9 @@ pub struct SyntheticCaptureBackend {
     fps: u32,
     counter: u64,
     started: bool,
+    /// The codec `start` last negotiated: the caller's `CaptureOptions.codec` if set, else the
+    /// default. Lets the codec-negotiation path be exercised without an OS backend.
+    codec: VideoCodec,
 }
 
 impl SyntheticCaptureBackend {
@@ -71,6 +74,7 @@ impl SyntheticCaptureBackend {
             fps: 60,
             counter: 0,
             started: false,
+            codec: VideoCodec::H264AnnexB,
         }
     }
 
@@ -84,7 +88,7 @@ impl SyntheticCaptureBackend {
 
     fn stream_config(&self) -> StreamConfig {
         StreamConfig {
-            codec: VideoCodec::H264AnnexB,
+            codec: self.codec,
             width: self.width.load(Ordering::Relaxed),
             height: self.height.load(Ordering::Relaxed),
             fps: self.fps,
@@ -105,6 +109,8 @@ impl ScreenCaptureBackend for SyntheticCaptureBackend {
         self.fps = opts.target_fps.max(1);
         self.counter = 0;
         self.started = true;
+        // Stamp the negotiated codec (codec-negotiation path); default when the caller left it unset.
+        self.codec = opts.codec.unwrap_or(VideoCodec::H264AnnexB);
         Ok(self.stream_config())
     }
 
@@ -441,6 +447,7 @@ mod tests {
                 monitor: crate::MonitorId(0),
                 target_fps: 60,
                 excluded_window_ids: vec![],
+                codec: None,
             })
             .unwrap();
         let mut enc = SyntheticEncoder::new();
@@ -515,6 +522,7 @@ mod tests {
             monitor: MonitorId(0),
             target_fps: 60,
             excluded_window_ids: vec![],
+            codec: None,
         };
         let cfg = cap.start(&opts).unwrap();
         let mut enc = SyntheticEncoder::new();
@@ -574,6 +582,7 @@ mod tests {
                 monitor: crate::MonitorId(0),
                 target_fps: 30,
                 excluded_window_ids: vec![],
+                codec: None,
             })
             .unwrap();
         let mut enc = SyntheticEncoder::new();

@@ -34,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         monitor: MonitorId(0),
         target_fps: 60,
         excluded_window_ids: vec![],
+        codec: None,
     })?;
     println!(
         "negotiated: {}x{} @ {}fps, {} bps",

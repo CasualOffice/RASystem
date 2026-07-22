@@ -228,6 +228,44 @@ function decoderConfig(cfg) {
   };
 }
 
+// Codec negotiation (a MEDIA capability, not authorization — Inv 9). Probe this webview's WebCodecs
+// decoder for the codecs it can actually decode, most-preferred first, as tags the host understands
+// (0 = H.264, 1 = VP9, 2 = VP8). The result rides the signed AccessRequest; the host picks the first
+// codec it can encode, else fails safe to VP9. An empty result (no probe support / nothing decodable)
+// means "no preference" → the host defaults to VP9, so we never black-screen.
+//
+// We probe H.264 as Constrained Baseline (avc1.42E01E) because that is exactly what our encoders emit
+// (see baselineCodec above) — probing Main would falsely reject on strict engines. VP9 is probed as
+// Profile 0 / 8-bit (vp09.00.31.08), matching our libvpx output.
+async function getViewerCodecPreferences() {
+  const prefs = [];
+  if (
+    typeof VideoDecoder === "undefined" ||
+    typeof VideoDecoder.isConfigSupported !== "function"
+  ) {
+    return prefs; // engine can't tell us → host fails safe to VP9
+  }
+  const probe = async (codec, tag) => {
+    try {
+      const { supported } = await VideoDecoder.isConfigSupported({
+        codec,
+        codedWidth: 1280,
+        codedHeight: 720,
+        optimizeForLatency: true,
+      });
+      if (supported) prefs.push(tag);
+    } catch (_) {
+      // isConfigSupported threw for this codec — treat as unsupported, keep probing the rest.
+    }
+  };
+  // Order is the host's preference order: H.264 first (hardware on macOS/Windows, lowest latency),
+  // then VP9 (the universal fallback), then VP8.
+  await probe("avc1.42E01E", 0); // H.264 Constrained Baseline, level 3.0
+  await probe("vp09.00.31.08", 1); // VP9 Profile 0, level 3.1, 8-bit
+  await probe("vp8", 2); // VP8
+  return prefs;
+}
+
 async function onConfig(bytes) {
   const json = new TextDecoder().decode(bytes.subarray(4));
   const cfg = JSON.parse(json);
@@ -744,11 +782,24 @@ async function startSession(source) {
   const onAudio = new Channel();
   onAudio.onmessage = (msg) => audioPlayer.handle(msg);
   hud.textContent = source.contactId ? "reaching your contact…" : "connecting…";
+  // Codec negotiation (Inv 9 — media capability): tell the host which codecs this webview can decode,
+  // so it encodes something we can actually render (fail-safe VP9 if this list is empty).
+  const viewerCodecs = await getViewerCodecPreferences();
   try {
     if (source.contactId) {
-      await invoke("connect_to_contact", { id: source.contactId, onFrame: channel, onAudio });
+      await invoke("connect_to_contact", {
+        id: source.contactId,
+        onFrame: channel,
+        onAudio,
+        viewerCodecs,
+      });
     } else {
-      await invoke("connect_to_host", { ticket: source.ticket, onFrame: channel, onAudio });
+      await invoke("connect_to_host", {
+        ticket: source.ticket,
+        onFrame: channel,
+        onAudio,
+        viewerCodecs,
+      });
     }
   } catch (e) {
     hud.textContent = "connect failed: " + e;

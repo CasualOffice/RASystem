@@ -20,15 +20,19 @@ use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
 use objc2_core_foundation::CFRetained;
 use objc2_core_media::{CMSampleBuffer, CMTime};
-use objc2_core_video::{CVImageBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+use objc2_core_video::{
+    CVImageBuffer, CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+    CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+};
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
     SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 use ras_media::{
-    CaptureOptions, CaptureTimestampUs, CapturedFrame, MediaError, PlatformSurface,
-    RemoteDisplayBounds, ScreenCaptureBackend, StreamConfig, SurfaceKind,
+    CaptureOptions, CaptureTimestampUs, CapturedFrame, CpuBgraFrame, MediaError, PlatformSurface,
+    RemoteDisplayBounds, ScreenCaptureBackend, StreamConfig, SurfaceKind, VideoCodec,
 };
 use ras_protocol::{ErrorCode, RasError};
 
@@ -49,11 +53,96 @@ unsafe impl Send for SendImage {}
 
 /// One captured frame, owning its retained GPU surface. Owned (no borrow of the backend), matching
 /// the synthetic backend's shape.
+///
+/// Two surface modes (chosen at `start` by the negotiated codec — codec negotiation, ADR-063):
+///   • **H.264** (VideoToolbox): exposes the zero-copy GPU `MacCoreVideoPixelBuffer` (the default,
+///     unchanged hardware path).
+///   • **VP9/VP8** (`ras-media-vpx`, for WebKitGTK viewers that can't decode our H.264): the frame
+///     copies the CVPixelBuffer's BGRA bytes into an owned, tightly-packed buffer at construction
+///     and exposes a `CpuBgra` surface, because the software libvpx encoder reads CPU BGRA. The GPU
+///     path is untouched, so this is additive.
 pub struct MacCapturedFrame {
     image: SendImage,
     captured_at_us: CaptureTimestampUs,
     width: u32,
     height: u32,
+    /// Owned, tightly-packed (`stride == width*4`) top-down BGRA copy, present iff a CPU-BGRA surface
+    /// was requested (VP9/VP8). `None` for the H.264 GPU path. Boxed as a stable descriptor target.
+    cpu_bgra: Option<Box<CpuBgraOwned>>,
+}
+
+/// An owned BGRA buffer plus the `CpuBgraFrame` descriptor pointing into it, kept together so the
+/// descriptor's `data` pointer stays valid for the frame's whole lifetime (the encode call). The
+/// descriptor is stored inline (mirroring the scap backend) so `platform_surface` returns a pointer
+/// genuinely borrowed from `self`, not a thread-local.
+struct CpuBgraOwned {
+    /// Tightly-packed BGRA pixels (`width*4*height` bytes, top-down). Boxed indirectly via the parent
+    /// `Box<CpuBgraOwned>`, so its address is stable once built. Read only through `desc.data` (a raw
+    /// pointer), so it looks unused to the compiler — but it OWNS the buffer the descriptor points at
+    /// and must live exactly as long as `desc`.
+    #[allow(dead_code)]
+    bytes: Vec<u8>,
+    /// Descriptor pointing into `bytes`; filled after `bytes` is populated (so `data` is stable).
+    desc: CpuBgraFrame,
+}
+
+// SAFETY: `desc.data` is a self-pointer into this struct's own `bytes` (heap-backed, stable while the
+// `Box<CpuBgraOwned>` lives). The whole captured frame is transferred by value from SCK's delegate
+// queue to the single pull/encode thread and only ever read there (mirrors `SendImage`); the pointer
+// is never shared or read concurrently.
+unsafe impl Send for CpuBgraOwned {}
+
+impl MacCapturedFrame {
+    /// Build the tightly-packed CPU-BGRA copy from the CVPixelBuffer, or `None` if the pixel buffer
+    /// can't be locked / read. Fail-safe: a `None` here makes `platform_surface` fall back to `None`
+    /// so the paired encoder errors cleanly rather than dereferencing an unlocked/absent buffer.
+    fn make_cpu_bgra(image: &CVImageBuffer, width: u32, height: u32) -> Option<Box<CpuBgraOwned>> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        // A CVImageBuffer from a Screen sample is a CVPixelBuffer; cast to read its base address.
+        let pixel: &CVPixelBuffer = image;
+        // SAFETY: `pixel` is a live CVPixelBuffer for the callback's duration; read-only lock.
+        let lock = unsafe { CVPixelBufferLockBaseAddress(pixel, CVPixelBufferLockFlags::ReadOnly) };
+        if lock != 0 {
+            return None; // couldn't lock → fall back to no surface (fail-safe)
+        }
+        // SAFETY: locked above; base address + bytes-per-row are valid until unlock.
+        let base = CVPixelBufferGetBaseAddress(pixel) as *const u8;
+        let src_stride = CVPixelBufferGetBytesPerRow(pixel);
+        let row_bytes = (width as usize) * 4;
+        let result = if base.is_null() || src_stride < row_bytes {
+            None
+        } else {
+            let mut bytes = vec![0u8; row_bytes * height as usize];
+            for row in 0..height as usize {
+                // SAFETY: within the locked buffer; `src_stride >= row_bytes` and the buffer holds
+                // `height` rows of `src_stride` bytes each (validated by the format contract).
+                let src = unsafe { base.add(row * src_stride) };
+                let dst = &mut bytes[row * row_bytes..row * row_bytes + row_bytes];
+                // SAFETY: `src` addresses `row_bytes` readable bytes; `dst` has `row_bytes` capacity.
+                unsafe { core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), row_bytes) };
+            }
+            // Build the descriptor pointing into the now-populated, stably-addressed `bytes`. Boxing
+            // the parent gives `bytes` (a `Vec`, heap-backed) a fixed data pointer for the frame's
+            // life; moving the `Box` moves the `Vec` header, not its heap buffer, so `data` stays valid.
+            let data_ptr = bytes.as_ptr();
+            let len = bytes.len();
+            Some(Box::new(CpuBgraOwned {
+                bytes,
+                desc: CpuBgraFrame {
+                    data: data_ptr,
+                    len,
+                    stride: row_bytes,
+                    width,
+                    height,
+                },
+            }))
+        };
+        // SAFETY: paired with the successful lock above.
+        unsafe { CVPixelBufferUnlockBaseAddress(pixel, CVPixelBufferLockFlags::ReadOnly) };
+        result
+    }
 }
 
 impl CapturedFrame for MacCapturedFrame {
@@ -67,13 +156,23 @@ impl CapturedFrame for MacCapturedFrame {
         self.height
     }
     fn platform_surface(&self) -> PlatformSurface<'_> {
-        // Borrowed pointer to the retained CVPixelBuffer; valid while `self` (and thus the retain)
-        // lives — i.e. for the whole `encode` call that consumes the frame (ADR-058).
-        let ptr = CFRetained::as_ptr(&self.image.0)
-            .as_ptr()
-            .cast_const()
-            .cast::<c_void>();
-        PlatformSurface::from_ptr(ptr, SurfaceKind::MacCoreVideoPixelBuffer)
+        // VP9/VP8 path: expose the owned CPU-BGRA copy as a `CpuBgra` surface for the libvpx encoder.
+        // The descriptor lives inline in `self.cpu_bgra` (stable heap address via the `Box`), so this
+        // pointer genuinely borrows `self` for the whole `encode` call (mirrors the scap backend).
+        if let Some(owned) = self.cpu_bgra.as_deref() {
+            PlatformSurface::from_ptr(
+                core::ptr::from_ref(&owned.desc).cast::<c_void>(),
+                SurfaceKind::CpuBgra,
+            )
+        } else {
+            // H.264 GPU path (unchanged): borrowed pointer to the retained CVPixelBuffer, valid while
+            // `self` (and thus the retain) lives — the whole `encode` call that consumes the frame.
+            let ptr = CFRetained::as_ptr(&self.image.0)
+                .as_ptr()
+                .cast_const()
+                .cast::<c_void>();
+            PlatformSurface::from_ptr(ptr, SurfaceKind::MacCoreVideoPixelBuffer)
+        }
     }
 }
 
@@ -83,6 +182,10 @@ struct Slot {
     frame: Mutex<Option<MacCapturedFrame>>,
     cv: Condvar,
     failed: AtomicBool,
+    /// Whether the delegate must copy each frame to CPU BGRA (VP9/VP8 negotiated) so the software
+    /// libvpx encoder can read it. `false` (default) keeps the zero-copy GPU path for H.264. Set at
+    /// `start` from the negotiated codec; read on the delegate queue for every frame.
+    want_cpu_bgra: AtomicBool,
 }
 
 struct OutputIvars {
@@ -147,11 +250,20 @@ impl CaptureOutput {
         };
         let width = CVPixelBufferGetWidth(&image) as u32;
         let height = CVPixelBufferGetHeight(&image) as u32;
+        // For the VP9/VP8 (software libvpx) path, copy the frame to a CPU-BGRA buffer on this queue
+        // (where the pixel buffer is live) so the encoder — which needs CPU BGRA — can read it. The
+        // H.264 GPU path skips this and streams the zero-copy CVPixelBuffer (unchanged, additive).
+        let cpu_bgra = if slot.want_cpu_bgra.load(Ordering::Relaxed) {
+            MacCapturedFrame::make_cpu_bgra(&image, width, height)
+        } else {
+            None
+        };
         let frame = MacCapturedFrame {
             image: SendImage(image),
             captured_at_us,
             width,
             height,
+            cpu_bgra,
         };
         *lock(&slot.frame) = Some(frame); // freshest-wins; any unconsumed predecessor is dropped
         slot.cv.notify_one();
@@ -166,6 +278,9 @@ pub struct MacScreenCapture {
     slot: Arc<Slot>,
     config: Option<StreamConfig>,
     target_fps: u32,
+    /// The negotiated codec this session declares + produces (codec negotiation). H.264 uses the
+    /// zero-copy GPU surface; VP9/VP8 make the delegate copy each frame to CPU BGRA for libvpx.
+    codec: VideoCodec,
     /// Captured display's global bounds (logical/points), read from `SCDisplay.frame` at `start`.
     bounds: Option<RemoteDisplayBounds>,
 }
@@ -181,6 +296,7 @@ impl MacScreenCapture {
             slot: Arc::new(Slot::default()),
             config: None,
             target_fps: 60,
+            codec: VideoCodec::H264AnnexB,
             bounds: None,
         }
     }
@@ -201,6 +317,13 @@ impl ScreenCaptureBackend for MacScreenCapture {
     fn start(&mut self, opts: &CaptureOptions) -> Result<StreamConfig, MediaError> {
         self.stop();
         self.target_fps = opts.target_fps.max(1);
+        // Codec negotiation (Inv 9 — media only): H.264 (default) keeps the zero-copy GPU surface;
+        // VP9/VP8 make the delegate copy each frame to CPU BGRA for the software libvpx encoder.
+        self.codec = opts.codec.unwrap_or(VideoCodec::H264AnnexB);
+        let want_cpu_bgra = matches!(self.codec, VideoCodec::Vp9 | VideoCodec::Vp8);
+        self.slot
+            .want_cpu_bgra
+            .store(want_cpu_bgra, Ordering::Relaxed);
 
         let content = shareable_content()?;
         // SAFETY: `content` is live; `displays()` returns its display array.
@@ -308,7 +431,7 @@ impl ScreenCaptureBackend for MacScreenCapture {
         self.stream = Some(unsafe { Sendable::new(stream) });
         self.output = Some(unsafe { Sendable::new(output) });
         self.queue = Some(unsafe { Sendable::new(queue) });
-        let cfg = default_stream_config(dw, dh, self.target_fps);
+        let cfg = default_stream_config(dw, dh, self.target_fps, self.codec);
         self.config = Some(cfg);
         Ok(cfg)
     }
@@ -341,7 +464,7 @@ impl ScreenCaptureBackend for MacScreenCapture {
 
     fn config(&self) -> StreamConfig {
         self.config
-            .unwrap_or_else(|| default_stream_config(0, 0, self.target_fps))
+            .unwrap_or_else(|| default_stream_config(0, 0, self.target_fps, self.codec))
     }
 
     fn captured_bounds(&self) -> Option<RemoteDisplayBounds> {

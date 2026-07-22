@@ -361,6 +361,10 @@ async fn connect_to_host(
     ticket: String,
     on_frame: Channel<InvokeResponseBody>,
     on_audio: Channel<InvokeResponseBody>,
+    // The viewer's WebCodecs decode capabilities, probed in JS (`getViewerCodecPreferences`), as
+    // codec tags most-preferred-first (0=H.264, 1=VP9, 2=VP8). Empty / absent ⇒ the host fails safe to
+    // VP9. A media capability only (Inv 9) — it selects the encode codec, never authorization.
+    viewer_codecs: Option<Vec<u8>>,
 ) -> Result<(), String> {
     use ras_core::grant::{fresh_id, AccessRequest, MAX_REQUEST_TTL_MS};
     use ras_core::identity::SoftwareKeyStore;
@@ -406,7 +410,11 @@ async fn connect_to_host(
         _ => return Err("unexpected bootstrap reply from host".into()),
     };
     let now = now_ms();
-    let request = AccessRequest::signed(
+    // Codec negotiation (Inv 9 — media capability): advertise the viewer's WebCodecs decode support so
+    // the host can pick a codec this browser can decode (fail-safe VP9 when the list is empty/absent).
+    // Unknown tags are dropped inside `signed_with_codecs`.
+    let viewer_codec_prefs = viewer_codecs.unwrap_or_default();
+    let request = AccessRequest::signed_with_codecs(
         &ks,
         fresh_id().map_err(|e| e.to_string())?,
         PROTOCOL_VERSION,
@@ -422,6 +430,7 @@ async fn connect_to_host(
         now,
         now + MAX_REQUEST_TTL_MS,
         fresh_id().map_err(|e| e.to_string())?,
+        viewer_codec_prefs,
     )
     .map_err(|e| e.to_string())?;
     boot.send(BootstrapMsg::AccessRequest {
@@ -860,6 +869,8 @@ async fn connect_to_contact(
     id: String,
     on_frame: Channel<InvokeResponseBody>,
     on_audio: Channel<InvokeResponseBody>,
+    // Same viewer codec preferences as `connect_to_host` (codec negotiation) — forwarded through.
+    viewer_codecs: Option<Vec<u8>>,
 ) -> Result<(), String> {
     use ras_identity::{ContactBook, ContactId};
     let bytes = parse_contact_id(&id)?;
@@ -870,7 +881,15 @@ async fn connect_to_contact(
     }
     // An id-only ticket: no direct addrs / relay — iroh discovery resolves the live address by id.
     let target = ras_core::transport::EndpointAddr::new(ras_core::transport::EndpointId(bytes));
-    connect_to_host(app, state, target.to_ticket(), on_frame, on_audio).await
+    connect_to_host(
+        app,
+        state,
+        target.to_ticket(),
+        on_frame,
+        on_audio,
+        viewer_codecs,
+    )
+    .await
 }
 
 /// Send a signed **out-of-session text message** to a saved contact over the signal ALPN (ADR-095).
@@ -1761,43 +1780,197 @@ async fn start_sharing(app: tauri::AppHandle, _state: State<'_, AppState>) -> Re
     Err("screen sharing is not available on this platform".into())
 }
 
-/// Construct the platform's capture + encoder pair for a share session (ADR-063). macOS uses the
-/// zero-copy hardware path (VideoToolbox H.264); Linux/Windows use scap capture + the VP9 software
-/// encoder (`ras-media-vpx`) — WebKitGTK/WebView2 decode VP9 where they often can't decode the H.264
-/// the OpenH264 path emitted. The scap capture now stamps `VideoCodec::Vp9` in its `StreamConfig`
-/// (`ras-media-scap`), so the capture-declared codec and the VP9 encoder's bytes agree end-to-end.
+/// What each host OS's encoders can actually produce (codec negotiation, Inv 9 — a media capability,
+/// never authorization). Handed to `ras_grant::select_encode_codec` alongside the viewer's decode
+/// preferences to choose the session codec. Build/runtime reality per Invariant 18:
+///   • macOS: H.264 (VideoToolbox, hardware) **and** VP9/VP8 (libvpx via the CPU-BGRA capture path).
+///   • Linux: VP9/VP8 (libvpx). No H.264 encode is deployed (OpenH264 is the Windows-only path here).
+///   • Windows: H.264 (OpenH264). No libvpx on Windows, so no VP9.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn host_encode_caps() -> ras_core::grant::HostEncodeCaps {
+    #[cfg(target_os = "macos")]
+    {
+        ras_core::grant::HostEncodeCaps {
+            h264: true,
+            vp9: true,
+            vp8: true,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ras_core::grant::HostEncodeCaps {
+            h264: false,
+            vp9: true,
+            vp8: true,
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        ras_core::grant::HostEncodeCaps {
+            h264: true,
+            vp9: false,
+            vp8: false,
+        }
+    }
+}
+
+/// Map the negotiated [`ras_grant::VideoDecodeCodec`] to the media crate's [`ras_media::VideoCodec`]
+/// (the capture/encoder vocabulary). Total: every decode-codec tag has a media codec.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn media_codec(c: ras_core::grant::VideoDecodeCodec) -> ras_media::VideoCodec {
+    match c {
+        ras_core::grant::VideoDecodeCodec::H264 => ras_media::VideoCodec::H264AnnexB,
+        ras_core::grant::VideoDecodeCodec::Vp8 => ras_media::VideoCodec::Vp8,
+        // VP9 and any future decode-codec variant map to the fail-safe universally-decodable VP9.
+        _ => ras_media::VideoCodec::Vp9,
+    }
+}
+
+// The encoder type varies by negotiated codec, but `ras_media::VideoEncoderBackend` is NOT
+// object-safe (its `encode<F>` is generic), so we can't box it. Instead each platform wraps its
+// concrete encoders in a small enum that itself implements `VideoEncoderBackend` by dispatching —
+// so `HostSession<C, E>` stays monomorphic (`E = PlatformEncoder`) and every arm is dispatched
+// per-frame with no dynamic dispatch on the hot path beyond a single match.
+
+/// macOS encoder: VideoToolbox H.264 (hardware) or libvpx VP9/VP8 (software, for WebKitGTK viewers).
 #[cfg(target_os = "macos")]
-fn make_backends() -> (
-    ras_media_macos::MacScreenCapture,
-    ras_media_macos::VideoToolboxEncoder,
-) {
-    (
-        ras_media_macos::MacScreenCapture::new(),
-        ras_media_macos::VideoToolboxEncoder::new(),
-    )
+enum PlatformEncoder {
+    VideoToolbox(ras_media_macos::VideoToolboxEncoder),
+    Vpx(ras_media_vpx::VpxEncoder),
 }
 
-// Linux host: VP9 (WebKitGTK can't reliably decode H.264 — the black-screen fix). The scap capture
-// stamps `VideoCodec::Vp9` on Linux so the declared codec matches the VP9 bytes.
+/// Linux encoder: libvpx VP9/VP8 only (no H.264 encode deployed on Linux hosts).
 #[cfg(target_os = "linux")]
-fn make_backends() -> (ras_media_scap::ScapCapture, ras_media_vpx::VpxEncoder) {
-    (
-        ras_media_scap::ScapCapture::new(),
-        ras_media_vpx::VpxEncoder::new(), // VP9
-    )
+enum PlatformEncoder {
+    Vpx(ras_media_vpx::VpxEncoder),
 }
 
-// Windows host: OpenH264 (WebView2 decodes H.264 natively; no libvpx dependency on Windows). Cross-OS
-// decode for Linux *viewers* of a Windows/macOS host is delivered by codec negotiation (follow-up), not
-// by the host's default encoder here.
+/// Windows encoder: OpenH264 only (no libvpx on Windows — Inv 18).
 #[cfg(target_os = "windows")]
-fn make_backends() -> (
-    ras_media_scap::ScapCapture,
-    ras_media_openh264::OpenH264Encoder,
-) {
+enum PlatformEncoder {
+    OpenH264(ras_media_openh264::OpenH264Encoder),
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+impl ras_media::VideoEncoderBackend for PlatformEncoder {
+    fn configure(&mut self, config: &StreamConfig) -> Result<(), ras_media::MediaError> {
+        match self {
+            #[cfg(target_os = "macos")]
+            PlatformEncoder::VideoToolbox(e) => e.configure(config),
+            #[cfg(target_os = "macos")]
+            PlatformEncoder::Vpx(e) => e.configure(config),
+            #[cfg(target_os = "linux")]
+            PlatformEncoder::Vpx(e) => e.configure(config),
+            #[cfg(target_os = "windows")]
+            PlatformEncoder::OpenH264(e) => e.configure(config),
+        }
+    }
+    fn encode<F: ras_media::CapturedFrame>(
+        &mut self,
+        frame: F,
+    ) -> Result<Option<EncodedFrame>, ras_media::MediaError> {
+        match self {
+            #[cfg(target_os = "macos")]
+            PlatformEncoder::VideoToolbox(e) => e.encode(frame),
+            #[cfg(target_os = "macos")]
+            PlatformEncoder::Vpx(e) => e.encode(frame),
+            #[cfg(target_os = "linux")]
+            PlatformEncoder::Vpx(e) => e.encode(frame),
+            #[cfg(target_os = "windows")]
+            PlatformEncoder::OpenH264(e) => e.encode(frame),
+        }
+    }
+    fn request_keyframe(&mut self, reason: ras_protocol::KeyframeReason) {
+        match self {
+            #[cfg(target_os = "macos")]
+            PlatformEncoder::VideoToolbox(e) => e.request_keyframe(reason),
+            #[cfg(target_os = "macos")]
+            PlatformEncoder::Vpx(e) => e.request_keyframe(reason),
+            #[cfg(target_os = "linux")]
+            PlatformEncoder::Vpx(e) => e.request_keyframe(reason),
+            #[cfg(target_os = "windows")]
+            PlatformEncoder::OpenH264(e) => e.request_keyframe(reason),
+        }
+    }
+    fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), ras_media::MediaError> {
+        match self {
+            #[cfg(target_os = "macos")]
+            PlatformEncoder::VideoToolbox(e) => e.set_bitrate(bitrate_bps),
+            #[cfg(target_os = "macos")]
+            PlatformEncoder::Vpx(e) => e.set_bitrate(bitrate_bps),
+            #[cfg(target_os = "linux")]
+            PlatformEncoder::Vpx(e) => e.set_bitrate(bitrate_bps),
+            #[cfg(target_os = "windows")]
+            PlatformEncoder::OpenH264(e) => e.set_bitrate(bitrate_bps),
+        }
+    }
+    fn config(&self) -> StreamConfig {
+        match self {
+            #[cfg(target_os = "macos")]
+            PlatformEncoder::VideoToolbox(e) => e.config(),
+            #[cfg(target_os = "macos")]
+            PlatformEncoder::Vpx(e) => e.config(),
+            #[cfg(target_os = "linux")]
+            PlatformEncoder::Vpx(e) => e.config(),
+            #[cfg(target_os = "windows")]
+            PlatformEncoder::OpenH264(e) => e.config(),
+        }
+    }
+}
+
+/// Construct the platform's capture + **codec-aware** encoder for a share session (ADR-063 + codec
+/// negotiation). `codec` is the negotiated `ras_media::VideoCodec` (from
+/// `ras_grant::select_encode_codec` over the viewer's decode prefs ∩ this host's `host_encode_caps`),
+/// so the encoder produces bytes the viewer can decode. The paired capture stamps the same codec into
+/// its `StreamConfig` (via `HostSessionConfig::with_codec` → `CaptureOptions.codec`), so declared codec
+/// and produced bytes agree end-to-end. Codec choice is a media capability only — never authorization
+/// (Inv 9).
+///
+/// macOS: H.264 → VideoToolbox (zero-copy GPU); VP9/VP8 → libvpx over the SCK CPU-BGRA path.
+#[cfg(target_os = "macos")]
+fn make_backends(
+    codec: ras_media::VideoCodec,
+) -> (ras_media_macos::MacScreenCapture, PlatformEncoder) {
+    let capture = ras_media_macos::MacScreenCapture::new();
+    let encoder = match codec {
+        ras_media::VideoCodec::Vp9 => {
+            PlatformEncoder::Vpx(ras_media_vpx::VpxEncoder::new()) // VP9
+        }
+        ras_media::VideoCodec::Vp8 => PlatformEncoder::Vpx(ras_media_vpx::VpxEncoder::new_with(
+            ras_media_vpx::VpxCodec::Vp8,
+        )),
+        // H.264 (and any future variant we can't encode) → hardware VideoToolbox.
+        _ => PlatformEncoder::VideoToolbox(ras_media_macos::VideoToolboxEncoder::new()),
+    };
+    (capture, encoder)
+}
+
+// Linux host: libvpx (VP9 default, VP8 selectable). WebKitGTK decodes VP9/VP8; it often can't decode
+// our H.264. Documented limitation: an H.264-only viewer of a Linux host is served VP9 (the viewer's
+// honest "can't decode" error fires — never a silent hang), because Linux has no H.264 encode here.
+#[cfg(target_os = "linux")]
+fn make_backends(codec: ras_media::VideoCodec) -> (ras_media_scap::ScapCapture, PlatformEncoder) {
+    let capture = ras_media_scap::ScapCapture::new();
+    let encoder = match codec {
+        ras_media::VideoCodec::Vp8 => PlatformEncoder::Vpx(ras_media_vpx::VpxEncoder::new_with(
+            ras_media_vpx::VpxCodec::Vp8,
+        )),
+        // VP9 (default) and H.264 (which Linux can't encode → fall back to VP9).
+        _ => PlatformEncoder::Vpx(ras_media_vpx::VpxEncoder::new()),
+    };
+    (capture, encoder)
+}
+
+// Windows host: OpenH264 (WebView2 decodes H.264 natively). Documented limitation: no libvpx on
+// Windows (Inv 18), so a VP9-only Linux viewer of a Windows host is served H.264 — the Linux viewer
+// then surfaces its honest fatal "can't decode" error, never a silent hang. `select_encode_codec`
+// already falls a VP9/VP8 request back to H.264 for a `HostEncodeCaps { h264: true, vp9: false }`, so
+// this only ever receives H.264 in practice; the match is exhaustive/fail-safe regardless.
+#[cfg(target_os = "windows")]
+fn make_backends(_codec: ras_media::VideoCodec) -> (ras_media_scap::ScapCapture, PlatformEncoder) {
     (
         ras_media_scap::ScapCapture::new(),
-        ras_media_openh264::OpenH264Encoder::new(),
+        PlatformEncoder::OpenH264(ras_media_openh264::OpenH264Encoder::new()),
     )
 }
 
@@ -1894,7 +2067,9 @@ async fn run_share(
     // ALPN with that grant, proving delivery. Without this the connection dropped the instant the
     // grant was sent, discarding un-acked bytes on a real link (the "bootstrap read failed after
     // Allow" real-run blocker).
-    let mut pending_bootstrap: Option<ras_transport_iroh::Session> = None;
+    // The held bootstrap connection + the codec its request negotiated (codec negotiation), carried to
+    // `serve_one` so the capture/encoder are built for the codec the viewer can decode.
+    let mut pending_bootstrap: Option<(ras_transport_iroh::Session, ras_media::VideoCodec)> = None;
 
     loop {
         if *stop.borrow() {
@@ -1961,10 +2136,25 @@ async fn run_share(
             }
             Ok(Some(session)) => {
                 // The controller's session dial: it proves the grant was delivered, so the held
-                // bootstrap connection has done its job — drop it (closing that QUIC link cleanly)
-                // before serving the session.
-                drop(pending_bootstrap.take());
-                serve_one(&app, &endpoint, session, host_id, &consent, &mut stop).await;
+                // bootstrap connection has done its job — take it (closing that QUIC link cleanly when
+                // the tuple drops at the end of this arm) and recover the codec its request negotiated
+                // (codec negotiation). No pending bootstrap ⇒ a session dial with no matching grant
+                // flow; fall back to the fail-safe default (VP9 where encodable) so the viewer still
+                // gets a decodable stream rather than a black screen.
+                let negotiated_codec = pending_bootstrap
+                    .take()
+                    .map(|(_held_conn, codec)| codec)
+                    .unwrap_or_else(|| media_codec(host_encode_caps().default_codec()));
+                serve_one(
+                    &app,
+                    &endpoint,
+                    session,
+                    host_id,
+                    &consent,
+                    &mut stop,
+                    negotiated_codec,
+                )
+                .await;
             }
             Ok(None) => break, // endpoint closed
             Err(_) => continue,
@@ -2097,10 +2287,10 @@ async fn handle_bootstrap(
     issuer: &ras_core::grant::LocalHostGrantIssuer<ras_core::identity::SoftwareKeyStore>,
     nonces: &mut ras_core::grant::NonceCache,
     consent: &Arc<LocalConsent>,
-) -> Option<ras_transport_iroh::Session> {
+) -> Option<(ras_transport_iroh::Session, ras_media::VideoCodec)> {
     use ras_core::grant::{
-        fresh_id, validate_access_request, AccessRequest, SessionGrantIssuer, SessionParams,
-        MAX_REQUEST_TTL_MS,
+        fresh_id, select_encode_codec, validate_access_request, AccessRequest, SessionGrantIssuer,
+        SessionParams, MAX_REQUEST_TTL_MS,
     };
     use ras_protocol::{AccessOutcome, BootstrapMsg, ErrorCode};
 
@@ -2148,6 +2338,18 @@ async fn handle_bootstrap(
     if let Err(code) = validate_access_request(&request, &host_id, &peer_endpoint, now, nonces) {
         deny!(boot, code);
     }
+
+    // ── Codec negotiation (Inv 9 — a MEDIA capability, NOT authorization) ──
+    // Now that the request's signature has verified (so `viewer_codec_prefs` is trusted), pick the
+    // encode codec: the viewer's most-preferred codec THIS host can encode, else a fail-safe default
+    // (VP9 where the host can encode it — universally decodable on WebKitGTK/WebView2/WKWebView — so a
+    // viewer that advertised nothing never black-screens). This decision touches no grant/lease/consent
+    // and is made independently below; it only selects which encoder `serve_one` builds.
+    let negotiated_codec = media_codec(select_encode_codec(
+        &request.viewer_codec_prefs,
+        host_encode_caps(),
+    ));
+    log::info!("codec negotiation: serving {negotiated_codec:?}");
 
     // Surface the viewer's stable contact code so the host can save them back as a contact — this is
     // what makes contacts **two-way** after a connection (ADR-092/093) without any always-on presence
@@ -2203,7 +2405,7 @@ async fn handle_bootstrap(
             // controller has it (proven when its session-ALPN dial arrives). Dropping the connection
             // here instead would discard un-acked grant bytes on a real-RTT link.
             drop(boot);
-            Some(session)
+            Some((session, negotiated_codec))
         }
         Err(e) => deny!(boot, e.code),
     }
@@ -2216,6 +2418,10 @@ async fn serve_one(
     host_id: [u8; 32],
     consent: &Arc<LocalConsent>,
     stop: &mut tokio::sync::watch::Receiver<bool>,
+    // The negotiated video codec (codec negotiation) — the capture stamps it and `make_backends`
+    // pairs the matching encoder, so the viewer decodes what the host produces. A media capability
+    // only; it never touches the grant/lease/consent already settled in the bootstrap phase (Inv 9).
+    negotiated_codec: ras_media::VideoCodec,
 ) {
     use ras_core::{
         GrantSessionValidator, HostSession, HostSessionConfig, IrohSessionTransport,
@@ -2271,7 +2477,7 @@ async fn serve_one(
         }
     }
 
-    let (capture, encoder) = make_backends();
+    let (capture, encoder) = make_backends(negotiated_codec);
     // Host side of ADR-091 resume: on a transport drop the host re-accepts on the same endpoint and
     // waits for the same peer (by authenticated EndpointId) to re-dial, then resumes. Symmetric to the
     // controller's re-dial above.
@@ -2281,7 +2487,10 @@ async fn serve_one(
         // Exclude our own overlay/indicator windows from the shared feed (privacy + no feedback loop).
         HostSessionConfig::new(MonitorId(0))
             .with_excluded_windows(host_excluded_windows(app))
-            .with_host_id(host_id),
+            .with_host_id(host_id)
+            // Stamp the negotiated codec so the capture declares it (codec negotiation) — the capture
+            // and the paired encoder must agree, or the viewer decodes garbage.
+            .with_codec(negotiated_codec),
         transport,
         capture,
         encoder,

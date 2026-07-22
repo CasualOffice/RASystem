@@ -117,7 +117,7 @@ mod imp {
         #[must_use]
         pub fn new() -> Self {
             Self {
-                config: default_stream_config(1920, 1080, 60),
+                config: default_stream_config(1920, 1080, 60, None),
                 running: None,
                 current: None,
             }
@@ -147,19 +147,33 @@ mod imp {
         }
     }
 
+    /// This platform's default codec when the caller (codec negotiation) didn't specify one.
+    ///   • Linux → VP9 (`ras-media-vpx`): WebKitGTK can't reliably decode our H.264 but decodes VP9.
+    ///   • Windows → H.264 (`ras-media-openh264`): WebView2 decodes H.264 natively; no libvpx there.
     #[must_use]
-    fn default_stream_config(width: u32, height: u32, fps: u32) -> StreamConfig {
+    fn platform_default_codec() -> VideoCodec {
+        #[cfg(target_os = "linux")]
+        {
+            VideoCodec::Vp9
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            VideoCodec::H264AnnexB
+        }
+    }
+
+    #[must_use]
+    fn default_stream_config(
+        width: u32,
+        height: u32,
+        fps: u32,
+        codec: Option<VideoCodec>,
+    ) -> StreamConfig {
         StreamConfig {
-            // The declared codec MUST match the paired encoder's bytes (see `make_backends` in the app):
-            // the capture declares the codec, the encoder produces it, they must never disagree.
-            //   • Linux host → VP9 (`ras-media-vpx`): WebKitGTK can't reliably decode our H.264, but
-            //     decodes VP9 — the black-screen fix.
-            //   • Windows host → H.264 (`ras-media-openh264`): WebView2 decodes H.264 natively and
-            //     Windows has no libvpx dependency.
-            #[cfg(target_os = "linux")]
-            codec: VideoCodec::Vp9,
-            #[cfg(not(target_os = "linux"))]
-            codec: VideoCodec::H264AnnexB,
+            // The declared codec MUST match the paired encoder's bytes (see `make_backends` in the
+            // app): the capture declares the negotiated codec (codec negotiation), the encoder
+            // produces it, they must never disagree. `None` ⇒ this platform's default.
+            codec: codec.unwrap_or_else(platform_default_codec),
             width,
             height,
             fps,
@@ -269,7 +283,9 @@ mod imp {
             let first = wait_for_frame(&shared, Duration::from_secs(30));
             match first {
                 Some(buf) => {
-                    self.config = default_stream_config(buf.w, buf.h, fps);
+                    // Stamp the negotiated codec (codec negotiation) so the declared config matches
+                    // the paired encoder's bytes; `None` ⇒ this platform's default.
+                    self.config = default_stream_config(buf.w, buf.h, fps, opts.codec);
                     // Keep the first frame available for the next pull.
                     *shared
                         .slot

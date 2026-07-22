@@ -26,17 +26,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libdbus-1-dev libclang-dev pkg-config libvpx-dev
+      # macOS libvpx: the unified app now links ras-media-vpx on macOS too (codec negotiation — a macOS
+      # host can encode VP9 for WebKitGTK viewers that can't decode our H.264). The app builds in
+      # release.yml, but install libvpx here as well so the ras-media-vpx build/test step below is
+      # exercised on macOS (pkg-config finds Brew's libvpx).
+      - name: macOS VPX dep
+        if: matrix.os == 'macos-latest'
+        run: brew install libvpx pkg-config
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --all
-      # ras-media-vpx is a LINUX-ONLY encode path that links system libvpx; it is excluded from the
-      # workspace so the Windows/macOS builds above need no libvpx. Build + test it on its own manifest
-      # on Linux (where libvpx-dev is installed), incl. fmt/clippy so it stays gated.
-      - name: ras-media-vpx (Linux VP9 encoder)
-        if: matrix.os == 'ubuntu-latest'
+      # ras-media-vpx links system libvpx and is excluded from the workspace, so build + test it on its
+      # own manifest, incl. fmt/clippy so it stays gated. It is now used on BOTH Linux (the VP9 host
+      # encode path) AND macOS (codec negotiation — VP9 for WebKitGTK viewers), so exercise it on each
+      # (both have libvpx installed above). Windows has no libvpx (Inv 18), so it is skipped there.
+      - name: ras-media-vpx (VP9/VP8 encoder)
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest'
         run: |
           cargo fmt --manifest-path crates/ras-media-vpx/Cargo.toml -- --check
           cargo clippy --manifest-path crates/ras-media-vpx/Cargo.toml --all-targets -- -D warnings

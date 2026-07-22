@@ -98,7 +98,9 @@ impl VideoToolboxEncoder {
         Self {
             session: None,
             out: Arc::new(EncOut::default()),
-            config: super::default_stream_config(0, 0, 0),
+            // VideoToolbox always produces H.264; the negotiated codec (if VP9/VP8) is served by the
+            // software libvpx encoder instead, so this backend's placeholder config is H.264.
+            config: super::default_stream_config(0, 0, 0, ras_media::VideoCodec::H264AnnexB),
             next_frame_id: 0,
             force_keyframe: false,
             first: true,
