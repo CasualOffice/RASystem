@@ -1397,6 +1397,35 @@
     `v0.0.4-alpha`. Supersedes the soft-cursor/annotation direction of ADR-073/ADR-097 for the cursor+overlay
     path. Model recorded in the memory note `input-cursor-model`.
 
+- **ADR-101 · VP9 encode + cross-OS codec negotiation (viewer advertises, host picks) · Accepted.**
+  - **Context.** On-device testing surfaced the load-bearing cross-OS failure: a **Linux/WebKitGTK viewer
+    of a macOS host black-screens** because VideoToolbox emits H.264 that WebKitGTK cannot decode (docs/22
+    §A4 flagged WebKitGTK's H.264 gap). VP8/VP9 are royalty-free, decode on **all three** webviews
+    (WebKitGTK / WebView2 / WKWebView), and libvpx-realtime is the proven RustDesk (study-only) path — so
+    VP9 is the fix, but *which host encodes it, and when* is the real question. Reverses the earlier
+    "H.264-only, do not add VP9" note in docs/22 §A4.
+  - **Decision.** (1) Add a permissive **VP8/VP9 software encoder** `ras-media-vpx` over `env-libvpx-sys`
+    (**MPL-2.0** wrapper + system **libvpx BSD-3** — Inv 18 clean), realtime CBR + forced-IDR + live
+    `set_bitrate` + VP9 3-layer temporal SVC; `unsafe` confined to it; **excluded from the root workspace**
+    (a `-sys` crate) so Windows/macOS *workspace* CI needs no libvpx. (2) **Codec negotiation:** the viewer
+    probes `VideoDecoder.isConfigSupported` (H.264/VP9/VP8) and advertises the decodable set in a new
+    **`AccessRequest.viewer_codec_prefs`** field (AccessRequest **v2**); the host, **after** the request
+    signature verifies, picks the viewer's most-preferred codec it can encode, else a **VP9 fail-safe
+    default** (universally decodable → never black-screens). (3) Per-OS encode: **macOS** = VideoToolbox
+    H.264 for H.264-capable viewers (fast hardware path preserved) **or** VP9 (`ras-media-vpx`, brew
+    libvpx) for WebKitGTK viewers; **Linux** = VP9; **Windows** = H.264 only (no libvpx — a Windows host
+    serving a VP9-only viewer sends H.264 and the viewer shows the honest fatal-error, never a hang). The
+    capture stamps the negotiated codec so declared == encoded bytes.
+  - **Security (Inv 9 preserved).** `viewer_codec_prefs` is **in the signed AccessRequest body** (cannot be
+    forged; bounded + normalized + fail-closed decode on unknown tags), and the codec is chosen **only after
+    the Ed25519 signature verifies**. Codec is a **media capability, not authorization** — it never widens
+    the grant / lease / consent; issuance is independent and unchanged. Wire-format change (AccessRequest v2)
+    is why this is an ADR; both ends ship in one app version so there is no mixed-version window.
+  - **Status.** Implemented + gated + security-reviewed on-disk (workspace test/clippy/fmt, ras-grant
+    signature/wire tests, vpx standalone 8 tests, cargo-deny, app, node — green). CI installs libvpx-dev on
+    Linux + brew libvpx on macOS; the vpx crate is exercised per-manifest on both. **On-device-pending:** the
+    real Linux-viewer-of-macOS-host VP9 round-trip (the reason this exists) + the software-VP9 latency delta.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
