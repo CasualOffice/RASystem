@@ -113,8 +113,10 @@ body {
 [hidden] {
   display: none !important;
 }
+/* Global keyboard-a11y focus ring — the ONE brand accent (--signal), so every focusable element
+   reads with a consistent, visible teal ring. Mouse/touch (:focus without -visible) stays quiet. */
 :focus-visible {
-  outline: 2px solid var(--link);
+  outline: 2px solid var(--signal);
   outline-offset: 2px;
 }
 /* Top connect bar: paste a host ticket, connect/disconnect. */
@@ -142,6 +144,15 @@ body {
   background: var(--ground);
   color: var(--ink);
   font: var(--fs-label)/1.4 var(--font-mono);
+  transition: border-color var(--motion-fast) var(--ease), box-shadow var(--motion-fast) var(--ease);
+}
+#connectbar input::placeholder {
+  color: var(--ink-faint);
+}
+#connectbar input:focus-visible {
+  border-color: var(--signal-hairline);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--signal-glow-soft);
 }
 #connectbar button {
   height: 32px;
@@ -152,13 +163,26 @@ body {
   color: var(--ink);
   font: 600 var(--fs-label)/1 var(--font-sans);
   cursor: pointer;
+  transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease), box-shadow var(--motion-fast) var(--ease), color var(--motion-fast) var(--ease), opacity var(--motion-fast) var(--ease);
 }
 #connectbar button:hover:not(:disabled) {
-  background: var(--surface-3);
+  background: var(--surface-2);
+  border-color: var(--ink-faint);
+}
+#connectbar button:active:not(:disabled) {
+  background: var(--hairline);
 }
 #connectbar button#connect {
   background: var(--allow-strong);
   border-color: var(--allow);
+  color: #fff;
+}
+#connectbar button#connect:hover:not(:disabled) {
+  background: var(--allow);
+  border-color: var(--allow);
+}
+#connectbar button#connect:active:not(:disabled) {
+  background: var(--allow-strong);
 }
 #connectbar button:disabled {
   opacity: 0.45;
@@ -199,7 +223,7 @@ body {
   align-items: center;
   gap: var(--space-1);
   padding: var(--space-2) var(--space-2);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: rgba(25, 29, 39, 0.92);
   border: 1px solid var(--hairline);
   box-shadow: var(--elev-2);
@@ -209,15 +233,19 @@ body {
   height: 30px;
   min-width: 30px;
   padding: 0 var(--space-2);
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   color: var(--ink);
   font: 15px/1 var(--font-sans);
   cursor: pointer;
+  transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
 }
 #tools button:hover {
   background: var(--surface-3);
+}
+#tools button:active {
+  background: var(--hairline);
 }
 #tools button.active {
   background: var(--surface-3);
@@ -320,6 +348,10 @@ body {
   border-color: var(--ink-faint);
   background: var(--surface-2);
 }
+.card:active {
+  transform: translateY(0);
+  background: var(--surface-3);
+}
 .card-icon {
   width: 52px;
   height: 52px;
@@ -369,6 +401,10 @@ body {
   font: inherit;
   cursor: pointer;
   text-decoration: underline;
+  transition: color var(--motion-fast) var(--ease), opacity var(--motion-fast) var(--ease);
+}
+.linklike:hover:not(:disabled) {
+  color: var(--signal);
 }
 .linklike:disabled {
   color: var(--ink-faint);
@@ -404,9 +440,14 @@ body {
   color: var(--ink);
   cursor: pointer;
   font: 600 var(--fs-label)/1 var(--font-sans);
+  transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
 }
 .back:hover {
-  background: var(--surface-3);
+  background: var(--surface-2);
+  border-color: var(--ink-faint);
+}
+.back:active {
+  background: var(--hairline);
 }
 #connectbar .back {
   flex: 0 0 auto;
@@ -415,6 +456,7 @@ body {
   padding: var(--space-1) 10px;
   border-radius: var(--radius-sm);
   font: 600 var(--fs-data)/1.4 var(--font-sans);
+  transition: background var(--motion-mid) var(--ease), color var(--motion-mid) var(--ease), box-shadow var(--motion-mid) var(--ease);
 }
 .indicator.idle {
   background: var(--surface-3);
@@ -482,6 +524,12 @@ body {
   color: var(--signal);
   font: var(--fs-data)/1.4 var(--font-mono);
   word-break: break-all;
+  transition: border-color var(--motion-fast) var(--ease), box-shadow var(--motion-fast) var(--ease);
+}
+#share-ticket:focus-visible {
+  border-color: var(--signal-hairline);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--signal-glow-soft);
 }
 #share-copy {
   flex: 0 0 auto;
@@ -491,9 +539,15 @@ body {
   background: var(--surface-3);
   color: var(--ink);
   cursor: pointer;
+  font: 600 var(--fs-label)/1 var(--font-sans);
+  transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
 }
 #share-copy:hover {
-  background: var(--surface-3);
+  background: var(--surface-2);
+  border-color: var(--ink-faint);
+}
+#share-copy:active {
+  background: var(--hairline);
 }
 .status {
   color: var(--ink-dim);
@@ -515,9 +569,13 @@ body {
   color: #fff;
   font-weight: 600;
   cursor: pointer;
+  transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
 }
 .danger:hover {
   background: var(--stop-strong);
+}
+.danger:active {
+  background: var(--stop-dim);
 }
 .note {
   color: var(--ink-faint);
@@ -532,12 +590,14 @@ body {
   padding: var(--space-3) 14px;
   margin-bottom: var(--space-4);
   border: 1px solid var(--hairline);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--surface-1);
   cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease), background var(--motion-fast) var(--ease);
 }
 .optrow:hover {
-  border-color: var(--surface-3);
+  border-color: var(--ink-faint);
+  background: var(--surface-2);
 }
 .optrow:focus-within {
   outline: 2px solid var(--signal-hairline);
@@ -573,11 +633,35 @@ body {
 }
 .consent-card {
   width: min(420px, 88vw);
-  padding: 20px;
+  padding: var(--space-5);
   border-radius: var(--radius-lg);
   background: var(--surface-2);
   border: 1px solid var(--hairline);
   box-shadow: var(--elev-4);
+  animation: consent-card-in var(--motion-mid) var(--ease-out) both;
+}
+@keyframes consent-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+/* Honor reduced-motion for the card entrance and the home cards' decorative lift. */
+@media (prefers-reduced-motion: reduce) {
+  .consent-card {
+    animation: none;
+  }
+  .card,
+  .card:hover {
+    transition: none;
+  }
+  .card:hover {
+    transform: none;
+  }
 }
 .consent-title {
   font-size: var(--fs-heading);
@@ -609,13 +693,18 @@ body {
   border: 1px solid var(--hairline);
   font-weight: 600;
   cursor: pointer;
+  transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
 }
 #deny {
   background: var(--surface-3);
   color: var(--ink);
 }
 #deny:hover {
-  background: var(--surface-3);
+  background: var(--surface-2);
+  border-color: var(--ink-faint);
+}
+#deny:active {
+  background: var(--hairline);
 }
 #allow {
   background: var(--allow-strong);
@@ -624,6 +713,9 @@ body {
 }
 #allow:hover {
   background: var(--allow);
+}
+#allow:active {
+  background: var(--allow-strong);
 }
 
 /* ── In-session chat + clipboard ───────────────────────────────────────────────────────────────── */
@@ -682,6 +774,7 @@ body {
   font: 600 var(--fs-label)/1 var(--font-sans);
   cursor: pointer;
   text-align: left;
+  transition: background var(--motion-fast) var(--ease);
 }
 #chat-toggle:hover {
   background: var(--surface-3);
@@ -710,7 +803,7 @@ body {
 }
 .chat-caret {
   color: var(--ink-dim);
-  transition: transform 0.15s ease;
+  transition: transform var(--motion-mid) var(--ease);
 }
 #chat-panel.chat-collapsed .chat-caret {
   transform: rotate(-90deg);
@@ -720,7 +813,7 @@ body {
   display: grid;
   grid-template-rows: 1fr;
   border-top: 1px solid var(--hairline);
-  transition: grid-template-rows 0.17s ease;
+  transition: grid-template-rows var(--motion-slow) var(--ease);
 }
 #chat-panel.chat-collapsed #chat-body {
   grid-template-rows: 0fr;
@@ -810,9 +903,13 @@ body {
   cursor: pointer;
   box-shadow: var(--elev-1);
   animation: chat-msg-in var(--motion-mid) var(--ease) both;
+  transition: background var(--motion-fast) var(--ease);
 }
 #chat-jump:hover {
   background: var(--allow);
+}
+#chat-jump:active {
+  background: var(--allow-strong);
 }
 .chat-notice {
   display: flex;
@@ -850,6 +947,7 @@ body {
   font: 14px/1 var(--font-sans);
   cursor: pointer;
   opacity: 0.7;
+  transition: opacity var(--motion-fast) var(--ease), background var(--motion-fast) var(--ease);
 }
 .chat-notice-dismiss:hover {
   opacity: 1;
@@ -878,6 +976,15 @@ body {
   background: var(--ground);
   color: var(--ink);
   font: var(--fs-data)/1.4 var(--font-sans);
+  transition: border-color var(--motion-fast) var(--ease), box-shadow var(--motion-fast) var(--ease);
+}
+#chat-paste textarea::placeholder {
+  color: var(--ink-faint);
+}
+#chat-paste textarea:focus-visible {
+  border-color: var(--signal-hairline);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--signal-glow-soft);
 }
 .chat-paste-actions {
   display: flex;
@@ -894,9 +1001,14 @@ body {
   color: var(--ink);
   font: 600 var(--fs-data)/1 var(--font-sans);
   cursor: pointer;
+  transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
 }
 .chat-paste-actions button:hover {
-  background: var(--surface-3);
+  background: var(--surface-2);
+  border-color: var(--ink-faint);
+}
+.chat-paste-actions button:active {
+  background: var(--hairline);
 }
 .chat-paste-actions button.primary {
   background: var(--allow-strong);
@@ -905,6 +1017,9 @@ body {
 }
 .chat-paste-actions button.primary:hover {
   background: var(--allow);
+}
+.chat-paste-actions button.primary:active {
+  background: var(--allow-strong);
 }
 #chat-form {
   display: flex;
@@ -926,9 +1041,15 @@ body {
   font: var(--fs-label)/1.4 var(--font-sans);
   resize: none;
   overflow-y: auto;
+  transition: border-color var(--motion-fast) var(--ease), box-shadow var(--motion-fast) var(--ease);
 }
 #chat-input::placeholder {
   color: var(--ink-faint);
+}
+#chat-input:focus-visible {
+  border-color: var(--signal-hairline);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--signal-glow-soft);
 }
 #chat-send {
   flex: 0 0 auto;
@@ -961,10 +1082,11 @@ body {
   color: var(--ink);
   font: 600 var(--fs-data)/1 var(--font-sans);
   cursor: pointer;
-  transition: background var(--motion-fast) var(--ease);
+  transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
 }
 #chat-clipboard:hover:not(:disabled) {
-  background: var(--surface-3);
+  background: var(--surface-2);
+  border-color: var(--ink-faint);
 }
 #chat-clipboard:active:not(:disabled) {
   background: var(--hairline);
@@ -1242,6 +1364,9 @@ body {
 .consent-actions button.primary:hover {
   background: var(--allow);
 }
+.consent-actions button.primary:active {
+  background: var(--allow-strong);
+}
 
 /* Receiver: "file received" auto-dismiss notice — palette mirrors the clipboard notice.ok state. */
 .file-recv-notice {
@@ -1377,26 +1502,35 @@ body {
 }
 .contact-add input {
   padding: 9px var(--space-3);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--hairline);
   background: var(--ground);
   color: var(--ink);
   font: inherit;
+  transition: border-color var(--motion-fast) var(--ease), box-shadow var(--motion-fast) var(--ease);
+}
+.contact-add input::placeholder {
+  color: var(--ink-faint);
 }
 .contact-add input:focus {
-  border-color: var(--link);
+  border-color: var(--signal-hairline);
   outline: none;
+  box-shadow: 0 0 0 2px var(--signal-glow-soft);
 }
 .contact-add button.primary {
   padding: 9px 18px;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--allow);
   background: var(--allow-strong);
   color: #fff;
   cursor: pointer;
+  transition: background var(--motion-fast) var(--ease);
 }
 .contact-add button.primary:hover {
   background: var(--allow);
+}
+.contact-add button.primary:active {
+  background: var(--allow-strong);
 }
 /* List */
 .contacts-list {
@@ -1471,9 +1605,14 @@ body {
   color: var(--ink);
   cursor: pointer;
   font: inherit;
+  transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease), color var(--motion-fast) var(--ease), opacity var(--motion-fast) var(--ease);
 }
 .contact-actions button:hover:not(:disabled) {
+  background: var(--surface-3);
   border-color: var(--ink-faint);
+}
+.contact-actions button:active:not(:disabled) {
+  background: var(--hairline);
 }
 .contact-actions button:disabled {
   opacity: 0.5;
@@ -1484,8 +1623,17 @@ body {
   border-color: var(--allow);
   color: #fff;
 }
+.contact-actions button.primary:hover:not(:disabled) {
+  background: var(--allow);
+  border-color: var(--allow);
+}
 .contact-actions button.danger {
   color: var(--stop-ink);
+}
+.contact-actions button.danger:hover:not(:disabled) {
+  background: var(--stop-dim);
+  border-color: var(--stop-strong);
+  color: #fff;
 }
 
 /* Your own shareable identity on the Contacts screen */
@@ -1513,14 +1661,18 @@ body {
 }
 .my-identity button.primary {
   padding: var(--space-2) var(--space-4);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--allow);
   background: var(--allow-strong);
   color: #fff;
   cursor: pointer;
+  transition: background var(--motion-fast) var(--ease);
 }
 .my-identity button.primary:hover {
   background: var(--allow);
+}
+.my-identity button.primary:active {
+  background: var(--allow-strong);
 }
 .foot-sep {
   color: var(--ink-faint);
@@ -1586,6 +1738,7 @@ body {
   cursor: pointer;
   padding: 2px var(--space-1);
   border-radius: var(--radius-sm);
+  transition: background var(--motion-fast) var(--ease), color var(--motion-fast) var(--ease);
 }
 #msg-close:hover {
   background: var(--surface-3);
@@ -1621,9 +1774,15 @@ body {
   padding: var(--space-2) 10px;
   font: inherit;
   max-height: 96px;
+  transition: border-color var(--motion-fast) var(--ease), box-shadow var(--motion-fast) var(--ease);
 }
 #msg-input::placeholder {
   color: var(--ink-faint);
+}
+#msg-input:focus-visible {
+  border-color: var(--signal-hairline);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--signal-glow-soft);
 }
 #msg-send {
   flex: 0 0 auto;
@@ -1635,7 +1794,11 @@ body {
   color: #fff;
   cursor: pointer;
   font: inherit;
+  transition: background var(--motion-fast) var(--ease);
 }
 #msg-send:hover {
   background: var(--allow);
+}
+#msg-send:active {
+  background: var(--allow-strong);
 }
