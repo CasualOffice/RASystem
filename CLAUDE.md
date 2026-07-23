@@ -699,7 +699,9 @@ casual-ras/
 | `docs/19_CROSS_PLATFORM_HOST_RESEARCH.md` | Linux/Windows capture·input·encode·build survey + permissive recommended stack (Inv 18 license verdicts) |
 | `docs/20_FEATURE_GAPS_AND_ROADMAP.md` | Where we lapse vs incumbents (clipboard/file/audio/multi-monitor/cursor/chat/whiteboard/auto-update/…) + safe designs + priority, from a 5-stream cross-device research sweep |
 | `docs/21_PRODUCTION_READINESS_BACKLOG.md` | Prioritized production-grade gap backlog (P0/P1) benchmarked vs incumbents; graded on production behavior not loopback-green |
-| `docs/22_LEARNINGS_TRACKER.md` | **Study-only research learnings (RustDesk/ecosystem: Wayland input, cursor, capture exclusion, latency) + the half-done-implementation fix tracker (☐/◐/☑)** |
+| `docs/22_LEARNINGS_TRACKER.md` | **Study-only research learnings (RustDesk/ecosystem: Wayland input, cursor, capture exclusion, latency, cross-OS input parity) + the half-done-implementation fix tracker (☐/◐/☑)** |
+| `docs/23_OPEN_WORK_TRACKER.md` | Post-alpha open work: feature gaps, tech debt, engineering backlog with fixability tags + the input/cursor rollback record |
+| `docs/24_UI_UX.md` | **UI/UX design system + plan: tokens, the color-semantics rule, component/a11y requirements, the P0 backlog with live status, phased roadmap** |
 | `docs/design/phase-<n>-design.md` | Per-phase design notes (written at each phase's design gate) |
 
 ---
