@@ -22,7 +22,7 @@ mod imp {
 
     use ras_media::{
         CaptureOptions, CapturedFrame, ColorSpace, CpuBgraFrame, MediaError, PlatformSurface,
-        StreamConfig, SurfaceKind, VideoCodec, VideoTransportKind,
+        RemoteDisplayBounds, StreamConfig, SurfaceKind, VideoCodec, VideoTransportKind,
     };
     use ras_protocol::{ErrorCode, RasError};
     use scap::capturer::{Capturer, Options, Resolution};
@@ -339,6 +339,29 @@ mod imp {
 
         fn config(&self) -> StreamConfig {
             self.config
+        }
+
+        /// The captured region's bounds, in the SAME pixel space the viewer normalizes coordinates
+        /// against (the canvas is sized to `StreamConfig.width/height`). Origin is assumed `(0, 0)` —
+        /// correct for the documented single-display MVP scope — because `scap::targets::Display`
+        /// carries no logical-position fields on Linux/Windows (unlike macOS's `SCDisplay.frame()`), so
+        /// there is no per-monitor origin to report.
+        ///
+        /// Before this override the trait default (`None`) meant the host's input backend NEVER
+        /// received display bounds on Linux/Windows (no `LifecycleEvent::CaptureGeometry`), so
+        /// `set_display_bounds` was never called and XTEST/uinput fell back to the X root window's
+        /// queried screen size / the compositor's default axis range — which can differ sharply from
+        /// the actual captured pixel dimensions under multi-monitor layouts or display scaling. That
+        /// mismatch between "what the viewer normalizes against" and "what the host injects into" is
+        /// the reported huge cursor-position/scaling bug on Linux. Reporting the real captured pixel
+        /// size here closes that gap.
+        fn captured_bounds(&self) -> Option<RemoteDisplayBounds> {
+            Some(RemoteDisplayBounds {
+                x: 0,
+                y: 0,
+                width: self.config.width,
+                height: self.config.height,
+            })
         }
 
         fn stop(&mut self) {

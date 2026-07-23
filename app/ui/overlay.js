@@ -1,9 +1,13 @@
-// Casual RAS host — remote-pointer overlay.
+// Casual RAS host — always-on-top overlay.
 //
-// A transparent, click-through, always-on-top canvas covering the screen. It draws the connected
-// controller's pointer ("look here") from `pointer` events the Rust side emits to this window.
-// Coordinates are normalized 0..=65535 over the shared frame (the whole display), so we map them
-// straight to the overlay. This never receives input (the window is click-through) — purely visual.
+// A transparent, click-through, always-on-top canvas covering the screen. It renders the
+// always-visible "remote active" indicator badge (Invariant 7) and mirrors the viewer's annotation
+// strokes onto the host's shared display. This never receives input (the window is click-through) —
+// purely visual.
+//
+// Does NOT render a separate remote-pointer ("look here") cursor: the host's own OS cursor is already
+// baked into the captured video (one cursor, ADR-100), so drawing a second cursor-like arrow here read
+// as a confusing "multi cursor" artifact on the host (reported on Linux) — removed.
 
 const { listen } = window.__TAURI__.event;
 
@@ -51,15 +55,6 @@ function fit() {
 }
 fit();
 window.addEventListener("resize", fit);
-
-// Latest pointer state; `at` is used to fade out if updates stop arriving.
-let ptr = { x: 0, y: 0, visible: false, at: 0 };
-const STALE_MS = 2000;
-
-listen("pointer", (e) => {
-  const p = e.payload;
-  ptr = { x: p.x, y: p.y, visible: !!p.visible, at: performance.now() };
-});
 
 // ── Annotations mirrored from the viewer (ADR-097) ──────────────────────────────────────────────
 // The viewer's markup, rendered on the host's shared display. Points are normalized 0..=65535 over
@@ -122,44 +117,11 @@ function drawAnnot(s) {
   g.globalAlpha = 1;
 }
 
-function draw(now) {
+function draw() {
   g.clearRect(0, 0, cv.width, cv.height);
-  // Viewer annotations first, so the live pointer cursor draws on top of them.
+  // Viewer annotations onto the host's shared display. No remote-pointer cursor is drawn here — the
+  // host's own OS cursor (baked into the capture) is the single cursor.
   for (const s of annotStrokes) drawAnnot(s);
-  const fresh = now - ptr.at < STALE_MS;
-  if (ptr.visible && fresh) {
-    const px = (ptr.x / 65535) * cv.width;
-    const py = (ptr.y / 65535) * cv.height;
-    const s = dpr;
-
-    // Pulsing ring to draw the eye.
-    const pulse = 1 + 0.25 * Math.sin(now / 200);
-    g.beginPath();
-    g.arc(px, py, 16 * s * pulse, 0, Math.PI * 2);
-    g.strokeStyle = "rgba(255,59,48,0.9)";
-    g.lineWidth = 3 * s;
-    g.stroke();
-
-    // Arrow cursor.
-    g.beginPath();
-    g.moveTo(px, py);
-    g.lineTo(px + 22 * s, py + 8 * s);
-    g.lineTo(px + 10 * s, py + 11 * s);
-    g.lineTo(px + 8 * s, py + 22 * s);
-    g.closePath();
-    g.fillStyle = "#ff3b30";
-    g.fill();
-    g.strokeStyle = "#fff";
-    g.lineWidth = 1.5 * s;
-    g.stroke();
-
-    // Label.
-    g.font = `${13 * s}px ui-sans-serif, system-ui, sans-serif`;
-    g.fillStyle = "rgba(0,0,0,0.6)";
-    g.fillRect(px + 24 * s, py + 18 * s, 58 * s, 20 * s);
-    g.fillStyle = "#fff";
-    g.fillText(controlling ? "control" : "viewer", px + 30 * s, py + 32 * s);
-  }
   requestAnimationFrame(draw);
 }
 requestAnimationFrame(draw);
