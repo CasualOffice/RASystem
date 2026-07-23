@@ -3062,6 +3062,29 @@ fn stop_active_share(handle: &tauri::AppHandle) -> bool {
     }
 }
 
+/// Take the active VIEWER (Connect role) session, if any, out of `AppState` — the window-close/exit
+/// counterpart to `stop_active_share`. Kept synchronous (this runs from the plain `RunEvent` closure,
+/// which has no async context) so the caller can `.await` the returned session's graceful
+/// `controller.disconnect(...)` from a spawned task, mirroring `disconnect` the Tauri command.
+///
+/// Before this existed, `stop_active_share` was the ONLY teardown `CloseRequested`/`ExitRequested` ran
+/// — it only ever looked at the Share role's session, never `state.session` (the Connect/viewer role).
+/// So closing the app window while actively VIEWING/CONTROLLING someone else's screen killed the
+/// process immediately with no `Bye` ever sent: the host saw a bare transport drop rather than a clean
+/// disconnect, and per ADR-056/091 that is the *Suspended* (transient network loss) path, not
+/// *Terminated* — the host's screen would sit frozen on the reconnect window (or the lease could
+/// outlive the vanished controller) instead of ending cleanly. Clicking the in-app "Disconnect" button
+/// already did the right thing (it calls exactly this same `controller.disconnect`); only the
+/// window-close path was missing it.
+fn take_active_connection(handle: &tauri::AppHandle) -> Option<ConnectedSession> {
+    use tauri::Manager;
+    let state = handle.state::<AppState>();
+    // Take in its own statement so the `MutexGuard` temporary drops at the `;` (before `state`),
+    // matching `stop_active_share`'s pattern just above.
+    let session = lock(&state.session).take();
+    session
+}
+
 fn main() {
     // WebKitGTK's DMABUF renderer crashes or paints white artifacts on many Linux
     // GPU/driver/compositor combinations — a well-known Tauri-on-Linux failure, and worse here
@@ -3319,24 +3342,35 @@ fn main() {
         .expect("error while building Casual RAS")
         .run(|handle, event| match &event {
             // Closing the `main` window — the sole home of the in-app REMOTE-ACTIVE indicator and the
-            // Stop button — must halt any active share (Invariant 7). The always-on-top `overlay` window
-            // would otherwise keep the process (and the detached capture→stream loop) alive with no
-            // visible indicator. Stop first (synchronous, in-process), then exit so no headless share
-            // lingers. `ExitRequested` covers Cmd-Q / quit-menu paths for the same reason.
+            // Stop button — must halt any active share (Invariant 7) AND gracefully end any active
+            // viewer connection (the other side must see a clean disconnect, never a bare transport
+            // drop that reads as a freeze/still-in-control — see `take_active_connection`). The
+            // always-on-top `overlay` window would otherwise keep the process (and a detached
+            // capture→stream loop) alive with no visible indicator. Tear down first (in-process), then
+            // exit so nothing lingers headless. `ExitRequested` covers Cmd-Q / quit-menu paths for the
+            // same reason.
             tauri::RunEvent::WindowEvent {
                 label,
                 event: tauri::WindowEvent::CloseRequested { .. },
                 ..
             } if label.as_str() == "main" => {
-                if stop_active_share(handle) {
-                    // A share was live. Let the window close, but keep the process alive briefly so the
-                    // detached `run_share` task can observe the stop and flush its `Bye{Revoked}` + audit
-                    // to the viewer before we exit — the task isn't joined by `exit`, so an immediate
-                    // `exit(0)` would race it and the viewer would see a bare transport drop. The grace is
-                    // well above the host's internal `BYE_FLUSH_GRACE` (~50 ms). Capture stops regardless
-                    // (the stop signal halts the media pump; process exit is the backstop).
+                let shared = stop_active_share(handle);
+                let connection = take_active_connection(handle);
+                if shared || connection.is_some() {
+                    // Let the window close, but keep the process alive briefly so the graceful
+                    // teardown(s) below can actually reach the wire before we exit — the detached
+                    // `run_share` task isn't joined by `exit`, and `controller.disconnect` is async, so
+                    // an immediate `exit(0)` would race both and the other side would see a bare
+                    // transport drop instead of a clean `Bye`. The grace is well above the host's
+                    // internal `BYE_FLUSH_GRACE` (~50 ms). Capture/media stop regardless (the stop
+                    // signal halts the pump; process exit is the backstop).
                     let h = handle.clone();
                     tauri::async_runtime::spawn(async move {
+                        if let Some(s) = connection {
+                            s.controller
+                                .disconnect(ras_core::StopReason::UserRequested)
+                                .await;
+                        }
                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                         h.exit(0);
                     });
@@ -3346,6 +3380,16 @@ fn main() {
             }
             tauri::RunEvent::ExitRequested { .. } => {
                 stop_active_share(handle);
+                // Best-effort: same reasoning as CloseRequested, but ExitRequested doesn't grant a delay
+                // window to await this in — fire it and hope the runtime gets a slice before the process
+                // actually exits (matches the existing best-effort posture of the share-stop call above).
+                if let Some(s) = take_active_connection(handle) {
+                    tauri::async_runtime::spawn(async move {
+                        s.controller
+                            .disconnect(ras_core::StopReason::UserRequested)
+                            .await;
+                    });
+                }
             }
             _ => {}
         });
