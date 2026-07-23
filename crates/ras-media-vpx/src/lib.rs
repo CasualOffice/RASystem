@@ -528,7 +528,10 @@ impl ras_media::VideoEncoderBackend for VpxEncoder {
                 pts,
                 1,
                 flags,
-                ffi::VPX_DL_REALTIME as ffi::vpx_enc_deadline_t,
+                // Cast to the deadline param's type INFERRED from the fn signature: libvpx 1.15+ names it
+                // `vpx_enc_deadline_t`, but 1.14 (Ubuntu) has no such typedef and uses plain `c_ulong`.
+                // `as _` compiles against both instead of a version-specific type name (CI-caught: #5).
+                ffi::VPX_DL_REALTIME as _,
             )
         };
         if rc != ffi::vpx_codec_err_t::VPX_CODEC_OK {
