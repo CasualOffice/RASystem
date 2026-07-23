@@ -182,6 +182,31 @@ jobs:
           releaseDraft: true
           prerelease: true
 
+      # Safety net for issue #3 (a real user's Ubuntu 22.04 install failed outright: "GLIBC_2.39 not
+      # found"). Root cause: the FIRST build used `ubuntu-latest` (silently == 24.04/glibc 2.39) before
+      # `1c10e06` pinned this job to `ubuntu-22.04` (glibc 2.35) specifically to fix it — but THREE DAYS
+      # LATER `6d158a9` added the `pipewire-debian/pipewire-upstream` PPA (to get a newer PipeWire than
+      # 22.04 ships) via `add-apt-repository` + `apt-get install`, and a third-party PPA can transitively
+      # pull in a newer `libc6` as a package dependency, silently raising the glibc floor the FINAL LINK
+      # of `casual-ras` itself picks up — reintroducing the exact symptom the pin was meant to prevent.
+      # Rather than trust that this hasn't happened (unverifiable without a real 22.04 box), fail the
+      # build outright if the produced binary needs glibc newer than 22.04 ships, so this class of
+      # regression can never ship silently again — matching the release notes' own "glibc 2.35+" claim.
+      - name: Verify the Linux binary's glibc floor (Ubuntu 22.04 = 2.35, issue #3)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          BIN="app/src-tauri/target/release/casual-ras"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::expected binary not found at $BIN — update this path if the crate/target changed"
+            exit 1
+          fi
+          MAXVER=$(objdump -T "$BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -V | tail -1)
+          echo "Highest GLIBC symbol version required by casual-ras: $MAXVER (Ubuntu 22.04 provides 2.35)"
+          if [ "$(printf '%s\n2.35\n' "$MAXVER" | sort -V | tail -1)" != "2.35" ]; then
+            echo "::error::casual-ras requires glibc $MAXVER, newer than Ubuntu 22.04's 2.35 — it will fail to even start there (issue #3's exact error). A transitive dependency (check the pipewire-debian PPA packages first) is pulling in a newer glibc."
+            exit 1
+          fi
+
   # Supply-chain artifacts: a CycloneDX SBOM + a full third-party license notices file for the exact
   # dependency tree shipped in this release, attached to the GitHub release. Runs AFTER `build` (so the
   # release exists to upload to) and only if the `gate` passed. A failure here never un-publishes the
