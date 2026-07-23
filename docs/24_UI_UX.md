@@ -84,17 +84,18 @@ Every interactive component (shipped in `94666f2`) defines all four states off t
 
 | # | P0 | Status |
 |---|---|---|
-| 1 | Bound the relay wait (~10s) + spinner + P2P/retry fallback (no hang) | ◐ logic-UX workflow |
-| 2 | Semantic share-status state machine (typed states, not raw strings) + permission-denied recovery | ◐ logic-UX workflow |
-| 3 | Permission orchestrator screen (Screen-Recording/Accessibility, per-grant state + Open Settings) | ◐ logic-UX workflow |
-| 4 | Take-control **terminal outcome** (Granted/Denied/Timed-out from host events; no silent revert) | ◐ logic-UX workflow |
-| 5 | Style the reconnect banner (teal border + glow, legible on dark) | ☑ CSS `94666f2` (+ logic wire) |
-| 6 | File-transfer **sender** countdown mirror + typed rejections | ◐ logic-UX workflow |
+| 1 | Bound the relay wait (~10s) + spinner + P2P/retry fallback (no hang) | ☑ `d57c3a0` |
+| 2 | Semantic share-status state machine (typed states, not raw strings) + permission-denied recovery | ☑ `d57c3a0` |
+| 3 | Permission orchestrator (macOS `CGPreflightScreenCaptureAccess`, honest error + Open Settings) | ☑ `d57c3a0` |
+| 4 | Take-control **terminal outcome** (Granted/Denied/Timed-out; no silent revert) | ☑ `d57c3a0` |
+| 5 | Style the reconnect/live banner (teal border + glow, legible on dark) | ☑ `94666f2` |
+| 6 | File-transfer **sender** countdown mirror + typed rejections | ☑ `d57c3a0` |
 | 7 | **Fix inverted color semantics** (view/control → teal; red = stop; amber = pending) | ☑ `6818e26` |
-| 8 | Presence **three-state** dot (online / offline / checking) + honest banner if gossip down | ◐ logic-UX workflow |
+| 8 | Presence **three-state** dot (online / offline / checking) | ☑ `d57c3a0` |
 
-Legend: ☑ shipped · ◐ in progress · ☐ not started. Full feature-by-feature table + the two annotated
-user journeys ("Share my screen", "Connect + take control") live in the design Artifact.
+Legend: ☑ shipped (off-device; on-device-verify-pending) · ◐ in progress · ☐ not started. **All P0s
+shipped at the code level.** Full feature-by-feature table + the two annotated user journeys ("Share my
+screen", "Connect + take control") live in the design Artifact.
 
 ---
 
