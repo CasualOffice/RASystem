@@ -17,6 +17,7 @@ publish = false
 [dependencies]
 ras-media = { path = "../ras-media" }
 ras-protocol = { path = "../ras-protocol" }
+log = "0.4"
 
 # scap covers linux/windows/macos; on any other target this crate is empty (keeps builds green).
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]

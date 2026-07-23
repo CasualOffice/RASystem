@@ -368,12 +368,51 @@ mod imp {
             if let Some(mut running) = self.running.take() {
                 running.stop.store(true, Ordering::SeqCst);
                 running.shared.cv.notify_all();
-                // Detach: scap's blocking pull can't be interrupted mid-wait, so we don't join. The
-                // thread exits when its next frame arrives (or the channel closes) and sees `stop`.
-                let _ = running.handle.take();
+                // Bounded join (task #15): `capturer.get_next_frame()` blocks on scap's internal
+                // channel with no timeout/cancellation the capturer thread can observe mid-wait, so we
+                // cannot force an instant stop — but we CAN wait a real, bounded amount for the common
+                // case (any screen activity within the window) so `capturer.stop_capture()` actually
+                // runs and releases the OS capture session (PipeWire stream / portal session / WGC
+                // session) BEFORE the next `start()` builds a second one. Detaching unconditionally (as
+                // this used to do) let a still-live old session overlap a freshly-built new one on a
+                // fast stop→restart — a real resource leak / potential duplicate-portal-prompt on
+                // Linux. `JoinHandle` has no `join_timeout`, so poll `is_finished()`.
+                if let Some(handle) = running.handle.take() {
+                    let deadline = Instant::now() + STOP_JOIN_TIMEOUT;
+                    let finished = wait_until_finished(|| handle.is_finished(), deadline);
+                    if finished {
+                        let _ = handle.join(); // clean: capturer.stop_capture() has already run
+                    } else {
+                        // Genuinely stalled (e.g. a static screen with no frame in the window, so the
+                        // capture thread is still blocked inside get_next_frame and hasn't reached its
+                        // stop check). Content-free (Inv 8): no OS error text. We cannot wait forever
+                        // without hanging Stop/Share-restart, so detach here as the last resort — the
+                        // thread will still tear down cleanly once a frame does arrive.
+                        log::warn!(
+                            "scap capture: old capture thread did not stop within {:?} (screen likely static) — detaching; it will still tear down once a frame arrives",
+                            STOP_JOIN_TIMEOUT
+                        );
+                    }
+                }
             }
             self.current = None;
         }
+    }
+
+    /// How long [`ScapCapture::stop`] waits for the capture thread to observe `stop` and call
+    /// `capturer.stop_capture()` before giving up and detaching it (task #15). Long enough to cover a
+    /// screen with any real activity (a frame every ~1/fps at minimum); short enough that Stop/a
+    /// Share-restart stays responsive rather than hanging on a stalled capturer.
+    const STOP_JOIN_TIMEOUT: Duration = Duration::from_millis(1500);
+
+    /// Poll `is_finished` until it reports done or `deadline` passes, returning which happened.
+    /// Extracted as a pure function (injectable predicate, no real `JoinHandle`) purely so the timeout
+    /// logic itself is unit-testable without spawning a real thread.
+    fn wait_until_finished(mut is_finished: impl FnMut() -> bool, deadline: Instant) -> bool {
+        while !is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        is_finished()
     }
 
     /// Record why startup failed and wake any `start` waiter so it fails fast (instead of hitting
@@ -477,6 +516,51 @@ mod imp {
         // Teardown: scap's `stop_capture` can `expect`/`join` internally (Linux joins the pipewire
         // thread). Contain any unwind so shutdown never aborts the process.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| capturer.stop_capture()));
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn wait_until_finished_returns_true_once_the_predicate_flips() {
+            let mut calls = 0u32;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let finished = wait_until_finished(
+                || {
+                    calls += 1;
+                    calls >= 3
+                },
+                deadline,
+            );
+            assert!(
+                finished,
+                "should report finished once the predicate flips true"
+            );
+            assert!(calls >= 3);
+        }
+
+        #[test]
+        fn wait_until_finished_gives_up_at_the_deadline() {
+            let deadline = Instant::now() + Duration::from_millis(60);
+            let finished = wait_until_finished(|| false, deadline);
+            assert!(
+                !finished,
+                "a predicate that never flips must time out, never hang"
+            );
+        }
+
+        #[test]
+        fn wait_until_finished_is_immediate_when_already_finished() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let start = Instant::now();
+            let finished = wait_until_finished(|| true, deadline);
+            assert!(finished);
+            assert!(
+                start.elapsed() < Duration::from_millis(50),
+                "an already-finished predicate must not sleep at all"
+            );
+        }
     }
 }
 

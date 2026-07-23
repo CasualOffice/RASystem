@@ -5552,6 +5552,7 @@ dependencies = [
 name = "ras-media-scap"
 version = "0.0.1"
 dependencies = [
+ "log",
  "ras-media",
  "ras-protocol",
  "scap",
