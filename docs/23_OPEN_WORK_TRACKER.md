@@ -35,7 +35,7 @@
 
 | # | Item | Fixability | State | Notes |
 |---|------|-----------|-------|-------|
-| 4.1 | **Capture stop/restart thread + resource lifecycle** (task #15) | `CODE-NOW`→`DEVICE` | ☐ | Clean teardown/re-init of the capture thread across stop→restart; partly host-verifiable (macOS). |
+| 4.1 | **Capture stop/restart thread + resource lifecycle** (task #15) | `CODE-NOW`→`DEVICE` | ◐ | DONE (off-device). `ScapCapture::stop` (Linux/Windows) now bounded-joins the capture thread (1.5s) instead of unconditionally detaching it, so `stop_capture()` runs and the OS session releases before the next `start()` — was a real leak-on-fast-restart risk. macOS's `stop_capture_blocking` was already correct (SCK completion handler + `recv_timeout`). 3 new unit tests on the extracted pure timeout logic. On-device: confirm no duplicate-portal-prompt on a real Linux stop→restart cycle. |
 | 4.2 | **Concurrent per-frame stream drain** (task #24, receiver-side HOL) | `BIG-NET` | ◐ | DONE (off-device). `VideoSource` drains up to 8 per-frame QUIC streams concurrently (`tokio::task::JoinSet`), strictly frame_id-ordered delivery, a time-based `GAP_GRACE` (120ms) distinguishes a slow concurrent read from a real loss (a count-based watch deadlocks under real loss — caught + fixed pre-landing). 28 tests, repeated for flakiness. On-device: `GAP_GRACE` needs tuning against real WAN/lossy-network RTT/reordering. |
 | 4.3 | **Windows on-device run** (task #18) | `HW` | ☐ | Blocked: team has no Windows hardware. CI-compile-gated only. |
 | 4.4 | **Adaptive codec / SVC (VP8/VP9)** for low-bandwidth (task #21) | `FUTURE` | ☐ | Deliberately deferred; H.264/WebCodecs is the current coherent path. |
