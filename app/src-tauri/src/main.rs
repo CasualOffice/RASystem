@@ -73,8 +73,18 @@ struct AppState {
     /// One running presence task per saved contact, keyed by contact id. Dropping a handle aborts that
     /// contact's beacon loop and leaves its topic — so add/remove/block spawn/drop a single task. `Arc`
     /// so a spawned subscribe task can insert its handle once `spawn_presence` resolves.
+    ///
+    /// Value is `Option<PresenceHandle>`: a synchronous `None` reservation is inserted the instant a
+    /// spawn is decided on (before the `await`), so a second concurrent `spawn_presence_for` for the
+    /// same contact sees the key present and returns immediately instead of racing its own subscribe —
+    /// closing the check-then-spawn window that could otherwise silently drop one task's handle.
     presence_handles: Arc<
-        Mutex<std::collections::HashMap<ras_identity::ContactId, ras_signal::net::PresenceHandle>>,
+        Mutex<
+            std::collections::HashMap<
+                ras_identity::ContactId,
+                Option<ras_signal::net::PresenceHandle>,
+            >,
+        >,
     >,
 }
 
@@ -750,9 +760,18 @@ fn spawn_presence_for(state: &AppState, contact: ras_identity::ContactId) {
     if contact == me {
         return;
     }
+    // Reserve the slot synchronously (before the subscribe `await` below): insert a `None` placeholder
+    // now, atomically with the presence check, so a second concurrent call for the same contact sees
+    // the key already present and returns here — closing the race where both callers could pass the
+    // check before either inserted (the earlier `or_insert`-after-await pattern let that happen and
+    // silently dropped the losing task's handle, aborting its beacon loop).
     match state.presence_handles.lock() {
-        Ok(handles) if handles.contains_key(&contact) => return,
-        Ok(_) => {}
+        Ok(mut handles) => {
+            if handles.contains_key(&contact) {
+                return;
+            }
+            handles.insert(contact, None);
+        }
         Err(_) => return,
     }
     // The contact id IS its endpoint id / pubkey (ADR-092/093), so it bootstraps the pairwise topic.
@@ -776,12 +795,22 @@ fn spawn_presence_for(state: &AppState, contact: ras_identity::ContactId) {
         {
             Ok(handle) => {
                 if let Ok(mut map) = handles.lock() {
-                    // Guard against a racing add/unblock inserting first: keep the earliest, drop ours.
-                    map.entry(contact).or_insert(handle);
+                    // Fill our own reservation. Use the entry so a `remove`/`block` that ran while we
+                    // were awaiting (and thus dropped our `None` placeholder) is respected: only insert
+                    // if the key is still present, otherwise drop the handle we just made (stop wins).
+                    if let std::collections::hash_map::Entry::Occupied(mut e) = map.entry(contact) {
+                        e.insert(Some(handle));
+                    }
                 }
             }
             // FAIL-SAFE: presence for this one contact just doesn't start; everything else runs.
-            Err(e) => log::warn!("presence: subscribe failed for a contact: {:?}", e.code),
+            // Release the reservation so a later retry (e.g. re-add) isn't blocked forever by a `None`.
+            Err(e) => {
+                if let Ok(mut map) = handles.lock() {
+                    map.remove(&contact);
+                }
+                log::warn!("presence: subscribe failed for a contact: {:?}", e.code);
+            }
         }
     });
 }

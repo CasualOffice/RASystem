@@ -120,7 +120,7 @@
       <div id="share-status-container">
         <div id="share-relay-spinner" class="relay-spinner" hidden>
           <span class="spinner-ring" aria-hidden="true"></span>
-          <span id="share-relay-spinner-text">Contacting relay… (10s)</span>
+          <span id="share-relay-spinner-text">Contacting relay…</span>
         </div>
         <div id="share-permissions" hidden></div>
         <p id="share-status" class="status">Preparing…</p>
@@ -278,6 +278,9 @@
       </div>
       <div id="banner" hidden>● LIVE — viewing remote screen</div>
       <div id="reconnect-banner" hidden>⟳ Connection lost — reconnecting…</div>
+      <!-- Honest, non-fatal disclosure when this webview engine can't decode the shared audio (video is
+           unaffected — this is not the fatal-error overlay). Capability message only (Inv 8). -->
+      <div id="audio-unavailable-banner" class="warning-banner" hidden role="status"></div>
       <div id="conn-stats" hidden></div>
 
       <!-- File-send progress card (sender side). Slides in from the corner; never covers the video. -->

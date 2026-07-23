@@ -791,9 +791,9 @@ impl VideoFrameHeader {
 /// emergency-stop path (the load-bearing latency invariant, Inv 4). If the path can't keep up the
 /// channel fills and frames are dropped at the source — never queued unbounded.
 ///
-/// Caveat (receive side): [`VideoSource`] currently drains the accepted streams *serially*, so under
-/// packet loss a stalled frame delays the already-arrived frames behind it — a known video-smoothness
-/// limitation (NOT a control/stop regression). See [`VideoSource`] for the deferred concurrent-drain fix.
+/// Receive side: [`VideoSource`] drains accepted streams *concurrently* (bounded), so a
+/// stalled/retransmitting frame does not delay delivery of already-arrived frames behind it — see
+/// [`VideoSource`] for the concurrent-drain design.
 pub struct VideoSink {
     tx: mpsc::Sender<EncodedFrame>,
 }
@@ -846,28 +846,62 @@ impl VideoSink {
     }
 }
 
-/// Controller-side droppable video receiver (`PerFrameStream`). Accepts one uni stream per frame,
-/// reads it to the FIN, and reconstructs the [`EncodedFrame`]. Loss is first-class and non-fatal: a
+/// How many per-frame uni streams [`VideoSource`] will accept and read **concurrently**. Bounded
+/// (not an unbounded accept-ahead) so a burst of streams cannot grow memory/task count without
+/// limit; a handful of frames' worth of lookahead is enough to absorb one stalled/retransmitting
+/// stream without letting the already-arrived frames behind it wait on it (see [`VideoSource`]).
+pub const MAX_IN_FLIGHT_STREAMS: usize = 8;
+
+/// Grace window a gap candidate gets before [`VideoSource`] reports it as a real
+/// [`VideoEvent::FrameDropped`]: once a higher `frame_id` finishes ahead of `next_expected`,
+/// `expected` has this long (from that moment) to still show up before the gap is declared.
+/// Chosen as a generous multiple of a typical same-region RTT (low tens of ms) so an ordinary
+/// reordering race resolves within the window without a false drop, while a genuinely lost frame is
+/// still reported promptly (a fraction of one 60fps frame interval's worth of frames, not seconds).
+pub const GAP_GRACE: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// Controller-side droppable video receiver (`PerFrameStream`). Accepts up to
+/// [`MAX_IN_FLIGHT_STREAMS`] per-frame uni streams **concurrently**, reads each to the FIN
+/// independently, and reconstructs the [`EncodedFrame`]s. Loss is first-class and non-fatal: a
 /// `frame_id` gap (the host dropped that frame at the source under congestion) surfaces as a
 /// [`VideoEvent::FrameDropped`] *before* the next frame, so `ras-core` can coalesce a run of drops
 /// into one keyframe request instead of freezing. The decoder owns final reorder-by-`frame_id`.
 ///
-/// **Known limitation — serial drain (deferred fix).** [`recv`](Self::recv) accepts and fully reads one
-/// stream before touching the next, so QUIC's *transport*-level HOL-freedom between streams is not
-/// carried through at the application layer: under packet loss, frame N's retransmit (~1 RTT) delays the
-/// already-arrived frames behind it, making delivery bursty. This is a *smoothness* cost only — control
-/// and audio ride separate planes (a bidi stream and datagrams), so the stop button and Inv 4 are
-/// unaffected, and for a P-frame codec the decoder must process in order regardless, so display latency
-/// for dependent frames is bounded by the decoder, not this read. The fix (accept-ahead into a bounded
-/// `FuturesUnordered` of per-stream reads, delivered in `frame_id` order) needs real lossy-network tuning
-/// to avoid premature keyframe requests under ordinary jitter, so it is deferred to on-device media
-/// tuning rather than implemented blind against the in-memory tests.
+/// **Concurrent drain.** [`recv`](Self::recv) keeps up to [`MAX_IN_FLIGHT_STREAMS`] `accept_uni` +
+/// read-to-completion tasks in flight at once (a [`tokio::task::JoinSet`]), so QUIC's
+/// *transport*-level HOL-freedom between streams is carried through at the application layer: a
+/// stalled/retransmitting stream (~1 RTT to recover) no longer delays accepting or reading the
+/// streams behind it. Frames that finish out of order are buffered in [`Self::completed`], keyed by
+/// `frame_id`, and delivered to the caller strictly in ascending `frame_id` order — gap detection
+/// and the [`VideoEvent::FrameDropped`] contract are byte-for-byte the same as the previous serial
+/// version; only *when a slow stream's read completes relative to a fast one* has changed, not what
+/// the caller ever observes for a given sequence of arrivals. Control and audio ride separate planes
+/// (a bidi stream and datagrams) and were never affected by this either way (Inv 4).
 pub struct VideoSource {
     conn: Connection,
     /// The next in-order `frame_id` we expect; `None` until the first frame establishes the base.
     next_expected: Option<u64>,
     /// A frame read ahead of a detected gap, returned on the call after the synthesized drop event.
     pending: Option<EncodedFrame>,
+    /// In-flight `accept_uni` + read-to-completion tasks, bounded at [`MAX_IN_FLIGHT_STREAMS`].
+    in_flight: tokio::task::JoinSet<Result<Option<EncodedFrame>, TransportError>>,
+    /// Frames whose stream finished reading but which are not yet the next one due for delivery
+    /// (either because a lower `frame_id` is still being read, or a gap ahead of them hasn't been
+    /// reported yet), keyed by `frame_id`. This is precisely where a fast frame that arrived behind
+    /// a slow one waits — briefly, not head-of-line-blocked on the slow one's *read* completing.
+    completed: std::collections::BTreeMap<u64, EncodedFrame>,
+    /// Set the moment a gap candidate is first observed (a higher `frame_id` finished and is sitting
+    /// in [`Self::completed`] while `next_expected` still hasn't shown up). A higher-numbered frame
+    /// finishing first is *not* proof `expected` is lost — with [`MAX_IN_FLIGHT_STREAMS`] reads racing
+    /// concurrently, `expected`'s own read may simply be the slower of the batch (see
+    /// `a_merely_slow_frame_is_not_falsely_reported_as_dropped`). A **count**-based "wait for the rest
+    /// of the batch to resolve" watch was tried and reverted: if the sender never sends the missing
+    /// frame(s) at all (the true-loss case — see `video_streams_frame_by_frame_over_iroh_with_gap_detection`),
+    /// the other `accept_uni` tasks block forever with no more stream traffic coming, and the count
+    /// never reaches zero — a real hang. A short **time-based** grace window has no such failure mode
+    /// (a timer always fires): `expected` gets this long, from the moment the candidate first appears,
+    /// to show up before the gap is reported as real.
+    gap_watch_deadline: Option<tokio::time::Instant>,
 }
 
 impl VideoSource {
@@ -876,57 +910,195 @@ impl VideoSource {
             conn,
             next_expected: None,
             pending: None,
+            in_flight: tokio::task::JoinSet::new(),
+            completed: std::collections::BTreeMap::new(),
+            gap_watch_deadline: None,
+        }
+    }
+
+    /// Keep [`MAX_IN_FLIGHT_STREAMS`] accept+read tasks outstanding. Each task independently accepts
+    /// the next stream and reads it to the FIN — a slow one's `read_to_end` runs concurrently with,
+    /// and never delays, the others.
+    fn top_up(&mut self) {
+        while self.in_flight.len() < MAX_IN_FLIGHT_STREAMS {
+            let conn = self.conn.clone();
+            self.in_flight.spawn(async move {
+                let mut stream = conn.accept_uni().await.map_err(|_| {
+                    RasError::recoverable(ErrorCode::TransportError, "video stream ended")
+                })?;
+                // A frame-level read/parse failure drops just this frame (`Ok(None)`) — the caller
+                // loops to the next one rather than tearing down the session.
+                let Ok(buf) = stream.read_to_end(MAX_VIDEO_FRAME).await else {
+                    return Ok(None);
+                };
+                let Some(header) = VideoFrameHeader::decode(&buf) else {
+                    return Ok(None);
+                };
+                Ok(Some(EncodedFrame {
+                    frame_id: header.frame_id,
+                    captured_at_us: header.captured_at_us,
+                    is_keyframe: header.is_keyframe,
+                    data: Bytes::copy_from_slice(&buf[VideoFrameHeader::LEN..]),
+                    config: header.config,
+                }))
+            });
         }
     }
 
     /// Await the next video event (a decoded frame or a synthesized loss). `Err` only on a terminal
     /// transport failure (the connection is gone); a malformed or oversized single frame is skipped,
-    /// not fatal.
+    /// not fatal. Streams are accepted and read concurrently (bounded), but frames are always
+    /// delivered to the caller in ascending `frame_id` order with the same gap-detection semantics as
+    /// the serial version — a gap is reported only once [`GAP_GRACE`] has passed with `expected` still
+    /// missing, never merely because a higher-numbered frame's concurrent read happened to finish
+    /// first (see `gap_watch_deadline`).
     pub async fn recv(&mut self) -> Result<VideoEvent, TransportError> {
         loop {
-            // Deliver a frame stashed behind a just-reported gap before reading more.
+            // Deliver a frame stashed behind a just-reported gap before doing anything else.
             if let Some(frame) = self.pending.take() {
                 self.next_expected = Some(frame.frame_id.wrapping_add(1));
                 return Ok(VideoEvent::Frame(frame));
             }
 
-            // Accept the next per-frame stream. A connection-level error here is terminal.
-            let mut stream = self.conn.accept_uni().await.map_err(|_| {
-                RasError::recoverable(ErrorCode::TransportError, "video stream ended")
-            })?;
+            // Drop any already-buffered frame that is now stale (behind the watermark) — it arrived
+            // out of order and lost the race, exactly as the serial version drops a late duplicate.
+            while matches!(
+                (self.completed.keys().next(), self.next_expected),
+                (Some(&lowest), Some(expected)) if lowest < expected
+            ) {
+                self.completed.pop_first();
+            }
 
-            // Read the whole access unit (bounded). A frame-level read/parse failure drops just this
-            // frame — loop to the next stream rather than tearing down the session.
-            let Ok(buf) = stream.read_to_end(MAX_VIDEO_FRAME).await else {
-                continue;
-            };
-            let Some(header) = VideoFrameHeader::decode(&buf) else {
-                continue;
-            };
-            let frame = EncodedFrame {
-                frame_id: header.frame_id,
-                captured_at_us: header.captured_at_us,
-                is_keyframe: header.is_keyframe,
-                data: Bytes::copy_from_slice(&buf[VideoFrameHeader::LEN..]),
-                config: header.config,
-            };
-
-            match self.next_expected {
-                // A gap: the source dropped frame(s) under congestion. Report one loss for the first
-                // missing id, stash this frame, and return it next call.
-                Some(expected) if frame.frame_id > expected => {
-                    self.pending = Some(frame);
-                    return Ok(VideoEvent::FrameDropped {
-                        frame_id: expected,
-                        reason: DropReason::MissingFragments,
-                    });
+            // The lowest remaining buffered frame is deliverable *right now* — either it is exactly
+            // the next expected one, or (first frame ever) there is no watermark yet. No need to wait
+            // on the network at all if a concurrent read already resolved it — this is the HOL-freedom
+            // path: a fast frame that finished behind a slow one still gets delivered without waiting
+            // for the slow one to time out.
+            if let Some(&lowest) = self.completed.keys().next() {
+                let deliverable = match self.next_expected {
+                    Some(expected) => lowest == expected,
+                    None => true,
+                };
+                if deliverable {
+                    if let Some(frame) = self.completed.remove(&lowest) {
+                        self.next_expected = Some(frame.frame_id.wrapping_add(1));
+                        self.gap_watch_deadline = None; // expected showed up; no gap after all
+                        return Ok(VideoEvent::Frame(frame));
+                    }
                 }
-                // A stale/reordered frame at or behind the watermark: drop it, keep reading.
-                Some(expected) if frame.frame_id < expected => continue,
-                // In order (or the first frame): deliver and advance.
+            }
+
+            // Keep the accept window full. A stalled one never blocks this from resolving via a
+            // faster one — `top_up` only ever adds tasks, it never awaits them.
+            self.top_up();
+
+            // Race the next stream completion against the gap-candidate deadline (if one is running).
+            // Either can resolve first: a genuinely-arriving `expected` completes its read before the
+            // grace window elapses (no false drop); a genuinely-lost `expected` never completes, so
+            // the deadline fires instead (bounded wait — cannot hang, unlike a count of outstanding
+            // tasks that may never resolve if the sender simply never sends the missing frame(s), see
+            // `video_streams_frame_by_frame_over_iroh_with_gap_detection`).
+            enum Resolved {
+                Joined(
+                    Option<
+                        Result<
+                            Result<Option<EncodedFrame>, TransportError>,
+                            tokio::task::JoinError,
+                        >,
+                    >,
+                ),
+                DeadlineElapsed,
+            }
+            let resolved = match self.gap_watch_deadline {
+                Some(deadline) => tokio::select! {
+                    biased;
+                    j = self.in_flight.join_next() => Resolved::Joined(j),
+                    () = tokio::time::sleep_until(deadline) => Resolved::DeadlineElapsed,
+                },
+                None => Resolved::Joined(self.in_flight.join_next().await),
+            };
+
+            let joined = match resolved {
+                Resolved::DeadlineElapsed => {
+                    // The grace window elapsed with `expected` still missing: the gap is real. Report
+                    // it and stash the buffered frame (still the lowest, since nothing lower than it
+                    // could have arrived without being delivered above) to hand back right after.
+                    self.gap_watch_deadline = None;
+                    let is_real_gap = matches!(
+                        (self.next_expected, self.completed.keys().next()),
+                        (Some(expected), Some(&lowest)) if lowest > expected
+                    );
+                    if is_real_gap {
+                        if let (Some(expected), Some((_, frame))) =
+                            (self.next_expected, self.completed.pop_first())
+                        {
+                            self.pending = Some(frame);
+                            return Ok(VideoEvent::FrameDropped {
+                                frame_id: expected,
+                                reason: DropReason::MissingFragments,
+                            });
+                        }
+                    }
+                    // The candidate resolved itself some other way (shouldn't normally happen given
+                    // the check above runs every loop iteration, but fail safe): just loop and keep
+                    // waiting rather than panic or report a bogus gap.
+                    continue;
+                }
+                Resolved::Joined(Some(j)) => j,
+                // `top_up` always spawns up to `MAX_IN_FLIGHT_STREAMS` (> 0), so an empty set here
+                // would mean the bound is zero — not a reachable configuration.
+                Resolved::Joined(None) => {
+                    return Err(RasError::recoverable(
+                        ErrorCode::TransportError,
+                        "video stream ended",
+                    ))
+                }
+            };
+            let frame = match joined {
+                Ok(Ok(Some(frame))) => frame,
+                // A per-frame read/parse failure: `top_up` above will replace the slot next loop.
+                Ok(Ok(None)) => continue,
+                // A terminal connection error surfaces to the caller.
+                Ok(Err(e)) => return Err(e),
+                // The task itself panicked/was cancelled: treat as a dropped connection rather than
+                // panic the receive loop.
+                Err(_) => {
+                    return Err(RasError::recoverable(
+                        ErrorCode::TransportError,
+                        "video stream ended",
+                    ))
+                }
+            };
+
+            // Mirror the serial version's gap semantics, evaluated against *this* newly finished
+            // frame (the id order streams finish reading in, which may differ from arrival order
+            // under concurrent reads): a lower/equal-but-stale id is dropped; otherwise stash it as
+            // completed (it will be delivered on the next loop iteration by the check above, whether
+            // or not something else is already buffered ahead of/behind it).
+            //
+            // Correctness note (why a higher id does NOT immediately declare a gap here, unlike the
+            // old serial version): with `MAX_IN_FLIGHT_STREAMS` reads racing concurrently, a *higher*
+            // `frame_id` can legitimately finish its read before a numerically lower one that is
+            // simply slower (not lost) — that is the entire point of the concurrent drain. Declaring
+            // `expected` dropped the instant a higher id resolves would fabricate a `FrameDropped`
+            // for a frame that is still genuinely in flight and about to complete, forcing a spurious
+            // decoder freeze + keyframe request (see `ras_core::session` `RecoverWithKeyframe`). So a
+            // higher id only starts (or extends nothing — see below) a grace-window *watch* here; the
+            // actual gap report happens when [`GAP_GRACE`] elapses, above.
+            match self.next_expected {
+                Some(expected) if frame.frame_id < expected => {} // stale: drop, loop again
+                Some(expected) if frame.frame_id > expected => {
+                    self.completed.insert(frame.frame_id, frame);
+                    // Start the deadline only once per gap candidate — a later higher arrival while
+                    // one is already running must not reset/extend it (that could stall the report
+                    // indefinitely under a steady trickle of higher frames arriving before `expected`
+                    // ever will).
+                    if self.gap_watch_deadline.is_none() {
+                        self.gap_watch_deadline = Some(tokio::time::Instant::now() + GAP_GRACE);
+                    }
+                }
                 _ => {
-                    self.next_expected = Some(frame.frame_id.wrapping_add(1));
-                    return Ok(VideoEvent::Frame(frame));
+                    self.completed.insert(frame.frame_id, frame);
                 }
             }
         }
@@ -1870,6 +2042,224 @@ mod iroh_session_tests {
             "loopback loss should be low, got {}",
             health.loss_fraction
         );
+
+        drop(sink);
+        host_ep.close().await;
+        controller.close().await;
+    }
+
+    /// Proves the concurrent-drain fix (transport-level HOL-freedom carried to the app layer): a
+    /// stalled per-frame stream must not delay delivery of a later frame whose stream arrived and
+    /// finished second. Drives raw uni streams directly (bypassing [`VideoSink`]'s all-at-once
+    /// writer) so frame 0's stream can be left open — header written, payload/FIN withheld — while
+    /// frame 1's stream is opened afterward and completed in full immediately. If [`VideoSource`]
+    /// still drained serially (accept, then `read_to_end`, one stream at a time), it would be blocked
+    /// awaiting frame 0's FIN and this test would time out. With the concurrent bounded `JoinSet`
+    /// drain, frame 1's read resolves independently and is delivered without waiting on frame 0.
+    #[tokio::test]
+    async fn a_stalled_stream_does_not_delay_a_later_frame_that_finishes_first() {
+        let host = Endpoint::bind().await.unwrap();
+        let controller = Endpoint::bind().await.unwrap();
+        let host_id = host.id();
+        let host_addrs = to_loopback(&host.bound_addrs());
+
+        let host_task = tokio::spawn(async move {
+            let session = host.accept().await.unwrap().expect("an inbound session");
+            (host, session)
+        });
+
+        let controller_session = controller
+            .connect_direct(&host_id, &host_addrs)
+            .await
+            .unwrap();
+        let mut source = controller_session
+            .video_source()
+            .expect("the controller has a video source");
+        let (host_ep, host_session) = host_task.await.unwrap();
+        let conn = host_session.connection();
+
+        // Frame 0 ("the stalled one"): open the stream and write only the header — never the
+        // payload, never `finish()`. Its `read_to_end` on the receive side will hang until we
+        // release it far below (or the test ends), exactly modeling a slow/retransmitting stream.
+        let frame0 = test_frame(0, true, b"slow-payload");
+        let mut stalled_stream = conn.open_uni().await.unwrap();
+        let header0 = VideoFrameHeader {
+            is_keyframe: frame0.is_keyframe,
+            config: frame0.config,
+            frame_id: frame0.frame_id,
+            captured_at_us: frame0.captured_at_us,
+        }
+        .encode();
+        stalled_stream.write_all(&header0).await.unwrap();
+        // Deliberately no payload write and no `finish()` here yet — the stream stays open.
+
+        // Frame 1 ("the fast one"): opened *after* frame 0's stream, but written and finished in
+        // full immediately.
+        let frame1 = test_frame(1, false, b"fast-payload");
+        let mut fast_stream = conn.open_uni().await.unwrap();
+        let header1 = VideoFrameHeader {
+            is_keyframe: frame1.is_keyframe,
+            config: frame1.config,
+            frame_id: frame1.frame_id,
+            captured_at_us: frame1.captured_at_us,
+        }
+        .encode();
+        fast_stream.write_all(&header1).await.unwrap();
+        fast_stream.write_all(&frame1.data).await.unwrap();
+        fast_stream.finish().unwrap();
+
+        // The load-bearing assertion: frame 1 arrives well within a short bound even though frame
+        // 0's stream — opened first — is still stalled open. A serial accept-then-read drain would
+        // hang here awaiting frame 0's FIN; the concurrent drain resolves frame 1's independent read
+        // instead. Frame 1 is the very first frame ever observed, so (matching the existing
+        // first-frame semantics) it establishes the watermark and is delivered directly, not
+        // reported as a gap.
+        let event = tokio::time::timeout(Duration::from_secs(5), source.recv())
+            .await
+            .expect("frame 1 must be delivered promptly, not blocked behind the stalled stream 0");
+        match event.unwrap() {
+            VideoEvent::Frame(f) => {
+                assert_eq!(f.frame_id, 1);
+                assert_eq!(&f.data[..], b"fast-payload");
+            }
+            other => panic!("expected frame 1 to be delivered first, got {other:?}"),
+        }
+
+        // Now release the stalled stream: finish it late. Its frame_id (0) is behind the watermark
+        // frame 1 already established, so it is a stale/late arrival and is silently dropped — the
+        // same "drop a late duplicate" behavior the serial version has always had, just now also
+        // covering "arrived after a numerically-later frame already advanced the watermark".
+        stalled_stream.write_all(&frame0.data).await.unwrap();
+        stalled_stream.finish().unwrap();
+
+        // Send a normal, in-order frame 2 to confirm the source is healthy and still delivers
+        // correctly after the stale frame 0 resolves.
+        let sink = host_session
+            .video_sink()
+            .expect("the host has a video sink");
+        sink.send_frame(test_frame(2, false, b"payload-2")).unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), source.recv())
+            .await
+            .expect("frame 2 must arrive")
+            .unwrap()
+        {
+            VideoEvent::Frame(f) => assert_eq!(f.frame_id, 2),
+            other => panic!("expected frame 2, got {other:?}"),
+        }
+
+        drop(sink);
+        host_ep.close().await;
+        controller.close().await;
+    }
+
+    /// Regression test for a false-positive `FrameDropped`: a stream that is merely *slower* than a
+    /// later-numbered one (not actually lost) must never be reported as a gap just because the later
+    /// one's read happened to resolve first. This is the concurrency hazard the naive "declare a gap
+    /// the instant a higher id resolves" version of the concurrent drain introduced — with several
+    /// reads racing, `expected`'s own read can legitimately be the slower of the batch, and mistaking
+    /// that for loss forces a spurious decoder freeze + keyframe request on `ras-core`'s side
+    /// (`RecoverWithKeyframe`), which is worse than the serial version's bursty-but-correct delivery.
+    ///
+    /// Sequence: frame 0 establishes the watermark normally. Frame 1's stream is then opened but held
+    /// open (header only, no FIN) — modeling a temporarily slow/retransmitting stream, not a lost one.
+    /// Frame 2's stream is opened after frame 1's and completed immediately. `VideoSource` must NOT
+    /// report frame 1 as dropped while frame 1's own read is still genuinely outstanding; once frame 1
+    /// is finally released, it must be delivered as `Frame(1)` — never as a synthesized loss.
+    #[tokio::test]
+    async fn a_merely_slow_frame_is_not_falsely_reported_as_dropped() {
+        let host = Endpoint::bind().await.unwrap();
+        let controller = Endpoint::bind().await.unwrap();
+        let host_id = host.id();
+        let host_addrs = to_loopback(&host.bound_addrs());
+
+        let host_task = tokio::spawn(async move {
+            let session = host.accept().await.unwrap().expect("an inbound session");
+            (host, session)
+        });
+
+        let controller_session = controller
+            .connect_direct(&host_id, &host_addrs)
+            .await
+            .unwrap();
+        let mut source = controller_session
+            .video_source()
+            .expect("the controller has a video source");
+        let (host_ep, host_session) = host_task.await.unwrap();
+        let conn = host_session.connection();
+
+        // Frame 0: establishes the watermark normally.
+        let sink = host_session
+            .video_sink()
+            .expect("the host has a video sink");
+        sink.send_frame(test_frame(0, true, b"payload-0")).unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), source.recv())
+            .await
+            .expect("frame 0 must arrive")
+            .unwrap()
+        {
+            VideoEvent::Frame(f) => assert_eq!(f.frame_id, 0),
+            other => panic!("expected frame 0, got {other:?}"),
+        }
+
+        // Frame 1 ("merely slow, not lost"): open the stream and write only the header — hold the
+        // payload/FIN back so its read stays outstanding, exactly like the stalled-stream test above,
+        // but this time it is *not* stale when it eventually completes (it is `expected`).
+        let frame1 = test_frame(1, false, b"slow-but-arriving");
+        let mut slow_stream = conn.open_uni().await.unwrap();
+        let header1 = VideoFrameHeader {
+            is_keyframe: frame1.is_keyframe,
+            config: frame1.config,
+            frame_id: frame1.frame_id,
+            captured_at_us: frame1.captured_at_us,
+        }
+        .encode();
+        slow_stream.write_all(&header1).await.unwrap();
+
+        // Frame 2: opened after frame 1's stream, but completed in full immediately — this is the
+        // higher id that must NOT trigger an immediate false gap report for frame 1.
+        let frame2 = test_frame(2, false, b"fast-payload-2");
+        let mut fast_stream = conn.open_uni().await.unwrap();
+        let header2 = VideoFrameHeader {
+            is_keyframe: frame2.is_keyframe,
+            config: frame2.config,
+            frame_id: frame2.frame_id,
+            captured_at_us: frame2.captured_at_us,
+        }
+        .encode();
+        fast_stream.write_all(&header2).await.unwrap();
+        fast_stream.write_all(&frame2.data).await.unwrap();
+        fast_stream.finish().unwrap();
+
+        // Release frame 1 well *within* the gap-candidate grace window (`GAP_GRACE`) — modeling a
+        // stream that is merely slower than frame 2's, not actually lost. If a higher id immediately
+        // (falsely) declared the gap instead of waiting out the grace window, frame 1 would already
+        // have been reported as `FrameDropped` by the time this runs.
+        tokio::time::sleep(GAP_GRACE / 4).await;
+        slow_stream.write_all(&frame1.data).await.unwrap();
+        slow_stream.finish().unwrap();
+
+        // Frame 1 must be delivered as a genuine frame — NOT as `FrameDropped`.
+        match tokio::time::timeout(Duration::from_secs(5), source.recv())
+            .await
+            .expect("frame 1 must eventually arrive")
+            .unwrap()
+        {
+            VideoEvent::Frame(f) => {
+                assert_eq!(f.frame_id, 1);
+                assert_eq!(&f.data[..], b"slow-but-arriving");
+            }
+            other => panic!("frame 1 arrived but was falsely reported as lost: {other:?}"),
+        }
+
+        // And frame 2 follows normally.
+        match tokio::time::timeout(Duration::from_secs(5), source.recv())
+            .await
+            .expect("frame 2 must arrive")
+            .unwrap()
+        {
+            VideoEvent::Frame(f) => assert_eq!(f.frame_id, 2),
+            other => panic!("expected frame 2, got {other:?}"),
+        }
 
         drop(sink);
         host_ep.close().await;

@@ -494,12 +494,20 @@ const audioPlayer = (function () {
   }
 
   // Audio is unavailable on this engine: hide the button and note it honestly, once. Content-free.
+  // Non-fatal — video is unaffected, so this uses the small amber banner, never the video fatal-error
+  // overlay (which would wrongly imply the whole session is broken).
   function hideAudioUnsupported() {
     if (btn) btn.hidden = true;
     if (!noticedUnsupported) {
       noticedUnsupported = true;
       // eslint-disable-next-line no-console
       console.info("shared audio unavailable: this webview engine has no usable Opus decoder");
+      const banner = document.getElementById("audio-unavailable-banner");
+      if (banner) {
+        banner.textContent =
+          "Shared audio isn't available in this app's webview engine on this device. The screen share itself is unaffected.";
+        banner.hidden = false;
+      }
     }
   }
 
@@ -650,6 +658,10 @@ const audioPlayer = (function () {
       opusSupported = null; // re-probe support on the next session
       audioErrors = 0;
       noticedUnsupported = false;
+      // Clear any stale "audio unavailable" disclosure from a prior session — it re-appears honestly
+      // if the fresh session's probe fails again.
+      const banner = document.getElementById("audio-unavailable-banner");
+      if (banner) banner.hidden = true;
       // Keep the user's mute preference across reconnects within the app run; but hide the control until
       // audio flows again.
       refreshBtn();
@@ -770,6 +782,21 @@ function setLive(isLive) {
   files.setViewerLive(isLive); // the viewer can send a file only while its session is live
 }
 
+// Show a small live-progress spinner (reusing the share view's tokenized `.spinner-ring`) ahead of the
+// hud's status text, for phases that can take a visible moment (e.g. reaching a contact with no ticket
+// — ADR-093 — has to resolve presence/dial before a session even starts). Plain `hud.textContent =`
+// elsewhere clears it automatically since it replaces all children.
+function setHudBusy(text) {
+  hud.textContent = "";
+  const ring = document.createElement("span");
+  ring.className = "spinner-ring";
+  ring.setAttribute("aria-hidden", "true");
+  ring.style.marginRight = "8px";
+  ring.style.verticalAlign = "middle";
+  hud.appendChild(ring);
+  hud.appendChild(document.createTextNode(text));
+}
+
 // Start a viewer session either from a pasted `ticket` or a saved `contactId` (ticketless, ADR-093).
 // Both drive the identical decode path + the same consent-gated two-phase connect host-side.
 async function startSession(source) {
@@ -782,7 +809,11 @@ async function startSession(source) {
   channel.onmessage = onMessage;
   const onAudio = new Channel();
   onAudio.onmessage = (msg) => audioPlayer.handle(msg);
-  hud.textContent = source.contactId ? "reaching your contact…" : "connecting…";
+  if (source.contactId) {
+    setHudBusy("reaching your contact…");
+  } else {
+    hud.textContent = "connecting…";
+  }
   // Codec negotiation (Inv 9 — media capability): tell the host which codecs this webview can decode,
   // so it encodes something we can actually render (fail-safe VP9 if this list is empty).
   const viewerCodecs = await getViewerCodecPreferences();
@@ -1126,9 +1157,32 @@ listen("share-ticket", (e) => { shareTicket.value = e.payload; });
 // the token-based visuals (teal spinner while waiting, amber timed-out fallback + Retry, red on a
 // permission error + Open-Settings). Never weakens consent/indicator/Stop — purely informational.
 const shareRelaySpinner = document.getElementById("share-relay-spinner");
+const shareRelaySpinnerText = document.getElementById("share-relay-spinner-text");
 const shareRetryBtn = document.getElementById("share-retry-relay");
 const shareOpenSettingsBtn = document.getElementById("share-open-settings");
 const sharePermsPanel = document.getElementById("share-permissions");
+
+// Relay-wait countdown: purely cosmetic, client-side wall-clock only — reflects the fixed 10s bound
+// the Rust side already enforces on `endpoint.online()` (main.rs `run_share`), never invents timing
+// data. Ticks the spinner label down each second so "relay_waiting" doesn't look frozen/stuck; clamped
+// at 0 rather than going negative if the timed-out event is a beat late. Best-effort — a missed tick
+// never blocks the actual relay wait/timeout, which is entirely host-side.
+const SHARE_RELAY_WAIT_SECONDS = 10;
+let shareRelayCountdownTimer = null;
+function stopShareRelayCountdown() {
+  if (shareRelayCountdownTimer) { clearInterval(shareRelayCountdownTimer); shareRelayCountdownTimer = null; }
+}
+function startShareRelayCountdown() {
+  stopShareRelayCountdown();
+  if (!shareRelaySpinnerText) return;
+  let remaining = SHARE_RELAY_WAIT_SECONDS;
+  shareRelaySpinnerText.textContent = "Contacting relay… (" + remaining + "s)";
+  shareRelayCountdownTimer = setInterval(() => {
+    remaining = Math.max(0, remaining - 1);
+    shareRelaySpinnerText.textContent = "Contacting relay… (" + remaining + "s)";
+    if (remaining <= 0) stopShareRelayCountdown();
+  }, 1000);
+}
 
 // Per-grant state, keyed by permission name (Screen Recording / Accessibility).
 const sharePermGrants = new Map();
@@ -1143,6 +1197,7 @@ if (shareRetryBtn) {
     try { await invoke("stop_sharing"); } catch (_) {}
     // Re-show the waiting spinner immediately; the fresh `run_share` re-emits `share-state` shortly.
     if (shareRelaySpinner) shareRelaySpinner.hidden = false;
+    startShareRelayCountdown();
     shareStatus.classList.remove("relay-timed-out", "permission-denied");
     invoke("start_sharing").catch((e) => { shareStatus.textContent = "Retry failed: " + e; });
   });
@@ -1201,10 +1256,12 @@ listen("share-state", (e) => {
   if (shareRelaySpinner) shareRelaySpinner.hidden = true;
   if (shareRetryBtn) shareRetryBtn.hidden = true;
   if (shareOpenSettingsBtn) shareOpenSettingsBtn.hidden = true;
+  stopShareRelayCountdown();
   shareStatus.classList.remove("relay-timed-out", "permission-denied");
   switch (kind) {
     case "relay_waiting":
       if (shareRelaySpinner) shareRelaySpinner.hidden = false;
+      startShareRelayCountdown();
       shareStatus.hidden = false;
       break;
     case "relay_timed_out":
@@ -1282,9 +1339,7 @@ listen("share-input-warning", (e) => {
   if (!el) {
     el = document.createElement("div");
     el.id = "share-input-warning";
-    el.style.cssText =
-      "background:#5a3d00;color:#ffd479;padding:10px 14px;border-radius:8px;" +
-      "margin:8px 0;font-size:13px;line-height:1.45;";
+    el.className = "warning-banner"; // tokenized amber banner (design tokens, not raw hex)
     const parent = document.getElementById("share-view") || document.body;
     parent.insertBefore(el, parent.firstChild);
   }

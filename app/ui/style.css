@@ -1173,7 +1173,7 @@ body {
 }
 /* Playing (unmuted, running) reads as active blue, matching the AUDIO SHARED disclosure hue. */
 #connectbar button#audio-btn.playing:not(:disabled) {
-  background: #123a63;
+  background: var(--info-glow-soft);
   border-color: var(--info-hairline);
   color: var(--info-ink);
 }
@@ -1184,9 +1184,9 @@ body {
 /* Autoplay blocked → an inviting amber call-to-action to click to enable sound. This is an
    attention/awaiting-action affordance → --pending (amber) is the correct role. */
 #connectbar button#audio-btn.needs-gesture:not(:disabled) {
-  background: #4a3410;
+  background: var(--pending-glow);
   border-color: var(--pending-hairline);
-  color: #ffdca0;
+  color: var(--pending);
   animation: audio-cta 1.6s ease-in-out infinite;
 }
 @keyframes audio-cta {
@@ -1742,7 +1742,7 @@ body {
 }
 #msg-close:hover {
   background: var(--surface-3);
-  color: #fff;
+  color: var(--ink);
 }
 #msg-body {
   flex: 1 1 auto;
@@ -2013,12 +2013,24 @@ body {
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   border: 1px solid var(--pending-hairline);
-  background: #3a2c00;
-  color: #ffd479;
+  background: var(--pending-glow);
+  color: var(--pending);
   font-size: var(--fs-label);
 }
 .gossip-unavailable-banner[hidden] {
   display: none;
+}
+/* Reusable tokenized amber "awaiting attention / unavailable" banner (same role/palette as
+   .gossip-unavailable-banner above) for banners built at runtime in JS — e.g. the host-side
+   OS-input-unavailable notice — so no raw hex is duplicated per call site. */
+.warning-banner {
+  background: var(--pending-glow);
+  color: var(--pending);
+  padding: 10px var(--space-3);
+  border-radius: var(--radius-md);
+  margin: var(--space-2) 0;
+  font-size: var(--fs-label);
+  line-height: 1.45;
 }
 
 @media (prefers-reduced-motion: reduce) {
