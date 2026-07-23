@@ -857,6 +857,16 @@ fn list_online(state: State<'_, AppState>) -> Vec<String> {
     }
 }
 
+/// Whether live presence checking is available (SPEC P0-1): `true` iff the gossip actor, the presence
+/// identity, and the presence keystore are all present (i.e. the always-on endpoint + gossip came up).
+/// `false` ⇒ presence is silently disabled and saved contacts will only ever show "unknown" — the UI
+/// shows an honest banner (Inv 7) rather than a misleading grey "offline". Content-free (Inv 8): a
+/// single boolean, no ids/topics/beacons.
+#[tauri::command]
+fn check_presence_available(state: State<'_, AppState>) -> bool {
+    state.gossip.is_some() && state.me.is_some() && state.presence_ks.is_some()
+}
+
 /// Connect to a **saved contact by identity — no ticket** (ADR-093). Builds an id-only target that iroh
 /// discovery resolves when the contact is online, then runs the exact same consent-gated two-phase
 /// connect as a pasted ticket (the host still validates the grant + asks its user to Allow — a contact
@@ -1470,6 +1480,14 @@ impl ras_core::ControlConsent for LocalConsent {
             Ok(Ok(true))
         );
         *lock(&self.pending_control) = None;
+        // SPEC (Take-Control): signal the terminal outcome to the *viewer* so its "Take control" button
+        // can show Denied/Timed-out instead of silently reverting. This is the HOST side; the viewer
+        // listens on its own session for the analogous event. Content-free (Inv 8): a bare signal, no
+        // caps or peer detail (`control-consent-request` already carried the requested cap labels to the
+        // local host UI only).
+        if !allow {
+            let _ = self.app.emit("control-consent-denied", ());
+        }
         let _ = self.app.emit("control-consent-closed", ());
         if allow {
             requested.clone()
@@ -1974,6 +1992,155 @@ fn make_backends(_codec: ras_media::VideoCodec) -> (ras_media_scap::ScapCapture,
     )
 }
 
+/// Share-side relay-wait / session state, emitted on the **additive** `share-state` event so the UI
+/// can map each state to a design token (teal spinner while waiting, amber for the timed-out
+/// direct-address fallback, green when ready, red on a permission/capture error) instead of parsing the
+/// legacy human-readable `share-status` strings. Both events are emitted in parallel; the raw
+/// `share-status` string stays the fail-safe fallback if a build/UI predates `share-state` (SPEC P0-1/2).
+/// Content-free (Inv 8): carries only state tags and public reasons — never a ticket secret, key, or
+/// pixel.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+enum ShareSessionState {
+    /// Contacting a relay for a reachable address — the UI shows a teal spinner.
+    RelayWaiting,
+    /// No relay reachable within the bound; a direct-address (LAN-only) ticket is still published, and
+    /// the UI offers a Retry affordance. Amber (awaiting user action).
+    RelayTimedOut,
+    /// Relay online (or a direct-address ticket is live): waiting for a viewer.
+    Ready,
+    /// A required OS permission (macOS Screen Recording / Accessibility) is not granted — the share
+    /// loop never started; the UI shows the reason + an "Open System Settings" affordance. Red.
+    PermissionDenied { reason: String },
+    /// Sharing stopped (by the user, or a teardown error). Neutral/red.
+    Stopped { reason: String },
+}
+
+/// A single OS permission's grant status, emitted on `share-permission-request` so the UI can render a
+/// per-grant pending/granted/denied row with an "Open Settings" deep link (SPEC P0-3). macOS-only in
+/// practice (Linux/Windows sharing needs no such grant). Content-free (Inv 8): only a fixed system
+/// label + a public System-Settings deep link.
+#[derive(serde::Serialize, Clone)]
+struct PermissionGrant {
+    /// Human label: "Screen Recording" | "Accessibility".
+    name: String,
+    /// The check is in progress / user is being prompted.
+    pending: bool,
+    /// The grant is confirmed present.
+    granted: bool,
+    /// System-Settings deep link to the relevant privacy pane (opened via `open_system_settings`).
+    #[serde(rename = "deepLink")]
+    deep_link: String,
+}
+
+/// macOS System-Settings deep links for the two share-relevant privacy panes.
+#[cfg(target_os = "macos")]
+const SCREEN_RECORDING_PANE: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+#[cfg(target_os = "macos")]
+const ACCESSIBILITY_PANE: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+
+/// Open a macOS System-Settings privacy pane by its deep link (SPEC P0-3). No-op / best-effort
+/// elsewhere. Never fails the caller — a failed open just leaves the user to navigate Settings
+/// manually. The `pane` string is a public system URL, not a secret (Inv 8).
+#[tauri::command]
+fn open_system_settings(pane: String) {
+    #[cfg(target_os = "macos")]
+    {
+        // Only permit the two known privacy-pane deep links (defense-in-depth: never shell out an
+        // arbitrary controller-influenced string, Inv 6 spirit — though this is a local UI action).
+        if pane == SCREEN_RECORDING_PANE || pane == ACCESSIBILITY_PANE {
+            let _ = std::process::Command::new("open").arg(&pane).spawn();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pane;
+    }
+}
+
+/// macOS Screen-Recording & Accessibility permission orchestrator (SPEC P0-3). Screen Recording is
+/// **required** to capture; Accessibility is required only once a control lease injects OS input, so it
+/// is surfaced (pending/granted) but never blocks the view-only share. Returns `true` iff capture may
+/// proceed (Screen Recording granted, or non-macOS). Emits `share-permission-request` rows so the UI
+/// can show per-grant state + deep links, and prompts the OS grant flow (which itself brings up the
+/// system dialog / Settings). Fail-safe: any status query defaults to "assume ungranted → prompt",
+/// never a silent black frame.
+#[cfg(target_os = "macos")]
+fn ensure_permissions(app: &tauri::AppHandle) -> bool {
+    // Screen Recording (CoreGraphics preflight; requesting it triggers the OS grant dialog / TCC).
+    // `CGPreflightScreenCaptureAccess` returns whether the current process already holds the grant;
+    // `CGRequestScreenCaptureAccess` prompts (once per app lifetime) and returns the post-prompt state.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+    // Accessibility (ApplicationServices): `AXIsProcessTrusted` — read-only, no prompt (the prompt is
+    // deliberately not forced so the view-only path is never blocked by an unneeded grant).
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+
+    let sr_granted = unsafe { CGPreflightScreenCaptureAccess() };
+    let sr_final = if sr_granted {
+        true
+    } else {
+        // Announce a pending check, prompt the OS, then re-read the result.
+        let _ = app.emit(
+            "share-permission-request",
+            PermissionGrant {
+                name: "Screen Recording".into(),
+                pending: true,
+                granted: false,
+                deep_link: SCREEN_RECORDING_PANE.into(),
+            },
+        );
+        alert_user(
+            app,
+            true,
+            "Casual RAS — Screen Recording permission",
+            "Screen sharing needs macOS Screen Recording permission. Grant it in System Settings, then Share again.",
+        );
+        unsafe { CGRequestScreenCaptureAccess() }
+    };
+    let _ = app.emit(
+        "share-permission-request",
+        PermissionGrant {
+            name: "Screen Recording".into(),
+            pending: false,
+            granted: sr_final,
+            deep_link: SCREEN_RECORDING_PANE.into(),
+        },
+    );
+
+    // Accessibility is advisory here (only needed once control is granted) — surface its state so the
+    // user can pre-grant it, but never block the view-only share on it.
+    let ax_granted = unsafe { AXIsProcessTrusted() };
+    let _ = app.emit(
+        "share-permission-request",
+        PermissionGrant {
+            name: "Accessibility".into(),
+            pending: false,
+            granted: ax_granted,
+            deep_link: ACCESSIBILITY_PANE.into(),
+        },
+    );
+
+    sr_final
+}
+
+/// Non-macOS: sharing needs no OS grant orchestration (PipeWire portal / WGC handle their own consent).
+#[cfg(all(
+    not(target_os = "macos"),
+    any(target_os = "linux", target_os = "windows")
+))]
+fn ensure_permissions(_app: &tauri::AppHandle) -> bool {
+    true
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn run_share(
     app: tauri::AppHandle,
@@ -1992,6 +2159,28 @@ async fn run_share(
     contacts: Option<Arc<ras_identity::FileContactBook>>,
 ) {
     let _ = app.emit("share-active", true);
+
+    // SPEC P0-3: orchestrate the required OS grants BEFORE contacting a relay, so a missing
+    // Screen-Recording permission surfaces as an honest error state (never a silent black frame). The
+    // check is synchronous + fast; Stop stays responsive after (the accept loop's select handles it).
+    // Fail-closed: if the grant is refused, the share loop never starts.
+    if !ensure_permissions(&app) {
+        log::warn!("share: required OS permission (Screen Recording) not granted");
+        let _ = app.emit(
+            "share-state",
+            ShareSessionState::PermissionDenied {
+                reason: "Screen Recording permission is required to share this screen. Grant it in System Settings, then Share again.".into(),
+            },
+        );
+        let _ = app.emit(
+            "share-status",
+            "Screen Recording permission is required. Grant it in System Settings, then Share again.",
+        );
+        let _ = app.emit("share-active", false);
+        return;
+    }
+
+    let _ = app.emit("share-state", ShareSessionState::RelayWaiting);
     let _ = app.emit(
         "share-status",
         "Starting… contacting a relay for a reachable address.",
@@ -2006,6 +2195,8 @@ async fn run_share(
     // wedges the Share with no ticket and no error (a real-run-only blocker: loopback/direct-dial
     // tests skip `online()` entirely). Bound the wait, keep Stop responsive throughout, and fall back
     // to a direct-address ticket so a same-network viewer can still dial even with no relay.
+    // Bound to 10s (SPEC P0-1) so the user gets a fast timed-out → direct-address fallback rather than a
+    // 20s silent hang; Stop stays responsive throughout.
     let online = tokio::select! {
         _ = endpoint.online() => true,
         _ = stop.changed() => {
@@ -2014,24 +2205,31 @@ async fn run_share(
                 let _ = ov.hide();
             }
             let _ = app.emit("share-active", false);
+            let _ = app.emit(
+                "share-state",
+                ShareSessionState::Stopped { reason: "Stopped by user.".into() },
+            );
             let _ = app.emit("share-status", "Sharing stopped.");
             return;
         }
-        _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => false,
+        _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => false,
     };
+    // The ticket carries this endpoint's direct socket addresses (known since bind) plus its relay, so
+    // it is dialable on a LAN even when the relay never came up. Emitted before the state so the UI's
+    // timed-out affordance already has the direct-address ticket in hand.
+    let _ = app.emit("share-ticket", endpoint.addr().to_ticket());
     if !online {
-        log::warn!("share: no relay reachable within 20s — direct-address only (LAN)");
+        log::warn!("share: no relay reachable within 10s — direct-address only (LAN)");
+        let _ = app.emit("share-state", ShareSessionState::RelayTimedOut);
         let _ = app.emit(
             "share-status",
             "No relay reachable — sharing a direct-address code. It will work only if the viewer is on the same network. Check your internet connection or firewall, then try again for remote access.",
         );
     } else {
         log::info!("share: online, endpoint reachable");
+        let _ = app.emit("share-state", ShareSessionState::Ready);
+        let _ = app.emit("share-status", "Waiting for a viewer to connect…");
     }
-    // The ticket carries this endpoint's direct socket addresses (known since bind) plus its relay, so
-    // it is dialable on a LAN even when the relay never came up.
-    let _ = app.emit("share-ticket", endpoint.addr().to_ticket());
-    let _ = app.emit("share-status", "Waiting for a viewer to connect…");
 
     // This host's application identity + grant issuer (Phase 2). Derived from the SAME persistent seed
     // as the endpoint (ADR-092/093), so `host_id == host_endpoint_id == the contact id` — one identity.
@@ -2897,6 +3095,8 @@ fn main() {
             install_update,
             read_diagnostics,
             list_online,
+            open_system_settings,
+            check_presence_available,
         ])
         .setup(|app| {
             log::info!(

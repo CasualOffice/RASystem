@@ -1802,3 +1802,231 @@ body {
 #msg-send:active {
   background: var(--allow-strong);
 }
+
+/* ── SPEC P0 (share-recovery): relay-wait spinner + timed-out fallback + permission panel ─────────── */
+#share-status-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+/* Teal spinner = a live, in-progress secure-connection attempt (not a silent hang). */
+.relay-spinner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--signal);
+  font-size: var(--fs-label);
+  animation: relay-spinner-in var(--motion-mid) var(--ease-out) both;
+}
+.relay-spinner[hidden] {
+  display: none;
+}
+.spinner-ring {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border: 3px solid var(--signal-glow-soft);
+  border-top-color: var(--signal);
+  border-radius: 50%;
+  animation: relay-spin 0.8s linear infinite;
+}
+@keyframes relay-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes relay-spinner-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+/* Timed-out (direct-address fallback): amber = awaiting the user's Retry action. */
+#share-status.relay-timed-out {
+  color: var(--pending);
+  border-left: 3px solid var(--pending-hairline);
+  padding-left: var(--space-2);
+}
+/* Permission denied: red = a required grant is missing; the share never started. */
+#share-status.permission-denied {
+  color: var(--stop-ink);
+  background: var(--stop-dim);
+  border: 1px solid var(--stop-strong);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+}
+/* Retry-relay affordance (teal secondary), shown only in the timed-out state. */
+.retry-relay {
+  align-self: flex-start;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--signal-hairline);
+  background: transparent;
+  color: var(--signal);
+  font: 600 var(--fs-label)/1 var(--font-sans);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
+}
+.retry-relay[hidden] {
+  display: none;
+}
+.retry-relay:hover {
+  background: var(--signal-glow-soft);
+  border-color: var(--signal);
+}
+/* Per-grant permission panel: pending (amber) / granted (green) / denied (red) rows + Open-Settings. */
+#share-permissions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--hairline);
+  background: var(--surface-1);
+}
+#share-permissions[hidden] {
+  display: none;
+}
+#share-permissions > div {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  font-size: var(--fs-label);
+}
+.grant-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-weight: 600;
+  font-size: var(--fs-data);
+}
+.grant-icon.pending {
+  background: var(--pending-glow);
+  color: var(--pending);
+}
+.grant-icon.granted {
+  background: var(--allow-glow-soft);
+  color: var(--allow);
+}
+.grant-icon.denied {
+  background: rgba(248, 81, 73, 0.16);
+  color: var(--stop);
+}
+.grant-label {
+  flex: 1 1 auto;
+  color: var(--ink-dim);
+}
+.grant-settings-btn {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--info-hairline);
+  background: transparent;
+  color: var(--info-ink);
+  font-size: var(--fs-data);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease), color var(--motion-fast) var(--ease);
+}
+.grant-settings-btn[hidden] {
+  display: none;
+}
+.grant-settings-btn:hover {
+  background: var(--info-glow-soft);
+  color: var(--info);
+}
+
+/* ── SPEC P0 (take-control): terminal-outcome button states ──────────────────────────────────────── */
+/* "Requesting…" — teal pulse (awaiting the host owner's consent). */
+#control.pending {
+  background: var(--signal-glow-soft);
+  color: var(--signal);
+  border-color: var(--signal-hairline);
+  animation: control-pulse 1.4s ease-in-out infinite;
+}
+@keyframes control-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 var(--signal-glow);
+  }
+  50% {
+    box-shadow: 0 0 0 6px var(--signal-glow-soft);
+  }
+}
+/* "Request denied" — red flash that decays over ~3 s, then the button reverts to idle. */
+#control.denied {
+  background: var(--stop-dim);
+  color: #fff;
+  border-color: var(--stop-strong);
+  animation: control-denied-flash 3s var(--ease-out) forwards;
+}
+@keyframes control-denied-flash {
+  0% {
+    box-shadow: 0 0 0 1px var(--stop-strong), 0 0 16px var(--stop);
+  }
+  100% {
+    box-shadow: 0 0 0 1px var(--stop-strong), 0 0 0 0 transparent;
+  }
+}
+
+/* ── SPEC P0 (file-transfer): sender countdown + receiving states + presence three-state ─────────── */
+/* Awaiting-consent countdown: amber = the host's window is running down. */
+.filesend-state.pending {
+  color: var(--pending);
+}
+#filesend.state-countdown .filesend-fill {
+  width: 35%;
+  background: linear-gradient(90deg, var(--info), var(--pending));
+  animation: filesend-wait 1.1s ease-in-out infinite;
+}
+/* Final 30 s: escalate to red so the sender knows the offer is about to expire. */
+#filesend.state-countdown-urgent .filesend-fill {
+  background: var(--stop-dim);
+}
+/* Host is receiving the bytes: teal = a live secure transfer. */
+.filesend-state.receiving {
+  color: var(--signal);
+}
+#filesend.state-receiving .filesend-fill {
+  background: linear-gradient(90deg, var(--signal), var(--signal-hairline));
+}
+/* Presence three-state (SPEC P0-1): unknown (amber-dim, "checking/not yet known") is visually distinct
+   from a confirmed offline (flat grey). Online stays teal (a live secure peer). Existing
+   [data-online="true"|"false"] rules are unchanged. */
+.presence-dot[data-online="unknown"] {
+  background: var(--pending);
+  opacity: 0.45;
+}
+/* Honest disclosure banner when live presence checking is unavailable — not dismissable (Inv 7).
+   Palette mirrors the share-input warning bar (amber-on-brown). Content-free (Inv 8). */
+.gossip-unavailable-banner {
+  margin-bottom: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--pending-hairline);
+  background: #3a2c00;
+  color: #ffd479;
+  font-size: var(--fs-label);
+}
+.gossip-unavailable-banner[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .relay-spinner,
+  .spinner-ring,
+  #control.pending,
+  #control.denied,
+  #filesend.state-countdown .filesend-fill {
+    animation: none;
+  }
+}

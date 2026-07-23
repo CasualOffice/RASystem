@@ -35,6 +35,7 @@ document.getElementById("go-contacts").addEventListener("click", () => {
   showView("contacts");
   loadContacts();
   loadMyIdentity();
+  refreshPresenceAvailability(); // SPEC P0-1: show the honest banner if presence is unavailable
 });
 document.querySelectorAll("[data-home]").forEach((b) =>
   b.addEventListener("click", () => {
@@ -896,8 +897,10 @@ function renderContacts(list) {
     // Live presence dot (ADR-094): grey/offline by default; the "presence" event flips data-online.
     const dot = document.createElement("span");
     dot.className = "presence-dot";
-    dot.dataset.online = "false";
-    dot.title = "Presence — green when this contact is online";
+    // Three-state (SPEC P0-1): "unknown" until the first presence signal — honestly distinct from a
+    // confirmed "offline" (Inv 7). The poll loop / snapshot flip it to "online"/"offline".
+    dot.dataset.online = "unknown";
+    dot.title = "Presence — checking…";
     const name = document.createElement("div");
     name.className = "contact-name";
     name.textContent = c.label + (c.blocked ? " (blocked)" : "");
@@ -979,36 +982,70 @@ function renderContacts(list) {
   messages.repaintBadges();
 }
 
-// Set one contact row's presence dot. No-op if the row isn't rendered (not in the contacts view).
-function setPresenceDot(contactId, online) {
+// Whether live presence checking is available at all (SPEC P0-1). When false, contacts can only ever be
+// "unknown", so we must NOT flip dots to "offline" (that would be a dishonest claim) and we show the
+// gossip-unavailable banner instead. Cached after the first `check_presence_available` call; refreshed
+// on entering the contacts view.
+let presenceAvailable = true;
+
+// Set one contact row's presence dot to a three-state value: "unknown" | "online" | "offline".
+// No-op if the row isn't rendered (not in the contacts view).
+function setPresenceState(contactId, state) {
   const row = contactsList.querySelector(
     `.contact-row[data-contact-id="${contactId}"]`,
   );
-  if (row) {
-    const dot = row.querySelector(".presence-dot");
-    if (dot) dot.dataset.online = String(!!online);
-  }
+  if (!row) return;
+  const dot = row.querySelector(".presence-dot");
+  if (!dot) return;
+  dot.dataset.online = state;
+  dot.title =
+    state === "online"
+      ? "Presence — online"
+      : state === "offline"
+      ? "Presence — offline"
+      : "Presence — checking…";
 }
 
 // Ask Rust for the currently-online contacts and paint their dots (initial state before the first
-// diff tick, and after a re-render). Best-effort: presence-off / errors just leave dots grey.
+// diff tick, and after a re-render). Best-effort: if presence is unavailable, dots stay "unknown"
+// (never falsely "offline"); errors also leave them "unknown".
 async function paintPresenceSnapshot() {
+  if (!presenceAvailable) return; // leave every dot "unknown" — honest, banner already explains why
   try {
     const online = await invoke("list_online");
     const set = new Set(online);
     for (const row of contactsList.querySelectorAll(".contact-row")) {
-      setPresenceDot(row.dataset.contactId, set.has(row.dataset.contactId));
+      setPresenceState(row.dataset.contactId, set.has(row.dataset.contactId) ? "online" : "offline");
     }
   } catch (_) {
-    /* presence unavailable — dots stay grey */
+    /* presence unavailable — dots stay "unknown" */
   }
 }
 
+// Refresh the presence-availability flag + banner (SPEC P0-1). Called on entering the contacts view.
+async function refreshPresenceAvailability() {
+  try {
+    presenceAvailable = await invoke("check_presence_available");
+  } catch (_) {
+    presenceAvailable = false;
+  }
+  const banner = document.getElementById("gossip-unavailable-banner");
+  if (banner) banner.hidden = presenceAvailable;
+  // If presence just came back, repaint from the snapshot; otherwise leave everything "unknown".
+  if (presenceAvailable) paintPresenceSnapshot();
+}
+
 // Live presence updates (ADR-094): the Rust poll loop emits only on state changes. Content-free
-// payload — a public contact id + a bool, never any secret (Inv 8).
+// payload — a public contact id + a bool, never any secret (Inv 8). A signal means presence works, so
+// clear any stale "unavailable" banner.
 listen("presence", (e) => {
   const { contactId, online } = e.payload;
-  setPresenceDot(contactId, online);
+  if (!presenceAvailable) {
+    presenceAvailable = true;
+    const banner = document.getElementById("gossip-unavailable-banner");
+    if (banner) banner.hidden = true;
+  }
+  setPresenceState(contactId, online ? "online" : "offline");
 });
 
 contactAddForm.addEventListener("submit", async (e) => {
@@ -1083,6 +1120,112 @@ shareCopy.addEventListener("click", async () => {
 });
 
 listen("share-ticket", (e) => { shareTicket.value = e.payload; });
+
+// ── SPEC P0-1/2/3: share-recovery UI ────────────────────────────────────────────────────────────
+// The legacy `share-status` string stays the fail-safe fallback; the typed `share-state` event drives
+// the token-based visuals (teal spinner while waiting, amber timed-out fallback + Retry, red on a
+// permission error + Open-Settings). Never weakens consent/indicator/Stop — purely informational.
+const shareRelaySpinner = document.getElementById("share-relay-spinner");
+const shareRetryBtn = document.getElementById("share-retry-relay");
+const shareOpenSettingsBtn = document.getElementById("share-open-settings");
+const sharePermsPanel = document.getElementById("share-permissions");
+
+// Per-grant state, keyed by permission name (Screen Recording / Accessibility).
+const sharePermGrants = new Map();
+
+if (shareRetryBtn) {
+  shareRetryBtn.addEventListener("click", async () => {
+    shareRetryBtn.hidden = true;
+    // The timed-out `run_share` task is still running (it fell through to the accept loop after the
+    // relay wait), so its session slot is still `Some` — a bare `start_sharing` would short-circuit to
+    // a no-op and Retry would do nothing. Tear the current share down first (which frees the slot and
+    // stops the old task), then start a fresh attempt so `endpoint.online()` is re-awaited.
+    try { await invoke("stop_sharing"); } catch (_) {}
+    // Re-show the waiting spinner immediately; the fresh `run_share` re-emits `share-state` shortly.
+    if (shareRelaySpinner) shareRelaySpinner.hidden = false;
+    shareStatus.classList.remove("relay-timed-out", "permission-denied");
+    invoke("start_sharing").catch((e) => { shareStatus.textContent = "Retry failed: " + e; });
+  });
+}
+if (shareOpenSettingsBtn) {
+  shareOpenSettingsBtn.addEventListener("click", () => {
+    // Default to the Screen-Recording pane (the required grant); the permission rows carry their own.
+    invoke("open_system_settings", {
+      pane: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+    }).catch(() => {});
+  });
+}
+
+function renderSharePerms() {
+  if (!sharePermsPanel) return;
+  if (sharePermGrants.size === 0) { sharePermsPanel.hidden = true; return; }
+  sharePermsPanel.innerHTML = "";
+  let anyMissing = false;
+  for (const [name, g] of sharePermGrants) {
+    if (!g.granted) anyMissing = true;
+    const row = document.createElement("div");
+    const icon = document.createElement("span");
+    icon.className = "grant-icon " + (g.granted ? "granted" : g.pending ? "pending" : "denied");
+    icon.textContent = g.granted ? "✓" : g.pending ? "…" : "✕";
+    const label = document.createElement("span");
+    label.className = "grant-label";
+    label.textContent = name + ": " + (g.granted ? "granted" : g.pending ? "checking…" : "not granted");
+    row.appendChild(icon);
+    row.appendChild(label);
+    if (g.deepLink && !g.granted) {
+      const btn = document.createElement("button");
+      btn.className = "grant-settings-btn";
+      btn.textContent = "Open Settings";
+      btn.addEventListener("click", () => {
+        invoke("open_system_settings", { pane: g.deepLink }).catch(() => {});
+      });
+      row.appendChild(btn);
+    }
+    sharePermsPanel.appendChild(row);
+  }
+  // Hide the panel once every surfaced grant is present.
+  sharePermsPanel.hidden = !anyMissing;
+}
+
+listen("share-permission-request", (e) => {
+  const g = e.payload || {};
+  if (!g.name) return;
+  sharePermGrants.set(g.name, g);
+  renderSharePerms();
+});
+
+listen("share-state", (e) => {
+  const s = e.payload || {};
+  const kind = s.kind;
+  // Reset recovery affordances; the branch below re-enables the ones a state needs.
+  if (shareRelaySpinner) shareRelaySpinner.hidden = true;
+  if (shareRetryBtn) shareRetryBtn.hidden = true;
+  if (shareOpenSettingsBtn) shareOpenSettingsBtn.hidden = true;
+  shareStatus.classList.remove("relay-timed-out", "permission-denied");
+  switch (kind) {
+    case "relay_waiting":
+      if (shareRelaySpinner) shareRelaySpinner.hidden = false;
+      shareStatus.hidden = false;
+      break;
+    case "relay_timed_out":
+      shareStatus.classList.add("relay-timed-out");
+      if (shareRetryBtn) shareRetryBtn.hidden = false;
+      break;
+    case "ready":
+      // Grants confirmed; clear any leftover permission panel.
+      sharePermGrants.clear();
+      renderSharePerms();
+      break;
+    case "permission_denied":
+      shareStatus.classList.add("permission-denied");
+      if (shareOpenSettingsBtn) shareOpenSettingsBtn.hidden = false;
+      break;
+    case "stopped":
+    default:
+      break;
+  }
+});
+
 listen("share-status", (e) => { shareStatus.textContent = e.payload; });
 // While a viewer is connected, the main window is minimized out of the shared screen (Rust side) and
 // the compact strip carries Stop. `hostSharing` lets us RE-minimize main after a mid-session consent
@@ -1295,25 +1438,91 @@ let lastMoveAt = 0;
 let lastCaps = null;
 let lastNum = null;
 
-function setControlling(on) {
-  controlling = on && active;
-  if (controlling) {
-    // Entering control: clear the virtual "look here" pointer on the host so it isn't a second cursor
-    // next to the real OS cursor we now drive (trackPointer is suppressed while controlling).
-    invoke("send_pointer", { x: 0, y: 0, visible: false }).catch(() => {});
-  } else {
-    lastCaps = null;
-    lastNum = null;
-    releaseHeldButtons(); // don't leak a held button / stuck drag across control sessions (Inv 4-aligned)
-  }
-  if (controlBtn) {
-    controlBtn.textContent = controlling ? "Controlling — click to stop" : "Take control";
-    controlBtn.classList.toggle("armed", controlling);
+// SPEC (Take-Control): the "Take control" button is a small state machine so its outcome is always
+// legible (Inv 7): idle → requesting (teal pulse) → granted (armed) | denied (red flash) | timeout
+// (amber). Never weakens the host consent gate — this only reflects the outcome. `controlRequestPending`
+// is the re-prompt guard: it blocks a duplicate `request_control` while one is already in flight, so a
+// re-click can never spawn a second host consent prompt (Inv 1).
+let controlState = "idle"; // "idle" | "requesting" | "granted" | "denied" | "timeout"
+let controlRequestPending = false;
+let controlAutoRevert = null; // timer that returns denied/timeout → idle
+let controlFallbackTimer = null; // client-side safety net if no outcome ever arrives
+
+function clearControlTimers() {
+  if (controlAutoRevert) { clearTimeout(controlAutoRevert); controlAutoRevert = null; }
+  if (controlFallbackTimer) { clearTimeout(controlFallbackTimer); controlFallbackTimer = null; }
+}
+
+// The full dispatcher. `controlling` (used throughout the input-forwarding path) is set true ONLY in
+// the granted state, so no input is ever forwarded unless the lease is actually held.
+function setControlState(state) {
+  controlState = state;
+  controlling = state === "granted" && active;
+  if (!controlBtn) return;
+  controlBtn.classList.remove("armed", "pending", "denied");
+  switch (state) {
+    case "granted":
+      clearControlTimers();
+      controlRequestPending = false;
+      controlBtn.textContent = "Controlling — click to stop";
+      controlBtn.classList.add("armed");
+      controlBtn.disabled = false;
+      // Entering control: clear the virtual "look here" pointer so it isn't a second cursor next to the
+      // real OS cursor we now drive (trackPointer is suppressed while controlling).
+      invoke("send_pointer", { x: 0, y: 0, visible: false }).catch(() => {});
+      break;
+    case "requesting":
+      controlBtn.textContent = "Requesting…";
+      controlBtn.classList.add("pending");
+      controlBtn.disabled = true;
+      lastCaps = null;
+      lastNum = null;
+      break;
+    case "denied":
+      controlRequestPending = false;
+      controlBtn.textContent = "Request denied";
+      controlBtn.classList.add("denied");
+      controlBtn.disabled = true;
+      releaseHeldButtons();
+      break;
+    case "timeout":
+      controlRequestPending = false;
+      controlBtn.textContent = "No response — timed out";
+      controlBtn.classList.add("pending");
+      controlBtn.disabled = true;
+      releaseHeldButtons();
+      break;
+    default: // "idle"
+      clearControlTimers();
+      controlRequestPending = false;
+      controlBtn.textContent = "Take control";
+      controlBtn.disabled = !active;
+      lastCaps = null;
+      lastNum = null;
+      releaseHeldButtons(); // don't leak a held button / stuck drag across control sessions (Inv 4-aligned)
+      break;
   }
   if (banner) {
     banner.textContent = controlling ? "● CONTROLLING remote screen" : "● LIVE — viewing remote screen";
   }
 }
+
+// Backward-compatible shim: existing call sites (`setLive`, the click handler) keep working.
+function setControlling(on) {
+  setControlState(on && active ? "granted" : "idle");
+}
+
+// The host refused (or its owner let the prompt time out). This event fires on the same process only in
+// a loopback/self-share; across two machines the viewer relies on the client-side fallback timeout
+// below. Either way the outcome is legible. Content-free (Inv 8).
+listen("control-consent-denied", () => {
+  if (controlState !== "requesting") return;
+  setControlState("denied");
+  clearControlTimers();
+  controlAutoRevert = setTimeout(() => {
+    if (controlState === "denied") setControlState("idle");
+  }, 3000);
+});
 
 // Normalized 0..=65535 of the video content rect, or null if outside it.
 function normInput(e) {
@@ -1367,18 +1576,46 @@ function codeToHid(code) {
 
 controlBtn.addEventListener("click", async () => {
   if (!active) return;
-  if (controlling) { setControlling(false); return; }
-  controlBtn.textContent = "Requesting…";
-  invoke("request_control");
-  // Poll until the host grants (its owner must Allow) — up to ~15 s, then give up.
-  for (let i = 0; i < 60; i++) {
+  // Already controlling → stop.
+  if (controlling) { setControlState("idle"); return; }
+  // Re-prompt guard: a click while a request is already in flight (or in a terminal denied/timeout
+  // flash) is a no-op — never spawn a second host consent prompt (Inv 1).
+  if (controlState === "requesting" || controlRequestPending) return;
+  if (controlState === "denied" || controlState === "timeout") return;
+
+  controlRequestPending = true;
+  setControlState("requesting");
+  try {
+    await invoke("request_control");
+  } catch (_) {
+    setControlState("idle");
+    return;
+  }
+
+  // Poll until the host grants (its owner must Allow) — up to ~90 s, matching the host's consent window.
+  // A denial reaches us either via the `control-consent-denied` event (loopback) or, across machines,
+  // via this bounded wait ending → timeout. Either way the button never silently sticks on "Requesting…".
+  const started = Date.now();
+  clearControlTimers();
+  controlFallbackTimer = setTimeout(() => {
+    if (controlState === "requesting") {
+      setControlState("timeout");
+      controlAutoRevert = setTimeout(() => {
+        if (controlState === "timeout") setControlState("idle");
+      }, 3000);
+    }
+  }, 95000);
+
+  while (controlState === "requesting" && active && Date.now() - started < 95000) {
     await new Promise((r) => setTimeout(r, 250));
+    // A terminal event (denied) may have moved us out of "requesting" — stop polling if so.
+    if (controlState !== "requesting") return;
     let held = false;
     try { held = await invoke("is_controlling"); } catch (_) {}
-    if (held) { setControlling(true); return; }
-    if (!active) return;
+    if (held) { setControlState("granted"); return; }
   }
-  setControlling(false);
+  // Fell out of the loop without a grant: the session ended, or the fallback timer will handle timeout.
+  if (!active && controlState === "requesting") setControlState("idle");
 });
 
 // Pointer + keyboard forwarding. All guarded on `controlling`; when active they preventDefault so the
@@ -2195,7 +2432,29 @@ listen("message", (e) => {
 const files = (function () {
   const CHUNK = 256 * 1024; // 256 KiB per file_chunk invoke
   const OFFER_TIMEOUT_MS = 60000; // auto-deny an unanswered incoming offer
-  const ACCEPT_TIMEOUT_MS = 60000; // give up if the peer never accepts/rejects our offer
+  // Mirror the host's 90 s file-offer consent window (LocalConsent::consent_to_file) so the SENDER's
+  // countdown matches the receiver's auto-deny (SPEC P0-2). +5 s slack so a just-in-time host Allow is
+  // never pre-empted by our own client timeout.
+  const ACCEPT_TIMEOUT_MS = 95000;
+
+  // SPEC P0-2: map the host's stable rejection reason code (ras_protocol FileTransfer error code,
+  // arriving as its Debug string) to honest human text. Unknown codes fall back to the generic form
+  // (fail-safe). Content-free: these are enum tags, never a filename/path/content (Inv 8).
+  // Keys are the host's `ras_protocol::ErrorCode` Debug strings actually reachable from the file-offer
+  // rejection path (see ras-core `file_error_code` / `host_handle_file_offer`).
+  const REJECT_REASONS = {
+    ConsentDenied: "The other side declined.",
+    CapabilityDenied: "File transfer is not authorized.",
+    // Unknown-target / unsafe-filename / oversized all collapse to InvalidMessage host-side.
+    InvalidMessage: "The file couldn't be accepted (unsafe name, wrong target, or too large).",
+    SessionRevoked: "The session was stopped.",
+    LeaseInvalid: "The session was stopped.",
+    Internal: "The other side couldn't receive the file.",
+  };
+  function rejectReasonText(code) {
+    if (code && REJECT_REASONS[code]) return REJECT_REASONS[code];
+    return "The transfer was rejected.";
+  }
 
   // Sender controls (Connect bar + progress card).
   const sendBtn = document.getElementById("send-file");
@@ -2234,6 +2493,8 @@ const files = (function () {
   let acceptResolve = null;
   let acceptReject = null;
   let acceptTimer = null;
+  let acceptCountdown = null; // 1 Hz interval ticking the sender-side wait countdown (SPEC P0-2)
+  let acceptDeadline = 0; // wall-clock ms when the accept wait expires
   // Receiver: countdown + auto-deny timers for an open offer.
   let offerTimer = null;
   let offerCountdown = null;
@@ -2255,7 +2516,14 @@ const files = (function () {
 
   // ── Sender: progress card presentation ─────────────────────────────────────────────
   function setCardState(cls) {
-    card.classList.remove("state-wait", "state-ok", "state-err");
+    card.classList.remove(
+      "state-wait",
+      "state-countdown",
+      "state-countdown-urgent",
+      "state-receiving",
+      "state-ok",
+      "state-err",
+    );
     if (cls) card.classList.add(cls);
   }
   function showCard(filename) {
@@ -2284,10 +2552,36 @@ const files = (function () {
   }
 
   // ── Sender: the accept/reject wait ─────────────────────────────────────────────────
+  // SPEC P0-2: render a live countdown while awaiting the host's accept, color-escalating as it runs
+  // down (amber → red in the final 30 s), so the sender knows the host's window is closing rather than
+  // staring at an indeterminate "Waiting…". Purely informational — never gates or skips consent.
+  function tickCountdown() {
+    const remainMs = Math.max(0, acceptDeadline - Date.now());
+    const s = Math.ceil(remainMs / 1000);
+    card.classList.remove("state-countdown-urgent");
+    if (remainMs <= 30000) card.classList.add("state-countdown-urgent");
+    setState("Waiting for the other side to accept… " + s + "s", "pending");
+    if (remainMs <= 0) stopCountdown();
+  }
+  function startCountdown() {
+    stopCountdown();
+    acceptDeadline = Date.now() + ACCEPT_TIMEOUT_MS;
+    tickCountdown();
+    acceptCountdown = setInterval(tickCountdown, 1000);
+  }
+  function stopCountdown() {
+    if (acceptCountdown) {
+      clearInterval(acceptCountdown);
+      acceptCountdown = null;
+    }
+    card.classList.remove("state-countdown-urgent");
+  }
+
   function waitForAccept() {
     return new Promise((resolve, reject) => {
       acceptResolve = resolve;
       acceptReject = reject;
+      startCountdown();
       acceptTimer = setTimeout(() => {
         settleAccept(false, "timeout");
       }, ACCEPT_TIMEOUT_MS);
@@ -2298,6 +2592,7 @@ const files = (function () {
       clearTimeout(acceptTimer);
       acceptTimer = null;
     }
+    stopCountdown();
     const res = acceptResolve;
     const rej = acceptReject;
     acceptResolve = null;
@@ -2307,7 +2602,9 @@ const files = (function () {
   }
 
   listen("file-accepted", () => settleAccept(true));
-  listen("file-rejected", () => settleAccept(false, "declined"));
+  // The host refused: carry the stable reason code (Debug string) so the sender sees an honest,
+  // typed reason instead of a generic "declined" (SPEC P0-2).
+  listen("file-rejected", (e) => settleAccept(false, e.payload || "Rejected"));
 
   // ── Sender: the transfer itself ────────────────────────────────────────────────────
   async function sendFile(file) {
@@ -2316,8 +2613,8 @@ const files = (function () {
     cancelled = false;
     setSendBusy(true);
     showCard(file.name);
-    setCardState("state-wait");
-    setState("Waiting for the other side to accept…", "");
+    setCardState("state-countdown");
+    setState("Waiting for the other side to accept…", "pending");
     pctEl.textContent = "";
 
     try {
@@ -2331,14 +2628,15 @@ const files = (function () {
     try {
       await waitForAccept();
     } catch (reason) {
-      if (reason === "timeout") failTransfer("No response — transfer timed out.");
-      else declineTransfer();
+      if (reason === "timeout") failTransfer("No response — the transfer timed out.");
+      else declineTransfer(reason);
       return;
     }
     if (cancelled) return finishCancel();
 
-    // Accepted → stream the file sequentially in CHUNK-sized slices.
-    setCardState("");
+    // Accepted → the host is now receiving; stream the file sequentially in CHUNK-sized slices.
+    setCardState("state-receiving");
+    setState("The other side is receiving…", "receiving");
     setProgress(0, file.size);
     let offsetBytes = 0;
     try {
@@ -2380,9 +2678,10 @@ const files = (function () {
     setSendBusy(false);
     hideCardLater(4000);
   }
-  function declineTransfer() {
+  function declineTransfer(reasonCode) {
     setCardState("state-err");
-    setState("The other side declined.", "err");
+    // Typed, honest reason from the host's stable error code (SPEC P0-2); generic fallback if absent.
+    setState(rejectReasonText(reasonCode), "err");
     pctEl.textContent = "";
     cancelBtn.disabled = true;
     sending = false;

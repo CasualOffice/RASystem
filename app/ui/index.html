@@ -89,6 +89,12 @@
       </form>
       <p id="contact-add-error" class="status" hidden></p>
 
+      <!-- SPEC P0-1: honest disclosure when live presence checking is unavailable (not dismissable). -->
+      <div id="gossip-unavailable-banner" class="gossip-unavailable-banner" role="status" hidden>
+        Presence checking is unavailable. Saved contacts will show as “checking…” until the service
+        resumes — this does not affect connecting or messaging.
+      </div>
+
       <ul id="contacts-list" class="contacts-list" aria-label="Saved contacts">
         <li id="contacts-empty" class="contacts-empty">No contacts yet. Add someone above.</li>
       </ul>
@@ -109,7 +115,18 @@
         <textarea id="share-ticket" readonly rows="3" placeholder="Starting…"></textarea>
         <button id="share-copy">Copy</button>
       </div>
-      <p id="share-status" class="status">Preparing…</p>
+      <!-- SPEC P0-1/2/3: relay-wait spinner + timed-out retry + permission grant panel live here.
+           All additive; the legacy status line stays as the fail-safe fallback. -->
+      <div id="share-status-container">
+        <div id="share-relay-spinner" class="relay-spinner" hidden>
+          <span class="spinner-ring" aria-hidden="true"></span>
+          <span id="share-relay-spinner-text">Contacting relay… (10s)</span>
+        </div>
+        <div id="share-permissions" hidden></div>
+        <p id="share-status" class="status">Preparing…</p>
+        <button id="share-retry-relay" class="retry-relay" hidden>Retry relay connection</button>
+        <button id="share-open-settings" class="grant-settings-btn" hidden>Open System Settings</button>
+      </div>
       <label class="optrow" for="share-clipboard-cb">
         <input type="checkbox" id="share-clipboard-cb" />
         <span>
