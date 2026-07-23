@@ -1512,10 +1512,18 @@ function setControlling(on) {
   setControlState(on && active ? "granted" : "idle");
 }
 
-// The host refused (or its owner let the prompt time out). This event fires on the same process only in
-// a loopback/self-share; across two machines the viewer relies on the client-side fallback timeout
-// below. Either way the outcome is legible. Content-free (Inv 8).
+// The host denied a control request (or its owner let the 90s prompt time out), OR revoked an ACTIVE
+// lease mid-session — the wire's ControlRevoked is reused for both, so this one event covers either.
+// This is now a REAL cross-machine signal (ras-core surfaces it as ControlLeaseEnded on receipt), not
+// just a same-process loopback event — the client-side fallback timeout below remains only as a safety
+// net for a genuine hang (e.g. a dead connection). Content-free (Inv 8 — a reason code only).
 listen("control-consent-denied", () => {
+  if (controlState === "granted") {
+    // Active control was taken away (not merely denied at request time): drop to idle immediately and
+    // stop forwarding input to a lease that no longer exists, rather than let the button/state lie.
+    setControlState("idle");
+    return;
+  }
   if (controlState !== "requesting") return;
   setControlState("denied");
   clearControlTimers();

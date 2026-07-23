@@ -147,6 +147,15 @@ async fn drain_viewer_lifecycle(mut events: LifecycleStream, app: tauri::AppHand
             LifecycleEvent::FileTransferRejected { code } => {
                 let _ = app.emit("file-rejected", format!("{code:?}"));
             }
+            // The host denied (or its owner let the consent prompt time out) a control request, or
+            // revoked an active lease. This is the ONLY wire signal for either case (ADR-069's
+            // ControlRevoked is reused for a pre-grant refusal too) — before this, the viewer had no
+            // real-time way to learn about a cross-machine Deny and relied on its own ~95 s blind
+            // timeout, which read as "Take control is broken" (view-only features kept working, so
+            // only control looked stuck/disabled). Content-free (a reason code only, Inv 8).
+            LifecycleEvent::ControlLeaseEnded { code } => {
+                let _ = app.emit("control-consent-denied", format!("{code:?}"));
+            }
             LifecycleEvent::SessionEnded { .. }
             | LifecycleEvent::Disconnected { .. }
             | LifecycleEvent::Revoked { .. } => {

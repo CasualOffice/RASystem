@@ -203,8 +203,11 @@ pub enum LifecycleEvent {
         /// The session generation the lease was issued at (bumped on every issue/transfer).
         generation: u32,
     },
-    /// Host-side (Phase 3): the OS-input control lease ended or a control request was refused, with a
-    /// stable reason code. Content-free.
+    /// The OS-input control lease ended or a control request was refused, with a stable reason code.
+    /// Content-free. Emitted **host-side** (Phase 3) when it revokes/refuses a lease, and **controller-
+    /// side** when the `ControlRevoked` wire message arrives — the only signal for an explicit Deny or a
+    /// host-side consent timeout (there is no separate "denied" message), so the controller app can
+    /// react immediately instead of relying on its own blind timeout.
     ControlLeaseEnded {
         /// Reason (`ConsentDenied`, `CapabilityDenied`, `SessionRevoked`, …).
         code: ErrorCode,

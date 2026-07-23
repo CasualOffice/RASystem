@@ -2967,12 +2967,25 @@ async fn controller_control_loop(
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((lease_id, generation));
                 }
-                // Host revoked / refused the lease: drop it (further input will be rejected host-side).
-                Ok(ControlMsg::ControlRevoked { .. }) => {
+                // Host revoked / refused the lease: drop it (further input will be rejected host-side),
+                // AND surface it — this is the only wire signal for an explicit Deny or a host-side
+                // consent timeout (there is no separate "denied" message). Before this emit the app had
+                // NO real-time signal for either case: the "Take control" button relied entirely on its
+                // own blind ~95 s client-side timeout, which read as "control is broken" (annotation —
+                // a view-only feature needing no lease — kept working, so only control looked stuck).
+                Ok(ControlMsg::ControlRevoked { code }) => {
                     *inner
                         .lease
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    if let Some(sink) = inner
+                        .lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        sink.emit(LifecycleEvent::ControlLeaseEnded { code });
+                    }
                 }
                 // Host's verdict on a file offer (ADR-086): surface it for the controller UI. Content-free.
                 Ok(ControlMsg::FileAccept) => {
