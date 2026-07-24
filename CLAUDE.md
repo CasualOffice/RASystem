@@ -237,9 +237,14 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   Secure-Input drop (macOS); the analogous **Linux on-device** XTEST run (a real X11/Xwayland session);
   the **Windows on-device** `SendInput` run (the team now has Windows hardware access and has run a
   basic Share/Connect session on it, but this specific input path has not yet been on-device verified —
-  stays CI-compile-gated on `windows-latest` for now); a macOS **global-hotkey** emergency stop (baseline stop is the
-  always-visible Stop button, which already drives `revoke_all` + `release_all`; no kernel SAS on macOS
-  — SAS stays the Windows path); and the Linux **`uinput`/libei** + Windows **Session-0 service/agent
+  stays CI-compile-gated on `windows-latest` for now). A cross-platform **global-hotkey emergency stop**
+  has landed (`tauri-plugin-global-shortcut`, `CommandOrControl+Shift+Escape`, registered at app setup):
+  the always-visible Stop button already drives `release_input`/`revoke_all` synchronously (Inv 4), but
+  it's unreachable if OS focus is stuck on a runaway/fullscreen remote app — the hotkey fires the exact
+  same `trigger_stop_sharing` path regardless of which app has focus. No kernel SAS on macOS — SAS stays
+  the Windows path. App check/clippy/fmt clean on macOS; a real on-device keypress (and the Linux/Windows
+  app build, which the push-triggered CI gate doesn't cover) are the follow-up. The Linux
+  **`uinput`/libei** + Windows **Session-0 service/agent
   split (S4)** follow-ups (docs/19 §3/§4). **Controller keyboard app-wiring has landed (ADR-075):**
   the Connect handler forwards the controller's own `getModifierState('CapsLock'/'NumLock')` as
   `SetLockState` on change (state-only — raw lock-key edges are no longer forwarded, so they can't race

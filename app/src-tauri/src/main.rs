@@ -1898,6 +1898,14 @@ fn select_display(state: State<'_, AppState>, id: u32) {
 /// Stop the whole share (drop the ticket, stop accepting, end any live viewer). Idempotent.
 #[tauri::command]
 fn stop_sharing(state: State<'_, AppState>) {
+    trigger_stop_sharing(&state);
+}
+
+/// The actual stop logic (Invariant 4): signals the share loop's `stop` watch, which halts the media
+/// pump and releases every held input key/button (`HostSession::stop` → `release_input`, synchronous,
+/// before any network I/O) well within the 250ms budget. Shared by the `stop_sharing` command (button
+/// click) and the global emergency-stop hotkey below, so both paths are provably identical.
+fn trigger_stop_sharing(state: &AppState) {
     if let Some(s) = lock(&state.share.session).take() {
         let _ = s.stop.send(true);
     }
@@ -3254,6 +3262,29 @@ fn main() {
         // harmless when no key/endpoint is provisioned — `check_for_updates` just reports "not
         // configured".
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Global emergency-stop hotkey (Invariant 4, backlog M3). The always-visible Stop button
+        // already satisfies Inv 4 when the app has OS focus, but a runaway/uncooperative remote
+        // session (focus repeatedly stolen, a fullscreen remote app covering the window) can make the
+        // button unreachable — the one case Inv 4's "always overrides" promise can't afford. This
+        // registers system-wide, independent of which app has focus, and drives the *exact same*
+        // `trigger_stop_sharing` path as the button (release_input runs synchronously before any
+        // network I/O — same ≤250ms budget). A malformed literal here is a build-time programmer
+        // error, not a runtime condition — `expect` matches this function's existing
+        // unrecoverable-startup-fault posture (see the comment above `tauri::Builder::default()`).
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_shortcut("CommandOrControl+Shift+Escape")
+                .expect("valid emergency-stop shortcut literal")
+                .with_handler(|app, _shortcut, event| {
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        log::info!(
+                            "share: global emergency-stop hotkey pressed — halting session (Inv 4)"
+                        );
+                        trigger_stop_sharing(&app.state::<AppState>());
+                    }
+                })
+                .build(),
+        )
         // Native OS notifications for inbound requests / chat (see `alert_user`).
         .plugin(tauri_plugin_notification::init())
         // Field diagnostics: a rotating log file in the OS log dir + stderr. Content-free (Inv 8).

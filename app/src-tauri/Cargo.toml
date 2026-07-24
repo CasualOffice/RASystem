@@ -82,6 +82,7 @@ bytes = "1"
 # inert unless the host opted in on the Share screen (default OFF).
 ras-audio-opus = { path = "../../crates/ras-audio-opus" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tauri-plugin-global-shortcut = "2"
 
 # Per-platform sharing backends (ADR-063). macOS uses the zero-copy hardware path
 # (ScreenCaptureKit + VideoToolbox); Linux (PipeWire) and Windows (WGC) capture via scap and encode

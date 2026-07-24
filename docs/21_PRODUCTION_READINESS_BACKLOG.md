@@ -160,10 +160,9 @@ I have enough verified ground truth to write the backlog. Key confirmations: 20 
 *Severity:* **P1** · *Platforms:* macOS · *Fixability:* `CODE-NOW`.
 *Done:* A cold-install user is walked to both grants with live state detection and a clean relaunch; no silent black-screen from a missing grant.
 
-**M3. macOS global-hotkey emergency stop**
-*Why it matters:* Inv 4 requires emergency stop overriding everything ≤250 ms. macOS has no kernel SAS; the always-visible Stop button exists but a global hotkey that works even when a remote app has focus is the production bar.
-*Severity:* **P1** · *Platforms:* macOS · *Fixability:* `CODE-NOW`.
-*Done:* A registered global hotkey triggers `revoke_all` + `release_all` within budget regardless of focused app; audited.
+**M3. macOS global-hotkey emergency stop** — **DONE (off-device), 2026-07-24.** *Why it matters:* Inv 4 requires emergency stop overriding everything ≤250 ms. macOS has no kernel SAS; the always-visible Stop button exists but a global hotkey that works even when a remote app has focus is the production bar.
+*Severity:* **P1** · *Platforms:* macOS (built cross-platform via `tauri-plugin-global-shortcut`, so Linux/Windows get it too pending their own app-build verification) · *Fixability:* `CODE-NOW`.
+*Done:* A registered global hotkey (`CommandOrControl+Shift+Escape`) triggers the same `trigger_stop_sharing` path the Stop button uses — `release_input`/lease-revoke run synchronously before any network I/O, same ≤250ms budget, regardless of focused app. App check/clippy/fmt clean on macOS. Remaining: a real on-device keypress-through-portal run, and confirming the Linux/Windows app build (not covered by the push-triggered CI gate, only release.yml's tauri-action build).
 
 ### P2
 
