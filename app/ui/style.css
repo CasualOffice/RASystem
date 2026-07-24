@@ -2052,6 +2052,49 @@ body {
 /* Reusable tokenized amber "awaiting attention / unavailable" banner (same role/palette as
    .gossip-unavailable-banner above) for banners built at runtime in JS — e.g. the host-side
    OS-input-unavailable notice — so no raw hex is duplicated per call site. */
+/* "Call" notice (ADR-095) — global, fixed over whichever view is active. Pending-amber accent
+   (matches the system's "awaiting a decision" semantic — the same family as the control-consent
+   card), not teal (reserved for an already-live connection, which this notice is not). */
+.call-banner {
+  position: fixed;
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  max-width: 92vw;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-2);
+  border: 1px solid var(--pending-hairline);
+  border-left: 3px solid var(--pending);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-3);
+}
+.call-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.call-banner-text strong {
+  font-size: 13.5px;
+  color: var(--ink);
+}
+.call-banner-text span {
+  font-size: var(--fs-label);
+  color: var(--ink-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.call-banner-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex: none;
+}
+
 .warning-banner {
   background: var(--pending-glow);
   color: var(--pending);

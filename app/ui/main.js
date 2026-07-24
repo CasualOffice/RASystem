@@ -60,6 +60,38 @@ document.getElementById("share-display-select")?.addEventListener("change", (e) 
   const id = Number.parseInt(e.target.value, 10);
   if (Number.isFinite(id)) invoke("select_display", { id }).catch(() => {});
 });
+
+// ── "Call" notice (ADR-095's AccessRequestIntent) ───────────────────────────────────────────────
+// A contact asked us to share our screen. Global banner over whichever view is active. "Share now"
+// only NAVIGATES to Share (same as clicking the home card) — it does not skip any consent; the
+// existing manual start-sharing + per-viewer Allow/Deny flow still applies in full (Inv 1/9).
+(function () {
+  const banner = document.getElementById("call-request-banner");
+  const who = document.getElementById("call-request-who");
+  const reasonEl = document.getElementById("call-request-reason");
+  const shareBtn = document.getElementById("call-request-share");
+  const dismissBtn = document.getElementById("call-request-dismiss");
+  if (!banner) return;
+
+  function hide() {
+    banner.hidden = true;
+  }
+
+  listen("call-request", (e) => {
+    const p = e.payload || {};
+    // Contact id is a public key hex string — a short prefix is a stable, honest "who" without
+    // needing a contacts lookup here (the OS notification already fired with the same info level).
+    who.textContent = `Contact ${String(p.contactId || "").slice(0, 8)}`;
+    reasonEl.textContent = p.reason ? `— ${p.reason}` : "";
+    banner.hidden = false;
+  });
+
+  shareBtn.addEventListener("click", () => {
+    hide();
+    document.getElementById("go-share").click(); // identical to the user clicking the home card
+  });
+  dismissBtn.addEventListener("click", hide);
+})();
 document.getElementById("go-contacts").addEventListener("click", () => {
   showView("contacts");
   loadContacts();
@@ -1005,6 +1037,37 @@ function renderContacts(list) {
       messages.openThread(c.id, c.label);
     });
 
+    // "Call" (ADR-095's AccessRequestIntent, now wired end to end): a lightweight, dismissible nudge
+    // asking an online contact to start sharing with us. Intent only (Inv 9) — it authorizes nothing;
+    // the receiver decides entirely manually. One click, no reason prompt (kept as frictionless as
+    // Message/Connect); a fixed, honest default reason is sent.
+    const callBtn = document.createElement("button");
+    callBtn.textContent = "Call";
+    callBtn.disabled = c.blocked;
+    callBtn.title = c.blocked
+      ? "Unblock to call"
+      : "Ask them to share their screen with you (works when they're online)";
+    callBtn.addEventListener("click", async () => {
+      const original = callBtn.textContent;
+      callBtn.disabled = true;
+      callBtn.textContent = "Calling…";
+      try {
+        await invoke("call_contact", {
+          contactId: c.id,
+          reason: "wants to view your screen",
+        });
+        callBtn.textContent = "Called";
+      } catch (e) {
+        contactError(String(e));
+        callBtn.textContent = original;
+      } finally {
+        setTimeout(() => {
+          callBtn.disabled = c.blocked;
+          callBtn.textContent = original;
+        }, 2000);
+      }
+    });
+
     const blockBtn = document.createElement("button");
     blockBtn.textContent = c.blocked ? "Unblock" : "Block";
     blockBtn.addEventListener("click", async () => {
@@ -1030,6 +1093,7 @@ function renderContacts(list) {
 
     actions.appendChild(connectContactBtn);
     actions.appendChild(messageBtn);
+    actions.appendChild(callBtn);
     actions.appendChild(blockBtn);
     actions.appendChild(removeBtn);
     li.appendChild(info);

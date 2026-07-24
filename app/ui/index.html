@@ -7,6 +7,21 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
+    <!-- ── "Call" notice (ADR-095's AccessRequestIntent): a global, dismissible nudge shown over
+         whichever view is active — a contact is asking us to share. Intent only, Inv 9/1: it never
+         starts a share by itself; "Share now" only navigates to the Share view for the LOCAL user to
+         decide, same as clicking the home card themselves. -->
+    <div id="call-request-banner" class="call-banner" hidden role="alertdialog" aria-live="assertive">
+      <div class="call-banner-text">
+        <strong id="call-request-who">A contact</strong>
+        <span id="call-request-reason"></span>
+      </div>
+      <div class="call-banner-actions">
+        <button id="call-request-share" class="primary">Share now</button>
+        <button id="call-request-dismiss">Dismiss</button>
+      </div>
+    </div>
+
     <!-- ── Home: pick a role ──────────────────────────────────────────────────────────────────── -->
     <section id="home" class="view">
       <header class="home-head">

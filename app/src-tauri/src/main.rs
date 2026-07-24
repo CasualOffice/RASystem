@@ -1003,6 +1003,53 @@ async fn send_message(
         })
 }
 
+/// **Call a contact** (ADR-095's `AccessRequestIntent`, now actually wired end to end): ask an online
+/// contact to start sharing their screen with us. **Intent only, never authorization** (Inv 9) — the
+/// receiver gets a local consent-style prompt (see `handle_signal`'s `AccessRequestIntent` arm) and
+/// decides entirely manually whether to go share; nothing is granted, connected, or shared by this
+/// call alone. Mirrors `send_message` exactly (same dial/sign/send path), just a different payload.
+#[tauri::command]
+async fn call_contact(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    contact_id: String,
+    reason: String,
+) -> Result<(), String> {
+    use ras_core::identity::SoftwareKeyStore;
+    use ras_identity::{ContactBook, ContactId};
+    use ras_signal::SignalPayload;
+
+    let bytes = parse_contact_id(&contact_id)?;
+    let cid = ContactId::from_bytes(bytes);
+    if !contacts_of(&state)?.is_active_contact(&cid) {
+        return Err("not a saved contact (or blocked)".into());
+    }
+    let seed = identity_seed(&app).ok_or("identity unavailable")?;
+    let ks = SoftwareKeyStore::from_seed(seed);
+    let ep = state
+        .endpoint
+        .clone()
+        .ok_or("not reachable yet — try again in a moment")?;
+    let peer =
+        iroh::EndpointId::from_bytes(&bytes).map_err(|_| "invalid contact id".to_string())?;
+    let target = iroh::EndpointAddr::new(peer);
+    // `reason` is untrusted, bounded UI text (mirrors AccessRequest's own reason field) — shown to the
+    // RECEIVER, never logged. `MAX_SIGNAL_REASON` is enforced by `encode_signed` inside `send_signal`.
+    let payload = SignalPayload::AccessRequestIntent {
+        issued_at: now_ms(),
+        reason,
+    };
+    ras_signal::net::send_signal(ep.iroh(), target, &ks, &payload)
+        .await
+        .map_err(|e| {
+            if e.code == ras_protocol::ErrorCode::InvalidMessage {
+                "reason too long".to_string()
+            } else {
+                "not delivered — contact appears offline".to_string()
+            }
+        })
+}
+
 /// Forward the viewer's pointer position to the host for its remote-pointer overlay ("look here").
 /// Normalized `0..=65535`. Best-effort + non-blocking (latency-first). Not OS input — a purely visual
 /// cursor. No-op unless a viewer session is live.
@@ -1658,6 +1705,16 @@ struct FileOfferPayload {
 struct MessagePayload {
     contact_id: String,
     text: String,
+    at: u64,
+}
+
+/// "Call a contact" notice payload (ADR-095's `AccessRequestIntent`, Inv 9 — intent only, never
+/// authorization). `reason` is untrusted free text from the sender; the JS renders it via
+/// `textContent`, never `innerHTML` (matches the chat/message rendering discipline).
+#[derive(Clone, serde::Serialize)]
+struct CallRequestPayload {
+    contact_id: String,
+    reason: String,
     at: u64,
 }
 
@@ -2553,9 +2610,29 @@ async fn handle_signal(
                     "You have a new message.",
                 );
             }
-            // An access-request intent raises a consent prompt elsewhere; presence beacons arrive via
-            // gossip, not this ALPN. Neither is wired here (out of this increment's scope).
-            SignalPayload::AccessRequestIntent { .. } | SignalPayload::PresenceBeacon { .. } => {}
+            // "Call a contact" (ADR-095): a verified contact is asking us to start sharing our screen
+            // with them. Intent only, NEVER authorization (Inv 9) — this raises a local, dismissible
+            // notice; it starts nothing, shares nothing, connects nothing on its own. If the local
+            // user acts on it, they navigate to Share themselves and go through the SAME manual
+            // start-sharing + per-viewer Allow/Deny flow as always (Inv 1 is never bypassed by a call).
+            SignalPayload::AccessRequestIntent { reason, .. } => {
+                let _ = app.emit(
+                    "call-request",
+                    CallRequestPayload {
+                        contact_id: hex_id(verified.sender.as_bytes()),
+                        reason,
+                        at: now_ms(),
+                    },
+                );
+                alert_user(
+                    app,
+                    true,
+                    "Casual RAS — a contact wants to view your screen",
+                    "Open Casual RAS to share your screen with them, or dismiss.",
+                );
+            }
+            // Presence beacons arrive via gossip, not this ALPN — nothing to do here.
+            SignalPayload::PresenceBeacon { .. } => {}
         },
         // Bad signature / non-contact / stale: content-free warning only (never the sender key detail
         // beyond a short id, never the body). `recv_signal` already withheld the ACK.
@@ -3196,6 +3273,7 @@ fn main() {
             connect_to_host,
             connect_to_contact,
             send_message,
+            call_contact,
             my_identity,
             list_contacts,
             add_contact,
