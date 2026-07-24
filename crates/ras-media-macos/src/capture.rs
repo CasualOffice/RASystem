@@ -334,14 +334,15 @@ impl ScreenCaptureBackend for MacScreenCapture {
         let content = shareable_content()?;
         // SAFETY: `content` is live; `displays()` returns its display array.
         let displays = unsafe { content.displays() };
-        let idx = opts.monitor.0 as usize;
-        let display = if idx < displays.count() {
-            displays.objectAtIndex(idx)
-        } else {
-            displays
-                .firstObject()
-                .ok_or_else(|| RasError::fatal(ErrorCode::CaptureFailed, "no display available"))?
-        };
+        // `enumerate_displays()` reports each display's real `CGDirectDisplayID` as `MonitorDef.id`
+        // (ADR-081), so the picker's selection round-trips through `CaptureOptions.monitor` as that
+        // same real id — match on it here, never treat it as an array index (display ids are
+        // framebuffer-assigned, not small sequential indices, so an index-based lookup would silently
+        // capture the wrong monitor, or fall out of bounds into "primary" every time a non-primary
+        // display was actually picked).
+        let display = find_display_by_id(&displays, opts.monitor.0)
+            .or_else(|| displays.firstObject())
+            .ok_or_else(|| RasError::fatal(ErrorCode::CaptureFailed, "no display available"))?;
         let (dw, dh) = unsafe { (display.width() as u32, display.height() as u32) };
 
         // The display's global bounds (points, top-left origin) so the host UI can place its pointer
@@ -574,6 +575,24 @@ fn enumerate_monitor_defs(content: &SCShareableContent) -> Vec<MonitorDef> {
         (!a.primary, a.top, a.left).cmp(&(!b.primary, b.top, b.left))
     });
     defs
+}
+
+/// Find the `SCDisplay` in `displays` whose real `displayID()` equals `wanted_id` (ADR-081). `0`
+/// (`kCGNullDirectDisplay`, never a real display id) means "no explicit pick" and always misses,
+/// letting the caller fall through to its primary-display default.
+fn find_display_by_id(
+    displays: &NSArray<SCDisplay>,
+    wanted_id: u32,
+) -> Option<Retained<SCDisplay>> {
+    if wanted_id == 0 {
+        return None;
+    }
+    (0..displays.count()).find_map(|i| {
+        let d = displays.objectAtIndex(i);
+        // SAFETY: `d` is a live element of `displays`, itself live for this call.
+        let id = unsafe { d.displayID() };
+        (id == wanted_id).then_some(d)
+    })
 }
 
 /// Synchronously fetch shareable content (SCK's API is completion-handler based).

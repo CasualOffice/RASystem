@@ -124,6 +124,12 @@ mod imp {
         }
     }
 
+    /// The requested display id (`CaptureOptions.monitor.0`) is a real, platform-native id — on
+    /// Windows, `Target::Display.id` (`HMONITOR as u32`, the same value `enumerate_displays()`
+    /// reports); on Linux it is unused (see the comment on `enumerate_displays` below). `0` always
+    /// means "no explicit pick" and resolves to the platform default (primary).
+    const NO_DISPLAY_PICK: u32 = 0;
+
     /// A borrowed captured frame; exposes its BGRA buffer as a `CpuBgra` surface.
     pub struct ScapFrame<'a> {
         buf: &'a Buf,
@@ -262,15 +268,17 @@ mod imp {
             });
             let stop = Arc::new(AtomicBool::new(false));
             let fps = opts.target_fps.max(1);
+            let target_id = opts.monitor.0;
 
             // scap's `Options` embeds `Target` (a raw window/monitor handle) which is `!Send` on
             // Windows, so it can't cross the thread boundary even when `None`. Pass only the `Send`
-            // `fps` and build `Options` for the primary display inside `capture_loop`.
+            // `fps`/`target_id` and build `Options` (looking the id back up via `get_all_targets()`)
+            // inside `capture_loop`.
             let thread_shared = shared.clone();
             let thread_stop = stop.clone();
             let handle = std::thread::Builder::new()
                 .name("ras-scap-capture".into())
-                .spawn(move || capture_loop(fps, thread_shared, thread_stop))
+                .spawn(move || capture_loop(fps, target_id, thread_shared, thread_stop))
                 .map_err(|_| cap_fatal("failed to spawn capture thread"))?;
 
             self.running = Some(Running {
@@ -364,6 +372,19 @@ mod imp {
             })
         }
 
+        /// Host-local picker query (ADR-081, Inv 1). **Windows**: real per-monitor geometry — `scap`'s
+        /// own `Target::Display` gives id/title/`HMONITOR`, `GetMonitorInfoW` gives the virtual-desktop
+        /// position, `get_target_dimensions`/`get_scale_factor` give the physical pixel size + DPI
+        /// scale (see `enumerate_displays_windows`). **Linux**: intentionally empty — `scap` reports no
+        /// targets at all there (the xdg-desktop-portal picks interactively at capture start, not
+        /// programmatically), so there is nothing a picker here could actually make take effect; the
+        /// app falls back to a single honest "Display 1" entry rather than offering a choice that
+        /// silently wouldn't change anything.
+        #[cfg(target_os = "windows")]
+        fn enumerate_displays(&self) -> Vec<ras_media::MonitorDef> {
+            enumerate_displays_windows()
+        }
+
         fn stop(&mut self) {
             if let Some(mut running) = self.running.take() {
                 running.stop.store(true, Ordering::SeqCst);
@@ -441,9 +462,29 @@ mod imp {
         slot.take()
     }
 
+    /// Resolve a requested display id (`CaptureOptions.monitor.0`) to a `scap` capture `Target`, by
+    /// matching against a fresh `get_all_targets()` call. Must run on the thread that will consume the
+    /// result — `Target` is `!Send` on Windows (it embeds a raw `HMONITOR`), so it cannot be looked up
+    /// in `start()` and passed in. `NO_DISPLAY_PICK` or an id with no match resolves to `None` (scap's
+    /// own platform default, effectively the primary display — never a hard error over a stale pick).
+    ///
+    /// On Linux `get_all_targets()` always returns empty (the xdg-desktop-portal picks interactively
+    /// when the capturer starts, not programmatically — scap's own Linux target-enumeration is a
+    /// deliberate no-op, confirmed by inspecting scap's source), so a Linux `target_id` is always
+    /// ignored here; `enumerate_displays()` below reflects that same reality by returning no entries,
+    /// so the app never offers a picker that could not actually change anything.
+    fn resolve_target(target_id: u32) -> Option<scap::Target> {
+        if target_id == NO_DISPLAY_PICK {
+            return None;
+        }
+        scap::get_all_targets()
+            .into_iter()
+            .find(|t| matches!(t, scap::Target::Display(d) if d.id == target_id))
+    }
+
     /// The capture thread: build the capturer, then push each frame into the latest-frame slot
     /// (drop-old — only the newest matters for a low-latency feed).
-    fn capture_loop(fps: u32, shared: Arc<Shared>, stop: Arc<AtomicBool>) {
+    fn capture_loop(fps: u32, target_id: u32, shared: Arc<Shared>, stop: Arc<AtomicBool>) {
         // Built here (not passed in) because `Options`/`Target` is `!Send` on Windows.
         let options = Options {
             fps,
@@ -453,7 +494,7 @@ mod imp {
             // experience; keep it simple.)
             show_cursor: true,
             show_highlight: false,
-            target: None, // primary display
+            target: resolve_target(target_id), // `None` = platform default (primary)
             crop_area: None,
             output_type: FrameType::BGRAFrame,
             output_resolution: Resolution::Captured,
@@ -516,6 +557,71 @@ mod imp {
         // Teardown: scap's `stop_capture` can `expect`/`join` internally (Linux joins the pipewire
         // thread). Contain any unwind so shutdown never aborts the process.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| capturer.stop_capture()));
+    }
+
+    /// Real per-display geometry on Windows (ADR-081). scap's own `get_scale_factor`/
+    /// `get_target_dimensions` helpers are private to that crate, so this reimplements the same GDI
+    /// calls scap uses internally: `GetMonitorInfoW` for the virtual-desktop position + pixel rect
+    /// (`dwFlags & MONITORINFOF_PRIMARY` for the primary flag) and `GetDpiForMonitor(MDT_EFFECTIVE_DPI)`
+    /// for the HiDPI scale. A monitor a GDI call fails on is dropped rather than reported with made-up
+    /// geometry. Primary-first, then top-to-bottom / left-to-right (matches the macOS backend's
+    /// convention, ADR-081 §"Primary-first by convention").
+    #[cfg(target_os = "windows")]
+    fn enumerate_displays_windows() -> Vec<ras_media::MonitorDef> {
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+        use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+
+        const BASE_DPI: u32 = 96;
+        // `MONITORINFOF_PRIMARY`, inlined to avoid pulling in the `Win32_UI_WindowsAndMessaging`
+        // feature for one documented constant (winuser.h: `#define MONITORINFOF_PRIMARY 0x00000001`).
+        const MONITORINFOF_PRIMARY: u32 = 1;
+
+        let mut defs: Vec<ras_media::MonitorDef> = scap::get_all_targets()
+            .into_iter()
+            .filter_map(|t| match t {
+                scap::Target::Display(d) => Some(d),
+                scap::Target::Window(_) => None,
+            })
+            .filter_map(|d| {
+                let mut info = MONITORINFO {
+                    cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                // SAFETY: `d.raw_handle` is a live `HMONITOR` from a just-fetched enumeration; `info`
+                // is a correctly-sized, zeroed out-param buffer per the `GetMonitorInfoW` contract.
+                let ok = unsafe { GetMonitorInfoW(d.raw_handle, &mut info) }.0 != 0;
+                if !ok {
+                    return None;
+                }
+
+                let (mut dpi_x, mut dpi_y) = (BASE_DPI, BASE_DPI);
+                // SAFETY: same live `HMONITOR`; `dpi_x`/`dpi_y` are valid out-params. A failure leaves
+                // them at the `BASE_DPI` (100%) fallback set above.
+                let _ = unsafe {
+                    GetDpiForMonitor(d.raw_handle, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y)
+                };
+                let scale_percent = (dpi_x * 100 / BASE_DPI).clamp(1, u32::from(u16::MAX)) as u16;
+
+                let pixel_width = (info.rcMonitor.right - info.rcMonitor.left).max(0) as u32;
+                let pixel_height = (info.rcMonitor.bottom - info.rcMonitor.top).max(0) as u32;
+                let logical_width = pixel_width * 100 / u32::from(scale_percent);
+                let logical_height = pixel_height * 100 / u32::from(scale_percent);
+
+                Some(ras_media::MonitorDef {
+                    id: ras_media::MonitorId(d.id),
+                    left: info.rcMonitor.left,
+                    top: info.rcMonitor.top,
+                    logical_width,
+                    logical_height,
+                    pixel_width,
+                    pixel_height,
+                    scale_percent,
+                    primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+                })
+            })
+            .collect();
+        defs.sort_by_key(|d| (!d.primary, d.top, d.left));
+        defs
     }
 
     #[cfg(test)]

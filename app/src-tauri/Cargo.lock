@@ -5595,7 +5595,6 @@ dependencies = [
  "scap",
  "windows 0.58.0",
  "windows-capture",
- "x11rb",
 ]
 
 [[package]]
