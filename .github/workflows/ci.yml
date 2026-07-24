@@ -59,4 +59,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: workspace
+        uses: EmbarkStudios/cargo-deny-action@v2
+      # app/src-tauri is a separate manifest outside the root workspace (Tauri v2, heavy WebView deps
+      # kept out of the main build per CLAUDE.md §7) — it was never actually checked here before
+      # (discovered 2026-07-24). Same deny.toml policy, pointed at the app's own Cargo.lock.
+      - name: app
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: app/src-tauri/Cargo.toml

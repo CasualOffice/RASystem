@@ -48,7 +48,41 @@ confidence-threshold = 0.9
 #   ADR-080), so the vendored libopus (BSD-3, Xiph — permissive, Inv 18) still builds cleanly on every
 #   CI runner. No CVE, no exploitable surface (encode/decode of our own audio). Follow-up: evaluate a
 #   maintained Opus binding (e.g. a `libopus`/`opus` wrapper) once one that vendors cleanly exists.
-ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2026-0150"]
+#
+# The following 16 are all pulled transitively by **Tauri v2 itself** (app/src-tauri, checked by a
+# second `manifest-path` deny run in CI, discovered 2026-07-24) — framework dependencies, not choices
+# we make, and every one is an *unmaintained-status* advisory with **no CVE and no safe upgrade** per
+# the advisory text itself:
+#   - 10x gtk-rs GTK3 bindings (RUSTSEC-2024-0411..0420, various `atk`/`gdk`/`gtk`/`gtk3-macros`
+#     crates): Tauri's Linux WebKitGTK backend depends on the (upstream-archived) gtk-rs GTK3 project.
+#     Only resolvable if Tauri migrates its Linux backend off GTK3 — out of our control.
+#   - RUSTSEC-2024-0370 `proc-macro-error`: an unmaintained proc-macro helper pulled by Tauri's own
+#     macro crates.
+#   - 5x `unic-*` Unicode-data crates (RUSTSEC-2025-0075/0080/0081/0098/0100 — `unic-char-property`,
+#     `unic-char-range`, `unic-common`, `unic-ucd-ident`, `unic-ucd-version`): pulled via `urlpattern`
+#     (Tauri's own URL-pattern matcher for its capability/CSP system) -> `tauri-utils` -> `tauri`. Static
+#     Unicode tables, no untrusted-input parsing on our paths.
+#   Revisit if Tauri drops GTK3 / `urlpattern` picks up a maintained fork / any of these gain a real CVE.
+ignore = [
+  "RUSTSEC-2024-0436",
+  "RUSTSEC-2026-0150",
+  "RUSTSEC-2024-0411",
+  "RUSTSEC-2024-0412",
+  "RUSTSEC-2024-0413",
+  "RUSTSEC-2024-0414",
+  "RUSTSEC-2024-0415",
+  "RUSTSEC-2024-0416",
+  "RUSTSEC-2024-0417",
+  "RUSTSEC-2024-0418",
+  "RUSTSEC-2024-0419",
+  "RUSTSEC-2024-0420",
+  "RUSTSEC-2024-0370",
+  "RUSTSEC-2025-0075",
+  "RUSTSEC-2025-0080",
+  "RUSTSEC-2025-0081",
+  "RUSTSEC-2025-0098",
+  "RUSTSEC-2025-0100",
+]
 
 [bans]
 multiple-versions = "warn"
