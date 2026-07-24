@@ -162,10 +162,21 @@ command (mirrors `input_pointer_move`'s lease/generation/seq stamping exactly), 
 
 ### P1
 
-**M2. First-run guided TCC permission flow (Screen Recording + Accessibility)**
+**M2. First-run guided TCC permission flow (Screen Recording + Accessibility)** — DONE (off-device).
 *Why it matters:* TCC friction is the documented #1 macOS onboarding failure across every competitor. Need: deep-link to the exact System Settings pane, detect grant state, handle the must-relaunch-after-granting quirk.
 *Severity:* **P1** · *Platforms:* macOS · *Fixability:* `CODE-NOW`.
-*Done:* A cold-install user is walked to both grants with live state detection and a clean relaunch; no silent black-screen from a missing grant.
+*Done:* `ensure_permissions` (SPEC P0-3) was already built and wired: live state detection
+(`CGPreflightScreenCaptureAccess`/`AXIsProcessTrusted`), the native OS grant dialog
+(`CGRequestScreenCaptureAccess`), per-grant panel rows with exact System-Settings deep links
+(`open_system_settings`), and a fail-safe default (any query failure ⇒ assume ungranted, never a
+silent black frame). Found it undocumented as done while investigating this item; the one real gap
+against its own "Done" criteria — the must-relaunch-after-granting quirk — is now closed too: a "Quit
+& Reopen" button (`restart_app`, wraps `AppHandle::restart`) sits next to "Open Settings" on every
+ungranted-permission row, since a grant flipped in System Settings doesn't take effect in an
+already-running process (a real macOS TCC behavior, not a hypothetical) and retrying Share in the same
+process can silently re-fail even though the grant is genuine. App check/clippy/fmt clean; JS
+syntax-checked. On-device: confirming the relaunch actually picks up a just-granted permission on a
+real Mac.
 
 **M3. macOS global-hotkey emergency stop** — **DONE (off-device), 2026-07-24.** *Why it matters:* Inv 4 requires emergency stop overriding everything ≤250 ms. macOS has no kernel SAS; the always-visible Stop button exists but a global hotkey that works even when a remote app has focus is the production bar.
 *Severity:* **P1** · *Platforms:* macOS (built cross-platform via `tauri-plugin-global-shortcut`, so Linux/Windows get it too pending their own app-build verification) · *Fixability:* `CODE-NOW`.

@@ -3195,6 +3195,18 @@ async fn check_for_updates(app: tauri::AppHandle) -> Result<Option<String>, Stri
     }
 }
 
+/// Quit and relaunch the app (backlog M2). macOS's TCC daemon updates its grant database the moment a
+/// user flips a permission in System Settings, but an *already-running* process can keep reporting the
+/// stale (ungranted) state from `CGPreflightScreenCaptureAccess` until it restarts — a well-known TCC
+/// quirk. Retrying Share in the same process can silently re-fail even though the grant is real, which
+/// reads as "the button is lying to me." Exposed next to "Open Settings" on the permission panel so a
+/// user who already granted access has an explicit, obvious way to pick it up, instead of guessing that
+/// a full quit-and-reopen (not just closing the window) is what's needed.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 /// Download and apply the pending signed update, then relaunch. Only ever called after the local user
 /// explicitly consents in the UI. The download is signature-verified by the plugin; a bad signature
 /// aborts the install (no unsigned code is ever run).
@@ -3357,6 +3369,7 @@ fn main() {
             respond_file_offer,
             check_for_updates,
             install_update,
+            restart_app,
             read_diagnostics,
             list_online,
             open_system_settings,

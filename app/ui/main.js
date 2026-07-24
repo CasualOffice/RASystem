@@ -1339,6 +1339,17 @@ function renderSharePerms() {
         invoke("open_system_settings", { pane: g.deepLink }).catch(() => {});
       });
       row.appendChild(btn);
+      // macOS TCC quirk (backlog M2): a permission granted in System Settings doesn't take effect in
+      // an already-running process until it restarts. Without this, "I granted it and it's still
+      // showing denied" is a dead end — the obvious next step (retry Share) doesn't help.
+      const restartBtn = document.createElement("button");
+      restartBtn.className = "grant-settings-btn";
+      restartBtn.title = "Already granted this in System Settings? macOS needs a full restart to pick it up.";
+      restartBtn.textContent = "Quit & Reopen";
+      restartBtn.addEventListener("click", () => {
+        invoke("restart_app").catch(() => {});
+      });
+      row.appendChild(restartBtn);
     }
     sharePermsPanel.appendChild(row);
   }
