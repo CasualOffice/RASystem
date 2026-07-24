@@ -11,7 +11,7 @@
 //! and sinks stay `dyn` (see [`crate::deps`]). Phase-1 target fps is a constant ([`HOST_TARGET_FPS`])
 //! because `HostSessionConfig` carries no fps field yet.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -266,6 +266,11 @@ struct HostInner<C, E> {
     audio_sink_slot: Arc<Mutex<Option<Box<dyn crate::deps::AudioSink>>>>,
     /// ABR target the media thread applies via `set_bitrate` when it changes (lock-free hot path).
     target_bitrate: Arc<AtomicU32>,
+    /// ABR's SVC layer-shedding ceiling the media thread applies via `set_max_temporal_layer` when it
+    /// changes (lock-free hot path, mirrors `target_bitrate`). Encoded as `u8::MAX` = "no ceiling"
+    /// (`None` — forward every layer) since `Option<u8>` has no native atomic; every real ceiling
+    /// value from `LatencyFirstAbr` is `0` or `1` (`VP9_MAX_LAYER_ID`-bounded), far below the sentinel.
+    max_temporal_layer: Arc<AtomicU8>,
     /// Frames actually handed to the transport since the last stats tick (delivered-fps signal).
     frames_sent: Arc<AtomicU32>,
     /// Latest decoder feedback from the controller (consumed by the ABR tick). `None` until the
@@ -380,6 +385,7 @@ where
                 current_config: Arc::new(Mutex::new(None)),
                 audio_sink_slot: Arc::new(Mutex::new(None)),
                 target_bitrate: Arc::new(AtomicU32::new(0)),
+                max_temporal_layer: Arc::new(AtomicU8::new(NO_TEMPORAL_LAYER_CEILING)),
                 frames_sent: Arc::new(AtomicU32::new(0)),
                 last_feedback: Mutex::new(None),
                 feedback_count: AtomicU64::new(0),
@@ -730,6 +736,7 @@ where
             stop: inner.stop.clone(),
             keyframe: inner.keyframe.clone(),
             target_bitrate: inner.target_bitrate.clone(),
+            max_temporal_layer: inner.max_temporal_layer.clone(),
             frames_sent: inner.frames_sent.clone(),
             video_sink: inner.video_sink_slot.clone(),
             current_config: inner.current_config.clone(),
@@ -1053,11 +1060,34 @@ where
     }
 }
 
+/// Sentinel [`AtomicU8`] value for `max_temporal_layer` meaning "no ceiling" (`Option::None` —
+/// forward every SVC layer). `Option<u8>` has no native atomic; every real ceiling
+/// `LatencyFirstAbr` computes is `0` or `1` (bounded by `VP9_MAX_LAYER_ID`), far below this sentinel.
+const NO_TEMPORAL_LAYER_CEILING: u8 = u8::MAX;
+
+/// Encode an ABR `max_temporal_layer` decision for the lock-free atomic (see
+/// [`NO_TEMPORAL_LAYER_CEILING`]).
+fn encode_temporal_layer_ceiling(v: Option<u8>) -> u8 {
+    v.unwrap_or(NO_TEMPORAL_LAYER_CEILING)
+}
+
+/// Decode the lock-free atomic back into the `Option<u8>` `VideoEncoderBackend::set_max_temporal_layer`
+/// expects.
+fn decode_temporal_layer_ceiling(v: u8) -> Option<u8> {
+    if v == NO_TEMPORAL_LAYER_CEILING {
+        None
+    } else {
+        Some(v)
+    }
+}
+
 /// Lock-free signals shared between the async orchestrator and the blocking media thread.
 struct MediaSignals {
     stop: Arc<AtomicBool>,
     keyframe: Arc<AtomicBool>,
     target_bitrate: Arc<AtomicU32>,
+    /// ABR's SVC layer-shedding ceiling (see [`NO_TEMPORAL_LAYER_CEILING`]); mirrors `target_bitrate`.
+    max_temporal_layer: Arc<AtomicU8>,
     frames_sent: Arc<AtomicU32>,
     /// The shared egress sink the control loop swaps on a re-serve (ADR-091). `None` between a transport
     /// loss and the re-serve — the pump keeps encoding and drops frames until a fresh sink appears.
@@ -1085,12 +1115,20 @@ where
     E: VideoEncoderBackend,
 {
     let mut applied_bitrate = sig.target_bitrate.load(Ordering::Relaxed);
+    let mut applied_layer_ceiling = sig.max_temporal_layer.load(Ordering::Relaxed);
     let mut next_deadline = Instant::now() + sig.frame_interval;
     while !sig.stop.load(Ordering::Relaxed) {
         // Retarget CBR mid-stream when ABR moved the target — keyframe-free (latency-first).
         let want = sig.target_bitrate.load(Ordering::Relaxed);
         if want != 0 && want != applied_bitrate && encoder.set_bitrate(want).is_ok() {
             applied_bitrate = want;
+        }
+        // Retarget the SVC layer-shedding ceiling the same way — a no-op on any encoder without real
+        // temporal-SVC support (the trait default), so this is always safe to apply unconditionally.
+        let want_layer = sig.max_temporal_layer.load(Ordering::Relaxed);
+        if want_layer != applied_layer_ceiling {
+            encoder.set_max_temporal_layer(decode_temporal_layer_ceiling(want_layer));
+            applied_layer_ceiling = want_layer;
         }
         if sig.keyframe.swap(false, Ordering::Relaxed) {
             encoder.request_keyframe(KeyframeReason::UnrecoverableLoss);
@@ -1349,6 +1387,10 @@ async fn host_stats_loop<C, E>(inner: &HostInner<C, E>, config: StreamConfig) {
         inner
             .target_bitrate
             .store(decision.target_bitrate_bps, Ordering::Relaxed);
+        inner.max_temporal_layer.store(
+            encode_temporal_layer_ceiling(decision.max_temporal_layer),
+            Ordering::Relaxed,
+        );
         if decision.force_keyframe.is_some() {
             inner.keyframe.store(true, Ordering::Relaxed);
         }

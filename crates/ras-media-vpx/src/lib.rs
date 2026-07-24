@@ -795,6 +795,12 @@ impl ras_media::VideoEncoderBackend for VpxEncoder {
     fn config(&self) -> StreamConfig {
         self.config
     }
+
+    fn set_max_temporal_layer(&mut self, max_layer: Option<u8>) {
+        // Delegate to the existing inherent method (kept public in its own right — the crate's own
+        // tests call it directly without going through the trait object).
+        VpxEncoder::set_max_temporal_layer(self, max_layer);
+    }
 }
 
 /// The [`StreamConfig`] these VP8/VP9 software backends negotiate. The concrete VP8/VP9 codec identity

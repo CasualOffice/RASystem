@@ -457,6 +457,14 @@ pub trait VideoEncoderBackend: Send {
 
     /// The currently negotiated config.
     fn config(&self) -> StreamConfig;
+
+    /// **Sender-side SVC layer-shedding ceiling** (ABR-driven, orthogonal to [`Self::set_bitrate`]):
+    /// the highest temporal-layer id this encoder should still forward. `None` forwards every layer
+    /// (the default). A default **no-op** — only a backend with real temporal-SVC support (VP9)
+    /// overrides it; every other codec (H.264 has no temporal layers in this pipeline) silently
+    /// ignores the ABR's layer decision, so the ABR can compute it unconditionally without needing to
+    /// know which codec is actually in use.
+    fn set_max_temporal_layer(&mut self, _max_layer: Option<u8>) {}
 }
 
 /// A decoded, presentable frame (native-fallback path only).

@@ -18,6 +18,25 @@ const BACKOFF_FACTOR: f32 = 0.8;
 /// Fraction of the estimated deliverable rate we allow ourselves to fill (headroom for pacing).
 const BANDWIDTH_UTILISATION: f32 = 0.9;
 
+/// SVC layer-shedding thresholds, as a fraction of the SESSION ceiling (`self.ceiling_bps`, not the
+/// per-tick bandwidth-constrained one) that the current bandwidth-derived tick ceiling has fallen to.
+/// A DELIBERATELY more conservative (lower) bar than `LOSS_BACKOFF_THRESHOLD` alone: layer-dropping
+/// cuts frame RATE (a visible smoothness hit), so it is reserved for genuinely bandwidth-starved
+/// links where bitrate reduction alone is not enough — not the routine loss response bitrate already
+/// handles every tick.
+///
+/// Below this fraction of the session ceiling: shed to the base layer only (`Some(0)`, ~1/4 frame
+/// rate of the full pattern) — severe, sustained bandwidth pressure.
+const SVC_SHED_TO_BASE_FRACTION: f32 = 0.35;
+/// Below this fraction (but at/above the base threshold): shed to base+middle (`Some(1)`, ~1/2 frame
+/// rate) — moderate pressure, still smoother than base-only.
+const SVC_SHED_TO_MID_FRACTION: f32 = 0.65;
+/// Loss fraction above which we shed layers regardless of the bandwidth estimate — sustained loss
+/// this severe means frames aren't reliably arriving even at a nominally-adequate bitrate. Set well
+/// above `LOSS_BACKOFF_THRESHOLD` (which already reacts to ordinary loss every tick via bitrate
+/// alone) so layer-shedding stays reserved for the genuinely bad case.
+const SVC_SHED_LOSS_THRESHOLD: f32 = 0.08;
+
 /// Latency-first ABR. Additive-increase toward the bandwidth-derived ceiling, multiplicative
 /// decrease on loss; the target is always clamped to `[floor, ceiling]`.
 #[derive(Debug, Clone)]
@@ -77,9 +96,26 @@ impl AdaptiveBitrateController for LatencyFirstAbr {
             .and_then(|f| f.keyframe_request)
             .map(|kr| kr.reason);
 
+        // SVC layer-shedding: a second, independent bandwidth response (see the threshold docs above)
+        // — reserved for genuinely bad conditions, not the routine loss/bandwidth response bitrate
+        // already handles every tick. `tick_ceiling` (not `self.current_bps`) is the input: it is the
+        // bandwidth-DERIVED signal, so it reacts immediately rather than waiting for the AIMD-paced
+        // `current_bps` to catch up over several ticks.
+        let ceiling_fraction = tick_ceiling as f32 / self.ceiling_bps.max(1) as f32;
+        let max_temporal_layer = if health.loss_fraction > SVC_SHED_LOSS_THRESHOLD
+            || ceiling_fraction < SVC_SHED_TO_BASE_FRACTION
+        {
+            Some(0)
+        } else if ceiling_fraction < SVC_SHED_TO_MID_FRACTION {
+            Some(1)
+        } else {
+            None
+        };
+
         BitrateDecision {
             target_bitrate_bps: self.current_bps,
             force_keyframe,
+            max_temporal_layer,
         }
     }
 }
@@ -150,6 +186,65 @@ mod tests {
             abr.on_tick(&health(50_000_000, 0.0), Some(fb))
                 .force_keyframe,
             Some(KeyframeReason::DecoderReset)
+        );
+    }
+
+    #[test]
+    fn forwards_every_svc_layer_when_bandwidth_is_abundant() {
+        let mut abr = LatencyFirstAbr::new(100_000, 10_000_000, 100_000);
+        assert_eq!(
+            abr.on_tick(&health(100_000_000, 0.0), None)
+                .max_temporal_layer,
+            None
+        );
+    }
+
+    #[test]
+    fn sheds_to_base_layer_under_severe_bandwidth_pressure() {
+        // ceiling 10 Mbps; bandwidth 3 Mbps -> deliverable 2.7 Mbps -> 27% of ceiling, below the 35%
+        // base-layer threshold.
+        let mut abr = LatencyFirstAbr::new(100_000, 10_000_000, 100_000);
+        assert_eq!(
+            abr.on_tick(&health(3_000_000, 0.0), None)
+                .max_temporal_layer,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn sheds_to_mid_layer_under_moderate_bandwidth_pressure() {
+        // ceiling 10 Mbps; bandwidth 5 Mbps -> deliverable 4.5 Mbps -> 45% of ceiling, between the
+        // base (35%) and mid (65%) thresholds.
+        let mut abr = LatencyFirstAbr::new(100_000, 10_000_000, 100_000);
+        assert_eq!(
+            abr.on_tick(&health(5_000_000, 0.0), None)
+                .max_temporal_layer,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn sheds_to_base_layer_on_severe_loss_even_with_abundant_bandwidth() {
+        // Bandwidth alone would forward every layer (fraction 1.0), but loss above the shed threshold
+        // must still force base-layer-only — sustained loss is its own independent trigger.
+        let mut abr = LatencyFirstAbr::new(100_000, 10_000_000, 100_000);
+        assert_eq!(
+            abr.on_tick(&health(100_000_000, 0.10), None)
+                .max_temporal_layer,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn ordinary_loss_below_the_shed_threshold_does_not_shed_layers() {
+        // LOSS_BACKOFF_THRESHOLD (2%) already triggers a bitrate backoff every tick; layer-shedding is
+        // reserved for the more severe SVC_SHED_LOSS_THRESHOLD (8%) — 3% loss must not additionally
+        // shed layers on top of the bitrate response.
+        let mut abr = LatencyFirstAbr::new(100_000, 10_000_000, 100_000);
+        assert_eq!(
+            abr.on_tick(&health(100_000_000, 0.03), None)
+                .max_temporal_layer,
+            None
         );
     }
 }

@@ -222,6 +222,12 @@ pub struct BitrateDecision {
     /// Last-resort resync (FEC in transport is the preferred loss response, since IDR spikes
     /// bitrate).
     pub force_keyframe: Option<KeyframeReason>,
+    /// **Sender-side SVC layer-shedding ceiling** — orthogonal to `target_bitrate_bps`, a second,
+    /// independent knob for shedding frames under tight bandwidth without a bitrate/quality collapse.
+    /// `None` forwards every layer. Silently ignored by any encoder without real temporal-SVC support
+    /// (`VideoEncoderBackend::set_max_temporal_layer`'s default is a no-op), so this is always safe to
+    /// compute unconditionally regardless of which codec is actually in use this session.
+    pub max_temporal_layer: Option<u8>,
 }
 
 #[cfg(test)]
