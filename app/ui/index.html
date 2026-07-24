@@ -110,6 +110,13 @@
         </div>
         <div id="share-indicator" class="indicator idle">● IDLE</div>
       </header>
+      <!-- Multi-monitor picker (ADR-081): only shown when more than one display is found. The local
+           host user's choice (Inv 1) — set before Starting…, since a live share does not restart
+           capture on a change. -->
+      <label class="optrow" for="share-display-select" id="share-display-row" hidden>
+        <span class="optrow-label">Share which screen?</span>
+        <select id="share-display-select"></select>
+      </label>
       <p class="lead">Send this connection ticket to the person who will view your screen:</p>
       <div class="ticketrow">
         <textarea id="share-ticket" readonly rows="3" placeholder="Starting…"></textarea>

@@ -29,7 +29,36 @@ function showView(name) {
 document.getElementById("go-connect").addEventListener("click", () => showView("connect"));
 document.getElementById("go-share").addEventListener("click", () => {
   showView("share");
+  populateDisplayPicker(); // ADR-081: independent of start_sharing — see its own comment
   startSharing();
+});
+
+// ── Multi-monitor picker (ADR-081) ──────────────────────────────────────────────────────────────
+// Host-LOCAL choice only (Inv 1): populated when entering the Share view, alongside — not gating —
+// `start_sharing` (which just binds the endpoint + publishes a ticket; actual capture only begins
+// once a viewer connects, in the Rust `serve_one`, which reads the CURRENT selection at that moment).
+// So a selection made any time before a viewer connects still applies correctly.
+async function populateDisplayPicker() {
+  const row = document.getElementById("share-display-row");
+  const select = document.getElementById("share-display-select");
+  if (!row || !select) return;
+  try {
+    const displays = await invoke("list_displays");
+    select.innerHTML = "";
+    for (const d of displays) {
+      const opt = document.createElement("option");
+      opt.value = String(d.id);
+      opt.textContent = d.primary ? `${d.label} (primary)` : d.label;
+      select.appendChild(opt);
+    }
+    row.hidden = displays.length < 2; // a single-display machine needs no picker
+  } catch (_) {
+    row.hidden = true; // list_displays unsupported on this platform — no picker, default display
+  }
+}
+document.getElementById("share-display-select")?.addEventListener("change", (e) => {
+  const id = Number.parseInt(e.target.value, 10);
+  if (Number.isFinite(id)) invoke("select_display", { id }).catch(() => {});
 });
 document.getElementById("go-contacts").addEventListener("click", () => {
   showView("contacts");

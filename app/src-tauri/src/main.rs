@@ -1337,6 +1337,11 @@ async fn input_set_lock_state(
 struct ShareState {
     session: Mutex<Option<ShareSession>>,
     consent: Arc<LocalConsent>,
+    /// The display the LOCAL host user has chosen to share (Inv 1 — never the controller's choice).
+    /// Set by the `select_display` command before a share starts; read by `serve_one` in place of the
+    /// old hardcoded `MonitorId(0)`. Defaults to `0` (the primary/first display) so a share works with
+    /// no picker interaction on a single-display machine.
+    selected_monitor: Mutex<u32>,
 }
 
 /// A running share: the `watch` sender used to tear the whole share down, plus (once a viewer is
@@ -1772,6 +1777,65 @@ fn set_clipboard_allowed(state: State<'_, AppState>, allowed: bool) {
 #[tauri::command]
 fn set_audio_allowed(state: State<'_, AppState>, allowed: bool) {
     state.share.consent.set_audio_allowed(allowed);
+}
+
+/// One display, for the Share view's picker. Content-safe (no window titles/content — just geometry +
+/// a synthesized ordinal label; `MonitorDef` carries no display name).
+#[derive(serde::Serialize)]
+struct MonitorDto {
+    id: u32,
+    label: String,
+    primary: bool,
+    logical_width: u32,
+    logical_height: u32,
+}
+
+/// List the displays this machine can share (ADR-081 `enumerate_displays`), for a picker shown BEFORE
+/// `start_sharing` — a host-LOCAL query (Inv 1: the owner picks what to share; a connecting viewer
+/// never sees or influences this list). Builds a throwaway capture backend purely to query geometry —
+/// `enumerate_displays` does not require (and this does not start) an active capture session. Returns
+/// a single best-effort entry (id 0, "Display 1", `primary: true`, zeroed geometry) if the platform
+/// cannot enumerate (e.g. scap on Linux/Windows has no real geometry API), so the picker always has at
+/// least one honest choice rather than an empty list.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[tauri::command]
+fn list_displays() -> Vec<MonitorDto> {
+    use ras_media::ScreenCaptureBackend as _;
+    #[cfg(target_os = "macos")]
+    let capture = ras_media_macos::MacScreenCapture::new();
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let capture = ras_media_scap::ScapCapture::new();
+
+    let defs = capture.enumerate_displays();
+    if defs.is_empty() {
+        return vec![MonitorDto {
+            id: 0,
+            label: "Display 1".to_string(),
+            primary: true,
+            logical_width: 0,
+            logical_height: 0,
+        }];
+    }
+    defs.into_iter()
+        .enumerate()
+        .map(|(i, d)| MonitorDto {
+            id: d.id.0,
+            label: format!("Display {}", i + 1),
+            primary: d.primary,
+            logical_width: d.logical_width,
+            logical_height: d.logical_height,
+        })
+        .collect()
+}
+
+/// Set which display `start_sharing` will capture (Inv 1 — the local host user's choice; call BEFORE
+/// `start_sharing`, since a live share does not restart capture on a change). Unknown/stale ids are
+/// accepted as-is — `MonitorId` falls back to the primary display fail-safe in every capture backend
+/// (never a hard error over a picker race).
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[tauri::command]
+fn select_display(state: State<'_, AppState>, id: u32) {
+    *lock(&state.share.selected_monitor) = id;
 }
 
 /// Stop the whole share (drop the ticket, stop accepting, end any live viewer). Idempotent.
@@ -2714,6 +2778,15 @@ async fn serve_one(
     }
 
     let (capture, encoder) = make_backends(negotiated_codec);
+    // The LOCAL host user's display choice (Inv 1 — set via `select_display`, never the controller's
+    // choice; defaults to 0, the primary/first display, so a share works with no picker interaction
+    // on a single-display machine).
+    let monitor = {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let id = *lock(&state.share.selected_monitor);
+        id
+    };
     // Host side of ADR-091 resume: on a transport drop the host re-accepts on the same endpoint and
     // waits for the same peer (by authenticated EndpointId) to re-dial, then resumes. Symmetric to the
     // controller's re-dial above.
@@ -2721,7 +2794,7 @@ async fn serve_one(
         Arc::new(IrohSessionTransport::new(endpoint.clone(), session).with_reconnect_host());
     let host = HostSession::new(
         // Exclude our own overlay/indicator windows from the shared feed (privacy + no feedback loop).
-        HostSessionConfig::new(MonitorId(0))
+        HostSessionConfig::new(MonitorId(monitor))
             .with_excluded_windows(host_excluded_windows(app))
             .with_host_id(host_id)
             // Stamp the negotiated codec so the capture declares it (codec negotiation) — the capture
@@ -3146,6 +3219,8 @@ fn main() {
             input_set_lock_state,
             start_sharing,
             stop_sharing,
+            list_displays,
+            select_display,
             show_main_window,
             respond_consent,
             set_clipboard_allowed,
@@ -3249,6 +3324,7 @@ fn main() {
                         host: None,
                     })),
                     consent: consent.clone(),
+                    selected_monitor: Mutex::new(0),
                 },
                 contacts,
                 endpoint: endpoint.clone(),
