@@ -29,6 +29,20 @@ scap = "0.0.8"
 # `cargo update` can't silently re-break the Windows build. Revisit when scap bumps to a 1.5+ API.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-capture = "=1.4.4"
+# `EnumDisplayMonitors`/`GetMonitorInfoW` for `enumerate_displays()` (ADR-081) — scap's own
+# `Target::Display` carries only an opaque `HMONITOR` + device name, no geometry. Same major version
+# `ras-input-windows` already pins (0.58, already resolved via scap's own `windows-capture` chain).
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+] }
+
+# `randr` (X11 RandR extension) for `enumerate_displays()` on Linux (ADR-081) — scap reports no
+# targets at all on Linux (the portal picks interactively at capture time), so real geometry can only
+# come from asking X11 directly. Pure-Rust, no C X11 libs; `ras-input-linux` already depends on
+# `x11rb` (xtest feature) so this only adds the `randr` feature to the same crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", default-features = false, features = ["randr"] }
 
 # FFI-adjacent (borrowed-surface pointer): relax the workspace unsafe deny here (CONTRIBUTING §5).
 [lints.rust]

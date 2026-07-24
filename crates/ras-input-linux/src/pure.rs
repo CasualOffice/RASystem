@@ -49,6 +49,39 @@ pub(crate) fn root_px_to_norm16(pos: i32, origin: i32, extent: i32) -> u16 {
     (frac * f64::from(u16::MAX)).round() as u16
 }
 
+/// Map a normalized `(nx, ny)` fraction of a **specific display** (`disp_origin`/`disp_extent`, in
+/// global/root px, along one axis) onto the uinput virtual device's `0..=ABS_MAX` abs range, which spans
+/// the **whole desktop** (`desktop_origin`/`desktop_extent`, the union of every registered display).
+///
+/// This is the multi-monitor fix for the uinput backend: unlike a single-display setup where "the whole
+/// output" and "the one display" coincide, a control message that targets display N must land in that
+/// display's sub-rectangle of the shared virtual device, not be re-splatted across the entire abs range.
+/// Composition: normalized fraction → the display's global-px point (clamped `0.0..=1.0`, non-finite →
+/// the display origin, Inv 6) → that point renormalized over the desktop union via [`root_px_to_norm16`]
+/// (clamped to the desktop bounds, degenerate extent → `0`) → scaled onto `0..=ABS_MAX` (numerically the
+/// same range as `u16::MAX`, so no precision loss).
+pub(crate) fn norm_on_display_to_abs(
+    frac: f32,
+    disp_origin: f64,
+    disp_extent: f64,
+    desktop_origin: f64,
+    desktop_extent: f64,
+) -> i32 {
+    let f = if frac.is_finite() {
+        f64::from(frac.clamp(0.0, 1.0))
+    } else {
+        0.0
+    };
+    let global_px = disp_origin + f * disp_extent;
+    // `root_px_to_norm16` rounds toward the nearest px, which is fine here (device space is `0..=65535`,
+    // matching the u16 range it already targets); reuse it rather than duplicating the clamp/guard logic.
+    i32::from(root_px_to_norm16(
+        global_px.round() as i32,
+        desktop_origin.round() as i32,
+        desktop_extent.round() as i32,
+    ))
+}
+
 /// Map a USB-HID Keyboard/Keypad usage (page 0x07) to a **Linux evdev keycode** (`KEY_A == 30`). This is
 /// the XTEST table (which emits X keycode = evdev + 8) **minus 8** per entry — uinput speaks raw evdev.
 /// An unmapped usage returns `None` and fails closed at the call site (never a wrong key — Inv 6).
@@ -256,6 +289,52 @@ mod tests {
         assert_eq!(root_px_to_norm16(-1280, -1280, 1280), 0);
         assert_eq!(root_px_to_norm16(0, -1280, 1280), u16::MAX);
         assert_eq!(root_px_to_norm16(-640, -1280, 1280), 32768); // centre
+    }
+
+    #[test]
+    fn norm_on_display_maps_into_the_displays_sub_rectangle_of_the_desktop() {
+        // A 1920x1080 primary at the origin plus a 1280x720 secondary to its right, sharing one
+        // 3200-wide desktop union. A point on the SECONDARY display must land in the right-hand portion
+        // of the abs range, not be re-splatted across the whole 0..=ABS_MAX (the bug this fixes).
+        let desktop_origin = 0.0;
+        let desktop_extent = 3200.0; // 1920 + 1280
+                                     // Left edge of the secondary display (global x = 1920) → 1920/3200 of the abs range.
+        let left_edge = norm_on_display_to_abs(0.0, 1920.0, 1280.0, desktop_origin, desktop_extent);
+        assert_eq!(
+            left_edge,
+            ((1920.0 / 3200.0) * f64::from(ABS_MAX)).round() as i32
+        );
+        // Right edge of the secondary display (global x = 3200) → the very end of the abs range.
+        let right_edge =
+            norm_on_display_to_abs(1.0, 1920.0, 1280.0, desktop_origin, desktop_extent);
+        assert_eq!(right_edge, ABS_MAX);
+        // A point on the PRIMARY display (id 0) still starts at abs 0.
+        let primary_origin =
+            norm_on_display_to_abs(0.0, 0.0, 1920.0, desktop_origin, desktop_extent);
+        assert_eq!(primary_origin, 0);
+    }
+
+    #[test]
+    fn norm_on_display_handles_negative_origin_secondary() {
+        // A secondary display to the LEFT of the primary (negative global origin, ADR-081 layout).
+        let desktop_origin = -1280.0;
+        let desktop_extent = 1280.0 + 1920.0;
+        // Centre of the secondary (global x = -640) sits a quarter of the way into the desktop union.
+        let centre = norm_on_display_to_abs(0.5, -1280.0, 1280.0, desktop_origin, desktop_extent);
+        let expected =
+            (((-640.0) - desktop_origin) / desktop_extent * f64::from(ABS_MAX)).round() as i32;
+        assert_eq!(centre, expected);
+    }
+
+    #[test]
+    fn norm_on_display_nonfinite_and_degenerate_desktop_fail_safe() {
+        // Non-finite fraction → the display's own origin (Inv 6), not a wild value.
+        let v = norm_on_display_to_abs(f32::NAN, 500.0, 400.0, 0.0, 1000.0);
+        let expected = norm_on_display_to_abs(0.0, 500.0, 400.0, 0.0, 1000.0);
+        assert_eq!(v, expected);
+        // A degenerate (zero/negative) desktop extent fails safe to 0, never panics or divides by zero.
+        assert_eq!(norm_on_display_to_abs(0.5, 0.0, 100.0, 0.0, 0.0), 0);
+        assert_eq!(norm_on_display_to_abs(0.5, 0.0, 100.0, 0.0, -10.0), 0);
     }
 
     #[test]

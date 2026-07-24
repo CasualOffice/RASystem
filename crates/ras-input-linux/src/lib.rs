@@ -29,6 +29,9 @@ mod pure;
 pub mod uinput;
 
 #[cfg(target_os = "linux")]
+mod libei;
+
+#[cfg(target_os = "linux")]
 mod linux {
     use std::collections::HashSet;
     use std::sync::Mutex;
@@ -659,18 +662,27 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
+pub use libei::LibeiInputSink;
+
+#[cfg(target_os = "linux")]
 pub use linux::X11InputSink;
 
 #[cfg(target_os = "linux")]
 pub use uinput::UInputSink;
 
-/// A concrete Linux OS-input sink that is EITHER the kernel uinput backend (Wayland-capable) or the
-/// X11 XTEST backend, chosen at runtime by [`best_input_sink`]. Kept **concrete** (not `dyn`) so the
-/// app can still call the X11-only inherent [`set_display_bounds`](Self::set_display_bounds) uniformly:
-/// it forwards to whichever backend is active (a no-op for uinput, which maps `0..=65535` natively).
-/// Variants are boxed so the enum stays pointer-sized (both backends are large).
+/// A concrete Linux OS-input sink that is EITHER the libei/portal backend (unprivileged,
+/// Wayland-native), the kernel uinput backend (Wayland-capable), or the X11 XTEST backend, chosen at
+/// runtime by [`best_input_sink`]. Kept **concrete** (not `dyn`) so the app can still call the
+/// inherent [`set_display_bounds`](Self::set_display_bounds) uniformly: it forwards to whichever
+/// backend is active — the uinput and X11 backends index a normalized fraction into the named
+/// display's sub-rectangle (see `uinput::UInputSink`'s module doc); the libei backend does not yet
+/// (see [`libei::LibeiInputSink::set_display_bounds`]). Variants are boxed so the enum stays
+/// pointer-sized (all three backends are large).
 #[cfg(target_os = "linux")]
 pub enum LinuxInputSink {
+    /// XDG Desktop Portal RemoteDesktop via libei — unprivileged, Wayland-native (one-time portal
+    /// consent prompt per session).
+    Libei(Box<libei::LibeiInputSink>),
     /// Kernel uinput virtual device — injects below the display server (X11 **and** Wayland).
     UInput(Box<uinput::UInputSink>),
     /// X11 XTEST — X11 / Xwayland only.
@@ -679,11 +691,16 @@ pub enum LinuxInputSink {
 
 #[cfg(target_os = "linux")]
 impl LinuxInputSink {
-    /// Register a display's global pixel bounds. Forwarded to the X11 backend (normalized→pixel map);
-    /// a no-op for uinput, whose virtual device maps `0..=65535` across the output natively.
+    /// Register a display's global pixel bounds with whichever backend is active, so a normalized
+    /// fraction addressed to `id` indexes that display's sub-rectangle rather than always the whole
+    /// (or wrong) display — see [`uinput::UInputSink::set_display_bounds`] and
+    /// [`linux::X11InputSink::set_display_bounds`]. A no-op on the libei backend for now (see
+    /// [`libei::LibeiInputSink::set_display_bounds`]).
     pub fn set_display_bounds(&self, id: u32, x: f64, y: f64, w: f64, h: f64) {
-        if let Self::X11(s) = self {
-            s.set_display_bounds(id, x, y, w, h);
+        match self {
+            Self::Libei(s) => s.set_display_bounds(id, x, y, w, h),
+            Self::UInput(s) => s.set_display_bounds(id, x, y, w, h),
+            Self::X11(s) => s.set_display_bounds(id, x, y, w, h),
         }
     }
 }
@@ -692,12 +709,14 @@ impl LinuxInputSink {
 impl ras_control::OsInputSink for LinuxInputSink {
     fn pointer_move(&self, display: u32, nx: f32, ny: f32) -> Result<(), ras_control::InputError> {
         match self {
+            Self::Libei(s) => s.pointer_move(display, nx, ny),
             Self::UInput(s) => s.pointer_move(display, nx, ny),
             Self::X11(s) => s.pointer_move(display, nx, ny),
         }
     }
     fn pointer_move_relative(&self, dx: i16, dy: i16) -> Result<(), ras_control::InputError> {
         match self {
+            Self::Libei(s) => s.pointer_move_relative(dx, dy),
             Self::UInput(s) => s.pointer_move_relative(dx, dy),
             Self::X11(s) => s.pointer_move_relative(dx, dy),
         }
@@ -711,12 +730,14 @@ impl ras_control::OsInputSink for LinuxInputSink {
         down: bool,
     ) -> Result<(), ras_control::InputError> {
         match self {
+            Self::Libei(s) => s.pointer_button(display, nx, ny, button, down),
             Self::UInput(s) => s.pointer_button(display, nx, ny, button, down),
             Self::X11(s) => s.pointer_button(display, nx, ny, button, down),
         }
     }
     fn pointer_wheel(&self, dx: i16, dy: i16) -> Result<(), ras_control::InputError> {
         match self {
+            Self::Libei(s) => s.pointer_wheel(dx, dy),
             Self::UInput(s) => s.pointer_wheel(dx, dy),
             Self::X11(s) => s.pointer_wheel(dx, dy),
         }
@@ -728,18 +749,21 @@ impl ras_control::OsInputSink for LinuxInputSink {
         modifiers: u8,
     ) -> Result<(), ras_control::InputError> {
         match self {
+            Self::Libei(s) => s.key(hid_usage, down, modifiers),
             Self::UInput(s) => s.key(hid_usage, down, modifiers),
             Self::X11(s) => s.key(hid_usage, down, modifiers),
         }
     }
     fn text(&self, utf8: &str) -> Result<(), ras_control::InputError> {
         match self {
+            Self::Libei(s) => s.text(utf8),
             Self::UInput(s) => s.text(utf8),
             Self::X11(s) => s.text(utf8),
         }
     }
     fn release_all(&self) -> Result<(), ras_control::InputError> {
         match self {
+            Self::Libei(s) => s.release_all(),
             Self::UInput(s) => s.release_all(),
             Self::X11(s) => s.release_all(),
         }
@@ -750,34 +774,58 @@ impl ras_control::OsInputSink for LinuxInputSink {
         num_lock: bool,
     ) -> Result<(), ras_control::InputError> {
         match self {
+            Self::Libei(s) => s.set_lock_state(caps_lock, num_lock),
             Self::UInput(s) => s.set_lock_state(caps_lock, num_lock),
             Self::X11(s) => s.set_lock_state(caps_lock, num_lock),
         }
     }
     fn input_permitted(&self) -> bool {
         match self {
+            Self::Libei(s) => s.input_permitted(),
             Self::UInput(s) => s.input_permitted(),
             Self::X11(s) => s.input_permitted(),
         }
     }
 }
 
-/// Select the best available OS-input backend, fail-closed. Prefers kernel **uinput** (Wayland-capable)
-/// when `/dev/uinput` is writable + the virtual device was created; else the unprivileged **X11 XTEST**
-/// backend (X11/Xwayland only). If neither can inject, the returned sink reports
-/// `input_permitted() == false`, so the host refuses the lease rather than granting dead control (Inv 15).
+/// Select the best available OS-input backend, fail-closed. Prefers unprivileged **libei** (via the
+/// XDG Desktop Portal RemoteDesktop interface — Wayland-native, no udev rule) whenever its background
+/// session thread starts at all; else kernel **uinput** (Wayland-capable, no consent prompt) when
+/// `/dev/uinput` is writable + the virtual device was created; else the unprivileged **X11 XTEST**
+/// backend (X11/Xwayland only, no consent prompt). If none can inject, the returned sink reports
+/// `input_permitted() == false`, so the host refuses the lease rather than granting dead control
+/// (Inv 15).
 ///
-/// The uinput path needs elevated device access (a udev rule on `/dev/uinput` + the `uinput` module);
-/// the X11 path needs only `$DISPLAY`. So a plain X11 desktop without the udev rule falls back to XTEST,
-/// and a Wayland desktop with the udev rule uses uinput — the intended platform matrix.
+/// libei needs a running `xdg-desktop-portal` + a RemoteDesktop backend (GNOME/KDE/wlroots) and a
+/// one-time user consent prompt; construction never blocks on that (see [`libei::LibeiInputSink::new`]),
+/// so **this function is chosen ahead of readiness, not instead of it**: a libei sink is preferred as
+/// soon as its background session thread starts (i.e. the portal handshake is at least in flight),
+/// because the consent dialog the user sees plausibly resolves well before the local user goes on to
+/// request a `ControlRequest` (they still have to connect a viewer and click "Take control" first) —
+/// and the host re-checks `input_permitted()` fail-closed at that later moment (Inv 15), never trusting
+/// this selection alone. If the background thread cannot even start (OS resource exhaustion) or no
+/// portal responds at all, `input_permitted()` will stay `false` forever and the caller falls back to
+/// uinput/X11 on the **next** `best_input_sink()` call (e.g. a later Share). The uinput path needs
+/// elevated device access (a udev rule on `/dev/uinput` + the `uinput` module); the X11 path needs
+/// only `$DISPLAY`.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn best_input_sink() -> std::sync::Arc<LinuxInputSink> {
     use ras_control::OsInputSink as _;
+
+    // A short, bounded probe (never the full human-interactive consent-dialog wait) — long enough to
+    // reliably observe a FAST failure (no portal service / D-Bus unavailable), short enough to never
+    // stall app startup waiting on the slow Allow/Deny prompt. See `LibeiInputSink::probe_available`.
+    const LIBEI_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
+    let libei = libei::LibeiInputSink::new();
+    if libei.probe_available(LIBEI_PROBE_TIMEOUT) {
+        return std::sync::Arc::new(LinuxInputSink::Libei(Box::new(libei)));
+    }
+
     let uinput = uinput::UInputSink::new();
     if uinput.input_permitted() {
-        std::sync::Arc::new(LinuxInputSink::UInput(Box::new(uinput)))
-    } else {
-        std::sync::Arc::new(LinuxInputSink::X11(Box::<linux::X11InputSink>::default()))
+        return std::sync::Arc::new(LinuxInputSink::UInput(Box::new(uinput)));
     }
+
+    std::sync::Arc::new(LinuxInputSink::X11(Box::<linux::X11InputSink>::default()))
 }

@@ -25,6 +25,10 @@ tokio = { version = "1", features = ["time"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSError", "NSObject", "NSGeometry"] }
 objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFNumber", "CFDictionary"] }
+# CGMainDisplayID / CGDisplayPixelsWide / CGDisplayPixelsHigh — used by `enumerate_displays()` /
+# `captured_display()` (ADR-081 multi-monitor) to derive `primary` and the HiDPI `scale_percent`
+# (physical pixels ÷ SCDisplay's logical points), since `SCDisplay` itself exposes neither.
+objc2-core-graphics = { version = "0.3", features = ["CGDirectDisplay"] }
 objc2-screen-capture-kit = { version = "0.3", features = [
   "SCStream",
   "SCShareableContent",

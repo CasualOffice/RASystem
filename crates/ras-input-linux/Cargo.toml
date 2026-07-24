@@ -11,7 +11,10 @@ publish = false
 # trait over the X11 XTEST extension via the pure-Rust `x11rb` client. Deliberately UNPRIVILEGED: it
 # connects to $DISPLAY as the logged-in user (no root, no /dev/uinput), so it works only inside an X11
 # / Xwayland session and cannot reach the Wayland desktop or a locked greeter. `uinput` + libei paths
-# are additive follow-ups behind the same trait (docs/19 §3).
+# are additive follow-ups behind the same trait (docs/19 §3). The libei backend (this revision) adds a
+# THIRD path — the unprivileged XDG Desktop Portal RemoteDesktop/libei route — so a pure-Wayland
+# desktop with neither a udev `/dev/uinput` rule nor an X11/Xwayland session can still be controlled,
+# at the cost of a one-time portal consent prompt (docs/19 §3, this crate's `libei` module).
 
 [dependencies]
 ras-control = { path = "../ras-control" }
@@ -25,6 +28,23 @@ ras-protocol = { path = "../ras-protocol" }
 x11rb = { version = "0.13", default-features = false, features = ["xtest"] }
 # uinput virtual-device backend (docs/19 §3 — the Wayland-capable path below the display server). MIT.
 input-linux = "0.7.1"
+# libei input injection via the XDG Desktop Portal RemoteDesktop interface (unprivileged,
+# Wayland-native). Both MIT (Inv 18 OK). `reis` speaks the libei/EIS wire protocol; `ashpd` drives the
+# D-Bus portal handshake (`CreateSession` → `SelectDevices` → `Start` → `ConnectToEIS`) that hands back
+# the authenticated EIS socket fd after the user grants consent in the portal's own UI.
+reis = { version = "0.7", features = ["tokio"] }
+ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+# `reis` 0.7 requires `rustix ^1.0.7`, but an unpinned resolve can pick a newer `rustix` release whose
+# `net` module dropped `SendFlags::NOSIGNAL` / `RecvFlags::CMSG_CLOEXEC` (a breaking change reis 0.7
+# has not caught up to yet) — pin the exact last-known-good patch so the workspace resolves to a
+# `rustix` that `reis` actually compiles against.
+rustix = "=1.0.8"
+# Bridges the sync `OsInputSink` trait to the async portal/libei handshake: a dedicated background
+# thread (spawned in `LibeiInputSink::new`) runs its own current-thread runtime so this backend never
+# assumes the embedding app itself runs tokio. `macros` is `tokio::select!`, used to service the
+# EIS event stream and the injection-command channel on the same task without a second thread.
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+futures-util = "0.3"
 
 # This crate now carries a minimal FFI edge (OwnedFd::from_raw_fd in the uinput backend), so — like
 # `ras-input-macos` — it re-declares the workspace lint set with `unsafe_code` relaxed. The `unsafe` is

@@ -12,7 +12,7 @@
 
 use bytes::Bytes;
 use openh264::encoder::{
-    BitRate, Encoder, EncoderConfig, FrameRate, FrameType, RateControlMode, UsageType,
+    BitRate, Complexity, Encoder, EncoderConfig, FrameRate, FrameType, RateControlMode, UsageType,
 };
 use openh264::formats::{BgraSliceU8, YUVBuffer};
 use openh264::OpenH264API;
@@ -95,11 +95,24 @@ impl OpenH264Encoder {
         // Bitrate rate-control mode so the encoder actually tracks `target_bitrate_bps` (its default
         // is quality mode at ~120 kbps, which ignores our target). Declaring the frame rate lets the
         // controller pace bits/sec correctly. ABR then retargets the live encoder via `set_bitrate`.
+        //
+        // `complexity(Low)` and `skip_frames(true)` are the realtime-latency tuning: screen-share
+        // content is latency-first (`CLAUDE.md` §2 — latency beats UX, and a slow encoder directly
+        // adds to the constant end-to-end lag), so we want the cheapest per-frame encode path rather
+        // than the crate's `Medium`-complexity default, and we want the encoder to shed a frame under
+        // VBV pressure rather than let one slow frame push out every frame behind it (`skip_frames`
+        // already defaults to `true` in this crate version — set explicitly so the intent doesn't
+        // silently regress if that default ever changes upstream). Both are `SEncParamExt` fields
+        // applied at `InitializeExt` time, not `SetOption`-tunable after construction on this OpenH264
+        // build — unlike bitrate, which the encoder is deliberately rebuilt-per-`configure` to pick up
+        // for the same reason.
         let config = EncoderConfig::new()
             .usage_type(UsageType::ScreenContentRealTime)
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(self.config.target_bitrate_bps.max(1)))
-            .max_frame_rate(FrameRate::from_hz(self.config.fps.max(1) as f32));
+            .max_frame_rate(FrameRate::from_hz(self.config.fps.max(1) as f32))
+            .complexity(Complexity::Low)
+            .skip_frames(true);
         Encoder::with_api_config(OpenH264API::from_source(), config)
             .map_err(|_| enc_fatal("openh264 encoder init failed"))
     }

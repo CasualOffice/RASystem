@@ -117,6 +117,40 @@ fn enc_fatal(context: &'static str) -> MediaError {
 /// (`0101`) gives one. We default to 3 for VP9 (RustDesk-class realtime screen sharing).
 const VP9_TEMPORAL_LAYERS: u32 = 3;
 
+/// Highest temporal-layer id reachable by [`VP9_TEMPORAL_LAYERS`] (3 layers ⇒ ids `0..=2`). Used as
+/// the default "forward everything" ceiling for [`VpxEncoder::set_max_temporal_layer`].
+const VP9_MAX_LAYER_ID: u8 = (VP9_TEMPORAL_LAYERS - 1) as u8;
+
+/// Map a frame's position within the temporal-SVC GOP to its libvpx temporal-layer id, for the fixed
+/// periodic patterns this encoder configures (`docs/10`, VP9 spec temporal-layering annex).
+///
+/// - **3 layers, pattern `0212`** (`period` = 4): layer 0 is the base (every 4th frame — the only
+///   frames a `max_layer = 0` receiver needs), layer 1 is the middle (every 2nd), layer 2 is the top
+///   (every frame). Matches `ts_layer_id = [0, 2, 1, 2, ...]` in [`VpxEncoder::build_encoder`].
+/// - **2 layers, pattern `0101`** (`period` = 2): layer 0 every 2nd frame, layer 1 every frame.
+///
+/// Returns `None` for any other `period` (defensive; the two patterns above are the only ones this
+/// encoder ever configures). Pure and `libvpx`-independent, so it is unit-testable without a codec
+/// context.
+#[must_use]
+fn temporal_layer_for_frame_index(idx: u32, period: u32) -> Option<u8> {
+    match period {
+        4 => match idx % 4 {
+            0 => Some(0),
+            1 => Some(2),
+            2 => Some(1),
+            3 => Some(2),
+            _ => None, // unreachable (idx % 4 < 4)
+        },
+        2 => match idx % 2 {
+            0 => Some(0),
+            1 => Some(1),
+            _ => None, // unreachable (idx % 2 < 2)
+        },
+        _ => None,
+    }
+}
+
 /// Software VP8/VP9 encoder over libvpx.
 pub struct VpxEncoder {
     codec: VpxCodec,
@@ -135,6 +169,29 @@ pub struct VpxEncoder {
     next_id: u64,
     /// Monotonic presentation timestamp handed to libvpx (in timebase units = frames).
     pts: i64,
+    /// Position of the *next* frame within the temporal-SVC periodic GOP (wraps at `ts_periodicity`;
+    /// 4 for the 3-layer `0212` pattern, 2 for the 2-layer `0101` pattern). Tracked independently of
+    /// `pts`/`next_id` so it stays correct even across dropped/coalesced frames (which do not advance
+    /// `next_id`) — libvpx itself advances its internal layer cursor once per *submitted* frame, which
+    /// is exactly what this counter mirrors (incremented once per `vpx_codec_encode` call, not once
+    /// per produced output frame).
+    svc_gop_pos: u32,
+    /// The temporal-SVC layer id of the most recently *produced* (non-dropped) output frame, if this
+    /// encoder is running VP9 SVC. `None` for VP8 (no temporal layering) or before the first frame.
+    /// This is the "layer-id-on-output-frame" readout: [`Self::last_temporal_layer`] lets the caller
+    /// correlate a just-returned [`EncodedFrame`] with the layer it belongs to, without re-deriving it
+    /// or parsing the VP9 uncompressed header.
+    last_temporal_layer: Option<u8>,
+    /// Layer-selection knob (sender-side ABR hook): the highest temporal-layer id this encoder will
+    /// *forward*. Frames computed to be above this ceiling are encoded (libvpx's rate control still
+    /// needs every frame submitted to keep the periodic pattern + per-layer bitrate split coherent) but
+    /// their compressed output is discarded before it reaches the caller — i.e. `encode()` returns
+    /// `Ok(None)` for them, exactly like the existing "encoder coalesced a static frame" no-output
+    /// case, so callers need no new branch. **Keyframes are never dropped** by this knob (a forced IDR
+    /// is always let through regardless of its layer id — it is the decoder's resync point and is
+    /// requested deliberately, e.g. on `request_keyframe`/first frame). Defaults to
+    /// [`VP9_MAX_LAYER_ID`] (forward every layer — today's unconditional 3-layer behavior, unchanged).
+    max_forwarded_layer: u8,
 }
 
 // The encoder is owned and driven from a single media thread (moved there once, never shared); the
@@ -181,6 +238,9 @@ impl VpxEncoder {
             force_idr: true,
             next_id: 0,
             pts: 0,
+            svc_gop_pos: 0,
+            last_temporal_layer: None,
+            max_forwarded_layer: VP9_MAX_LAYER_ID,
         }
     }
 
@@ -203,6 +263,65 @@ impl VpxEncoder {
     /// Whether this encoder runs VP9 temporal SVC.
     fn svc(&self) -> bool {
         matches!(self.codec, VpxCodec::Vp9)
+    }
+
+    /// The `ts_periodicity` this encoder configures for its temporal-SVC pattern (4 for the 3-layer
+    /// `0212` pattern, 2 for the 2-layer `0101` pattern) — matches [`Self::build_encoder`]. VP8 (no
+    /// SVC) reports 0, the "no pattern" sentinel [`temporal_layer_for_frame_index`] returns `None` for.
+    fn svc_periodicity(&self) -> u32 {
+        if self.svc() {
+            match VP9_TEMPORAL_LAYERS {
+                3 => 4,
+                _ => 2,
+            }
+        } else {
+            0
+        }
+    }
+
+    /// The VP9 temporal-SVC layer id of the most recently *produced* (non-dropped, non-coalesced)
+    /// output frame from [`ras_media::VideoEncoderBackend::encode`] — the "layer-id-on-output-frame"
+    /// readout a caller (e.g. the transport/session layer) can consult right after a successful
+    /// `encode()` call to tag that frame for downstream layer-aware handling. `None` for VP8 (no
+    /// temporal layering) or before the first frame is produced.
+    #[must_use]
+    pub fn last_temporal_layer(&self) -> Option<u8> {
+        self.last_temporal_layer
+    }
+
+    /// The number of temporal layers this encoder is configured for (3 for VP9, 1 — no layering — for
+    /// VP8). Layer ids from [`Self::last_temporal_layer`] range over `0..temporal_layer_count()`.
+    #[must_use]
+    pub fn temporal_layer_count(&self) -> u8 {
+        if self.svc() {
+            VP9_TEMPORAL_LAYERS as u8
+        } else {
+            1
+        }
+    }
+
+    /// **Layer-selection knob.** Set the highest VP9 temporal-layer id this encoder will *forward* to
+    /// the caller (sender-side ABR hook, orthogonal to [`Self::set_bitrate`] — a second, independent
+    /// knob for shedding frames under tight bandwidth without a bitrate/quality collapse). `None` or
+    /// any value `>= temporal_layer_count() - 1` forwards every layer (today's default, unconditional
+    /// behavior). `Some(0)` forwards only the base layer (1/4 the frame rate of the full 3-layer
+    /// pattern); `Some(1)` forwards the base + middle layers (1/2 the frame rate). No-op for VP8 (there
+    /// is no layer to select — `encode()` never drops on this knob when `!self.svc()`).
+    ///
+    /// Dropped frames are still submitted to libvpx (its rate controller and periodic layer pattern
+    /// need every frame to stay coherent) — only the compressed output is discarded, so `encode()`
+    /// returns `Ok(None)` for them exactly like the existing "coalesced static frame" case. **A forced
+    /// keyframe is always forwarded regardless of this ceiling** (Inv-agnostic correctness: an IDR is
+    /// the decoder's sole resync point and is only ever emitted on deliberate request, so dropping one
+    /// would silently break the receiver with no recovery path).
+    pub fn set_max_temporal_layer(&mut self, max_layer: Option<u8>) {
+        self.max_forwarded_layer = max_layer.unwrap_or(VP9_MAX_LAYER_ID);
+    }
+
+    /// The layer-selection ceiling currently in effect (see [`Self::set_max_temporal_layer`]).
+    #[must_use]
+    pub fn max_temporal_layer(&self) -> u8 {
+        self.max_forwarded_layer
     }
 
     /// Build the libvpx encoder context for the current `config` and dimensions.
@@ -338,6 +457,12 @@ impl VpxEncoder {
 
         self.ctx = Some(ctx);
         self.dims = Some((w, h));
+        // A fresh libvpx context always starts its periodic temporal-layering pattern at position 0
+        // (`ts_layer_id[0]`, the base layer) — this rebuild path also runs on a dimension change
+        // mid-stream, not just the initial build, so re-sync our own GOP-position mirror here (not only
+        // in `configure`) to keep `temporal_layer_for_frame_index` reporting the id libvpx actually
+        // assigned to each subsequent frame.
+        self.svc_gop_pos = 0;
         Ok(())
     }
 
@@ -448,6 +573,10 @@ impl ras_media::VideoEncoderBackend for VpxEncoder {
         self.i420.clear();
         self.dims = None;
         self.force_idr = true;
+        // A reconfigure restarts the temporal-SVC GOP at its base-layer position (0), matching a fresh
+        // encoder — `ts_layer_id[0]` is always the base layer, so this keeps the two never out of sync.
+        self.svc_gop_pos = 0;
+        self.last_temporal_layer = None;
         // Defer the actual libvpx build to the first `encode`, where we know the real (even) frame
         // dimensions from the captured surface — matching the OpenH264 backend's lazy build.
         // Drop any existing context so a reconfigure starts clean.
@@ -571,10 +700,38 @@ impl ras_media::VideoEncoderBackend for VpxEncoder {
         // vpx_img_wrap sets self_allocd=0 so free only tears down the (stack) descriptor; we skip it
         // since `img` is a stack value that drops here.
 
+        // Derive this submitted frame's temporal-SVC layer id from its position in the periodic GOP
+        // *before* advancing the position — `svc_gop_pos` names the slot the frame we just handed to
+        // `vpx_codec_encode` occupied, matching the `ts_layer_id[...]` libvpx assigned it internally.
+        // `None` for VP8 (`svc_periodicity() == 0`) or if the periodicity is ever something other than
+        // the two patterns this encoder configures (defensive; unreachable in practice).
+        let period = self.svc_periodicity();
+        let layer = temporal_layer_for_frame_index(self.svc_gop_pos, period);
+        // One real frame was submitted to libvpx regardless of what it emitted (a coalesced/decimated
+        // frame still occupies its GOP slot), so the position mirror always advances here.
+        if period > 0 {
+            self.svc_gop_pos = (self.svc_gop_pos + 1) % period;
+        }
+
         if data.is_empty() {
             // The encoder dropped/coalesced this frame (static screen / SVC decimation) — nothing to
-            // send. Do not advance the frame id.
+            // send. Do not advance the frame id; no output frame exists to attribute a layer to.
             return Ok(None);
+        }
+
+        // Layer-id-on-output-frame readout: record which layer this produced frame belongs to so the
+        // caller can consult `last_temporal_layer()` immediately after this call.
+        self.last_temporal_layer = layer;
+
+        // Layer-selection knob: shed this frame if it is above the forwarded ceiling. Never applies to
+        // VP8 (`layer` is `None`) or to a keyframe (the sole decoder resync point — always let through).
+        if let Some(l) = layer {
+            if !is_keyframe && l > self.max_forwarded_layer {
+                // Encoded (libvpx's rate control + pattern state already accounted for it above) but
+                // not forwarded — same "no output this call" contract as a coalesced frame, so callers
+                // need no new branch to handle sender-side layer shedding.
+                return Ok(None);
+            }
         }
 
         let frame_id = self.next_id;
@@ -937,5 +1094,185 @@ mod tests {
         let s = VpxCodec::Vp9.webcodecs_string(1920, 1080, 60);
         assert!(s.starts_with("vp09.00."), "got {s}");
         assert!(s.ends_with(".08"), "8-bit: got {s}");
+    }
+
+    /// Pure GOP-position → layer-id mapping, independent of libvpx: the 3-layer `0212` pattern
+    /// (period 4) matches the `ts_layer_id = [0, 2, 1, 2, ...]` config, and the 2-layer `0101` pattern
+    /// (period 2) matches `ts_layer_id = [0, 1, ...]`.
+    #[test]
+    fn temporal_layer_pattern_is_deterministic() {
+        // 3-layer 0212, one full period + wraparound.
+        assert_eq!(temporal_layer_for_frame_index(0, 4), Some(0));
+        assert_eq!(temporal_layer_for_frame_index(1, 4), Some(2));
+        assert_eq!(temporal_layer_for_frame_index(2, 4), Some(1));
+        assert_eq!(temporal_layer_for_frame_index(3, 4), Some(2));
+        assert_eq!(temporal_layer_for_frame_index(4, 4), Some(0)); // wraps
+        assert_eq!(temporal_layer_for_frame_index(5, 4), Some(2));
+
+        // 2-layer 0101.
+        assert_eq!(temporal_layer_for_frame_index(0, 2), Some(0));
+        assert_eq!(temporal_layer_for_frame_index(1, 2), Some(1));
+        assert_eq!(temporal_layer_for_frame_index(2, 2), Some(0)); // wraps
+
+        // No pattern (VP8 / unknown periodicity).
+        assert_eq!(temporal_layer_for_frame_index(0, 0), None);
+        assert_eq!(temporal_layer_for_frame_index(7, 3), None);
+    }
+
+    /// VP9 defaults to 3 forwarded layers and reports a layer id on every produced frame; the exact
+    /// per-frame sequence over one full GOP-plus-wraparound must match the `0212` pattern (validated
+    /// against real libvpx output, not just the pure helper above).
+    #[test]
+    fn vp9_reports_layer_id_per_output_frame_in_0212_pattern() {
+        let (w, h) = (128u32, 96u32);
+        let stride = (w * 4) as usize;
+        let mut enc = VpxEncoder::new();
+        assert_eq!(enc.temporal_layer_count(), 3);
+        enc.configure(&default_stream_config(VpxCodec::Vp9, w, h, 60))
+            .unwrap();
+
+        let mut layers = Vec::new();
+        for seed in 0..8u32 {
+            let buf = noisy(w, h, stride, seed);
+            let produced = enc.encode(mk_frame(&buf, w, h, stride)).unwrap().is_some();
+            assert!(
+                produced,
+                "no forwarding ceiling is set, nothing should drop"
+            );
+            layers.push(enc.last_temporal_layer());
+        }
+        // Frame 0 is the forced keyframe at GOP position 0 (layer 0); frames 1..8 continue the
+        // pattern one full period plus wraparound: [0,2,1,2,0,2,1,2].
+        assert_eq!(
+            layers,
+            vec![
+                Some(0),
+                Some(2),
+                Some(1),
+                Some(2),
+                Some(0),
+                Some(2),
+                Some(1),
+                Some(2),
+            ]
+        );
+    }
+
+    /// VP8 has no temporal layering: `last_temporal_layer` stays `None` and the layer-selection knob
+    /// is a no-op (nothing is ever shed on it).
+    #[test]
+    fn vp8_has_no_temporal_layer() {
+        let (w, h) = (96u32, 64u32);
+        let stride = (w * 4) as usize;
+        let mut enc = VpxEncoder::new_with(VpxCodec::Vp8);
+        assert_eq!(enc.temporal_layer_count(), 1);
+        enc.configure(&default_stream_config(VpxCodec::Vp8, w, h, 60))
+            .unwrap();
+        enc.set_max_temporal_layer(Some(0)); // would shed everything above base on VP9; no-op on VP8
+        for seed in 0..5u32 {
+            let buf = noisy(w, h, stride, seed);
+            let out = enc.encode(mk_frame(&buf, w, h, stride)).unwrap();
+            assert_eq!(enc.last_temporal_layer(), None);
+            if let Some(f) = out {
+                let _ = f; // VP8 frames may still be produced/dropped by the codec itself, never by SVC
+            }
+        }
+    }
+
+    /// **Layer-selection knob**: capping at the base layer (`Some(0)`) must forward only frames whose
+    /// pattern position is layer 0 (plus any forced keyframe, which always ships), and shed the rest —
+    /// exercising the real libvpx encode path end-to-end, not just the pure pattern helper.
+    #[test]
+    fn max_temporal_layer_knob_sheds_frames_above_ceiling() {
+        let (w, h) = (128u32, 96u32);
+        let stride = (w * 4) as usize;
+        let mut enc = VpxEncoder::new();
+        enc.configure(&default_stream_config(VpxCodec::Vp9, w, h, 30))
+            .unwrap();
+        assert_eq!(enc.max_temporal_layer(), 2, "default forwards every layer");
+        enc.set_max_temporal_layer(Some(0));
+        assert_eq!(enc.max_temporal_layer(), 0);
+
+        // Frame 0: forced keyframe (startup) at GOP position 0 — always forwarded, layer 0 anyway.
+        let f0 = enc
+            .encode(mk_frame(&noisy(w, h, stride, 0), w, h, stride))
+            .unwrap();
+        assert!(f0.is_some(), "startup keyframe always forwarded");
+        assert!(f0.unwrap().is_keyframe);
+
+        // Frames 1..4 are GOP positions 1,2,3,0 → layers 2,1,2,0. Only the last (layer 0) forwards.
+        let mut forwarded = Vec::new();
+        for seed in 1..5u32 {
+            let buf = noisy(w, h, stride, seed);
+            forwarded.push(enc.encode(mk_frame(&buf, w, h, stride)).unwrap().is_some());
+        }
+        assert_eq!(
+            forwarded,
+            vec![false, false, false, true],
+            "only the base-layer (position 4 → layer 0) frame should forward"
+        );
+    }
+
+    /// A forced keyframe must ship even when it lands on a non-base GOP position and the layer
+    /// ceiling would otherwise shed it — the decoder's sole resync point is never dropped.
+    #[test]
+    fn max_temporal_layer_knob_never_drops_a_forced_keyframe() {
+        let (w, h) = (96u32, 64u32);
+        let stride = (w * 4) as usize;
+        let mut enc = VpxEncoder::new();
+        enc.configure(&default_stream_config(VpxCodec::Vp9, w, h, 30))
+            .unwrap();
+        enc.set_max_temporal_layer(Some(0));
+
+        // Advance past the forced startup keyframe to GOP position 1 (layer 2 — would be shed).
+        let _ = enc
+            .encode(mk_frame(&noisy(w, h, stride, 0), w, h, stride))
+            .unwrap();
+        // Now GOP position is 1 (layer 2). Force another keyframe and confirm it still ships despite
+        // the layer-0 ceiling.
+        enc.request_keyframe(KeyframeReason::DecoderReset);
+        let f = enc
+            .encode(mk_frame(&noisy(w, h, stride, 1), w, h, stride))
+            .unwrap()
+            .expect("a forced keyframe must never be shed by the layer ceiling");
+        assert!(f.is_keyframe);
+    }
+
+    /// `set_max_temporal_layer(None)` restores "forward everything" (the default), even after a
+    /// previous call had lowered the ceiling.
+    #[test]
+    fn max_temporal_layer_none_restores_default() {
+        let mut enc = VpxEncoder::new();
+        enc.set_max_temporal_layer(Some(1));
+        assert_eq!(enc.max_temporal_layer(), 1);
+        enc.set_max_temporal_layer(None);
+        assert_eq!(enc.max_temporal_layer(), 2, "None restores forward-all");
+    }
+
+    /// A dimension-change mid-stream rebuilds the libvpx context (fresh GOP position 0); the layer
+    /// mirror must re-sync to that rebuild, not keep counting from the pre-rebuild position.
+    #[test]
+    fn dimension_change_resyncs_gop_position() {
+        let (w1, h1) = (96u32, 64u32);
+        let stride1 = (w1 * 4) as usize;
+        let mut enc = VpxEncoder::new();
+        enc.configure(&default_stream_config(VpxCodec::Vp9, w1, h1, 30))
+            .unwrap();
+        // Advance to GOP position 1 (post the startup keyframe at position 0).
+        let _ = enc
+            .encode(mk_frame(&noisy(w1, h1, stride1, 0), w1, h1, stride1))
+            .unwrap();
+
+        // Rebuild via a dimension change: the new frame's dims differ, forcing `build_encoder` again.
+        let (w2, h2) = (128u32, 96u32);
+        let stride2 = (w2 * 4) as usize;
+        let out = enc
+            .encode(mk_frame(&noisy(w2, h2, stride2, 1), w2, h2, stride2))
+            .unwrap()
+            .expect("a frame is produced after the rebuild");
+        // The rebuilt encoder's first frame sits at fresh GOP position 0 → layer 0 (also a keyframe,
+        // since a dimension-change rebuild starts a brand new libvpx context/GOP).
+        assert!(out.is_keyframe);
+        assert_eq!(enc.last_temporal_layer(), Some(0));
     }
 }

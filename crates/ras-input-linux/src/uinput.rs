@@ -12,12 +12,17 @@
 //! [`UInputSink::input_permitted`] for the fail-closed preflight and [`best_input_sink`](super::best_input_sink)
 //! for the automatic selection.
 //!
-//! # Coordinates (Inv 6)
-//! The trait receives only **normalized** `0.0..=1.0` fractions. Unlike XTEST (absolute *screen pixels*),
-//! `uinput` posts into a virtual device-space abs range we declare as `0..=65535`; the compositor maps
-//! that range across the shared output. So a normalized fraction scales *directly* to the abs range with
-//! **no monitor pixel arithmetic and no read-modify-write** — multi-monitor origin selection is a
-//! documented follow-up (a single virtual device spans the whole logical output today).
+//! # Coordinates (Inv 6, multi-monitor)
+//! The trait receives only **normalized** `0.0..=1.0` fractions of a specific display. Unlike XTEST
+//! (absolute *screen pixels*), `uinput` posts into a single virtual device-space abs range we declare as
+//! `0..=65535`, which the compositor maps across the **whole logical output** (there is one virtual
+//! pointer device, not one per monitor). So a display id is not a separate device — it selects a
+//! **sub-rectangle** of that shared abs range: [`UInputSink::set_display_bounds`] records each display's
+//! global-pixel bounds (fed from the host's capture geometry, the same convention as the X11/macOS/
+//! Windows backends), and [`crate::pure::norm_on_display_to_abs`] maps a normalized fraction of display
+//! `id` to the global pixel it names and then renormalizes that pixel over the union of every registered
+//! display (the desktop bounds) onto `0..=ABS_MAX`. An unknown display id falls back to the desktop union
+//! (fail-safe: input still lands somewhere on the shared output, never off it).
 //!
 //! # Keycodes
 //! `uinput` speaks raw **Linux evdev** keycodes (`KEY_A == 30`), *not* X11 keycodes (evdev + 8). The
@@ -55,7 +60,7 @@ use input_linux::{
 use ras_control::{InputError, OsInputSink};
 use ras_protocol::{ErrorCode, PointerButton, RasError};
 
-use crate::pure::{hid_to_keycode, norm_to_abs, ABS_MAX};
+use crate::pure::{hid_to_keycode, norm_on_display_to_abs, ABS_MAX};
 
 /// Cap wheel notches per event so a hostile delta can't spin an unbounded scroll loop (mirrors the
 /// X11 backend's guard).
@@ -80,6 +85,18 @@ const MODS: [(u8, u16); 4] = [
 const CAPS_KC: u16 = 58; // KEY_CAPSLOCK
 const NUM_KC: u16 = 69; // KEY_NUMLOCK
 
+/// A registered display's bounds in **global pixels** (the same convention the host's capture geometry
+/// and the X11/macOS/Windows backends use), for indexing a normalized fraction into the right
+/// sub-rectangle of the shared uinput abs range. See the module-level "Coordinates" doc.
+#[derive(Debug, Clone, Copy)]
+struct DisplayBounds {
+    id: u32,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
 /// Mutable tracking state (behind a `Mutex` so the sink is `Send + Sync`). Tracks the last posted
 /// absolute position (device-space, for wheel/key framing) and everything currently held down so
 /// `release_all` can clear it (Inv 4).
@@ -94,6 +111,8 @@ struct State {
     /// XTEST's `QueryPointer` — we track our own toggles and tap only on a requested mismatch).
     lock_caps: bool,
     lock_num: bool,
+    /// Registered display bounds (global px), keyed by id — see [`DisplayBounds`].
+    displays: Vec<DisplayBounds>,
 }
 
 /// A `uinput`-backed [`OsInputSink`]. Holds one virtual-device handle; `None` means the device could not
@@ -257,14 +276,71 @@ impl UInputSink {
         }
         Ok(())
     }
+
+    /// Register a display's global-pixel bounds, from the host's capture geometry. Replaces any prior
+    /// bounds for the same display id. See the module-level "Coordinates" doc: the uinput device itself
+    /// has one shared abs range spanning the whole desktop, so this only affects which **sub-rectangle**
+    /// of that range a given display id's normalized input maps into.
+    pub fn set_display_bounds(&self, id: u32, x: f64, y: f64, w: f64, h: f64) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.displays.retain(|b| b.id != id);
+        st.displays.push(DisplayBounds { id, x, y, w, h });
+    }
+
+    /// The global-pixel bounding box of the whole desktop — the union of every registered display, or a
+    /// unit box at the origin if none are registered yet (so a lookup before the first
+    /// `set_display_bounds` call still maps `0.0..=1.0` onto the full `0..=ABS_MAX` range 1:1, matching
+    /// the pre-multi-monitor behavior rather than collapsing to a single point).
+    fn desktop_bounds(st: &State) -> (f64, f64, f64, f64) {
+        if st.displays.is_empty() {
+            (0.0, 0.0, f64::from(ABS_MAX), f64::from(ABS_MAX))
+        } else {
+            let min_x = st
+                .displays
+                .iter()
+                .map(|b| b.x)
+                .fold(f64::INFINITY, f64::min);
+            let min_y = st
+                .displays
+                .iter()
+                .map(|b| b.y)
+                .fold(f64::INFINITY, f64::min);
+            let max_x = st
+                .displays
+                .iter()
+                .map(|b| b.x + b.w)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let max_y = st
+                .displays
+                .iter()
+                .map(|b| b.y + b.h)
+                .fold(f64::NEG_INFINITY, f64::max);
+            (min_x, min_y, max_x - min_x, max_y - min_y)
+        }
+    }
+
+    /// Map a normalized `(nx, ny)` on display `id` to device-space abs coordinates (`0..=ABS_MAX`),
+    /// indexed to that display's sub-rectangle of the shared virtual output. Falls back to treating the
+    /// fraction as spanning the whole desktop union if `id` is unknown (fail-safe — input still lands
+    /// somewhere on the shared output, never off it or on the wrong monitor silently).
+    fn to_abs(display: u32, nx: f32, ny: f32, st: &State) -> (i32, i32) {
+        let (dx0, dy0, dw, dh) = Self::desktop_bounds(st);
+        let (ox, oy, w, h) = st
+            .displays
+            .iter()
+            .find(|b| b.id == display)
+            .map_or((dx0, dy0, dw, dh), |b| (b.x, b.y, b.w, b.h));
+        let ax = norm_on_display_to_abs(nx, ox, w, dx0, dw);
+        let ay = norm_on_display_to_abs(ny, oy, h, dy0, dh);
+        (ax, ay)
+    }
 }
 
 impl OsInputSink for UInputSink {
-    fn pointer_move(&self, _display: u32, nx: f32, ny: f32) -> Result<(), InputError> {
-        // Multi-monitor origin selection is a follow-up; today a single virtual device spans the whole
-        // logical output, so the display id is not yet used to offset the abs range.
+    fn pointer_move(&self, display: u32, nx: f32, ny: f32) -> Result<(), InputError> {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        self.abs_move(norm_to_abs(nx), norm_to_abs(ny), &mut st)
+        let (ax, ay) = Self::to_abs(display, nx, ny, &st);
+        self.abs_move(ax, ay, &mut st)
     }
 
     fn pointer_move_relative(&self, dx: i16, dy: i16) -> Result<(), InputError> {
@@ -279,7 +355,7 @@ impl OsInputSink for UInputSink {
 
     fn pointer_button(
         &self,
-        _display: u32,
+        display: u32,
         nx: f32,
         ny: f32,
         button: PointerButton,
@@ -302,7 +378,8 @@ impl OsInputSink for UInputSink {
         // Position the pointer first (own SYN frame), then the button edge (own SYN frame) — a real HID
         // device sends distinct reports; a batched abs+button in one frame is dispatched atomically but
         // some compositors expect the move to precede the click.
-        self.abs_move(norm_to_abs(nx), norm_to_abs(ny), &mut st)?;
+        let (ax, ay) = Self::to_abs(display, nx, ny, &st);
+        self.abs_move(ax, ay, &mut st)?;
         let t = EventTime::new(0, 0);
         let state = if down {
             KeyState::PRESSED
@@ -455,5 +532,80 @@ mod tests {
         assert!(sink.pointer_move(0, 0.5, 0.5).is_err());
         // release_all never errors (best-effort), even with no device.
         assert!(sink.release_all().is_ok());
+    }
+
+    fn device_less_sink() -> UInputSink {
+        UInputSink {
+            handle: None,
+            state: Mutex::new(State::default()),
+        }
+    }
+
+    #[test]
+    fn no_registered_displays_maps_the_whole_abs_range_one_to_one() {
+        // Before any `set_display_bounds` call (single-display / pre-multi-monitor behavior): a
+        // normalized fraction must still scale directly onto the full 0..=ABS_MAX range.
+        let sink = device_less_sink();
+        let st = sink.state.lock().unwrap();
+        assert_eq!(UInputSink::to_abs(0, 0.0, 0.0, &st), (0, 0));
+        assert_eq!(UInputSink::to_abs(0, 1.0, 1.0, &st), (ABS_MAX, ABS_MAX));
+        assert_eq!(
+            UInputSink::to_abs(0, 0.5, 0.5, &st),
+            ((ABS_MAX + 1) / 2, (ABS_MAX + 1) / 2)
+        );
+    }
+
+    #[test]
+    fn pointer_indexes_into_the_targeted_displays_sub_rectangle() {
+        // A 1920x1080 primary at the origin plus a 1280x720 secondary to its right (desktop union is
+        // 3200x1080). Input addressed to the SECONDARY display (id 1) must land in the right-hand portion
+        // of the shared abs range, not be re-splatted across the whole device — the bug this fixes.
+        let sink = device_less_sink();
+        sink.set_display_bounds(0, 0.0, 0.0, 1920.0, 1080.0);
+        sink.set_display_bounds(1, 1920.0, 0.0, 1280.0, 720.0);
+        let st = sink.state.lock().unwrap();
+
+        // Left edge of display 1 → 1920/3200 of the abs range, not abs 0.
+        let (ax, _) = UInputSink::to_abs(1, 0.0, 0.0, &st);
+        assert_eq!(ax, ((1920.0 / 3200.0) * f64::from(ABS_MAX)).round() as i32);
+        assert_ne!(ax, 0, "must not collapse display 1 onto the desktop origin");
+
+        // Right edge of display 1 → the very end of the shared abs range.
+        let (ax_end, _) = UInputSink::to_abs(1, 1.0, 0.0, &st);
+        assert_eq!(ax_end, ABS_MAX);
+
+        // Display 0 (primary) still starts at abs 0 — unaffected by display 1's registration.
+        let (ax0, ay0) = UInputSink::to_abs(0, 0.0, 0.0, &st);
+        assert_eq!((ax0, ay0), (0, 0));
+    }
+
+    #[test]
+    fn unknown_display_id_falls_back_to_the_desktop_union() {
+        // A display id with no registered bounds must not error or silently do nothing (Inv 15's cousin
+        // for OS-input fail-safety) — it maps as if spanning the whole known desktop.
+        let sink = device_less_sink();
+        sink.set_display_bounds(0, 0.0, 0.0, 1920.0, 1080.0);
+        sink.set_display_bounds(1, 1920.0, 0.0, 1280.0, 720.0);
+        let st = sink.state.lock().unwrap();
+        let (ax, ay) = UInputSink::to_abs(99, 0.5, 0.5, &st);
+        let (dx, dy, dw, dh) = UInputSink::desktop_bounds(&st);
+        assert_eq!(
+            ax,
+            ((0.5 * dw + dx) / dw * f64::from(ABS_MAX)).round() as i32
+        );
+        assert_eq!(
+            ay,
+            ((0.5 * dh + dy) / dh * f64::from(ABS_MAX)).round() as i32
+        );
+    }
+
+    #[test]
+    fn set_display_bounds_replaces_not_duplicates() {
+        let sink = device_less_sink();
+        sink.set_display_bounds(0, 0.0, 0.0, 1920.0, 1080.0);
+        sink.set_display_bounds(0, 100.0, 100.0, 800.0, 600.0); // re-register same id
+        let st = sink.state.lock().unwrap();
+        assert_eq!(st.displays.len(), 1, "re-registering an id replaces it");
+        assert_eq!(st.displays[0].w, 800.0);
     }
 }

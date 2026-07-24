@@ -13,7 +13,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -1071,12 +1071,21 @@ struct MediaSignals {
 
 /// The media pump. Pure loop: apply ABR bitrate → (force IDR if requested) → capture → encode →
 /// droppable send. Rebuilds capture on a recoverable error; exits on the stop flag or a fatal error.
+///
+/// Pacing is **absolute-deadline**, not a fixed post-work sleep: each iteration targets a deadline
+/// that advances by exactly `frame_interval` from the last, and the capture wait is given only the
+/// time remaining until that deadline (never the full interval again). A fixed `sleep(frame_interval)`
+/// after variable-duration capture+encode+send work would add a full interval's worth of *extra*
+/// latency on top of whatever the wait already consumed, compounding every iteration into a growing,
+/// visible constant offset. Budgeting off one advancing deadline keeps cadence stable and lets a fast
+/// tick reclaim time instead of always paying for a slow one.
 fn media_pump<C, E>(capture: &mut C, encoder: &mut E, sig: &MediaSignals)
 where
     C: ScreenCaptureBackend,
     E: VideoEncoderBackend,
 {
     let mut applied_bitrate = sig.target_bitrate.load(Ordering::Relaxed);
+    let mut next_deadline = Instant::now() + sig.frame_interval;
     while !sig.stop.load(Ordering::Relaxed) {
         // Retarget CBR mid-stream when ABR moved the target — keyframe-free (latency-first).
         let want = sig.target_bitrate.load(Ordering::Relaxed);
@@ -1086,10 +1095,14 @@ where
         if sig.keyframe.swap(false, Ordering::Relaxed) {
             encoder.request_keyframe(KeyframeReason::UnrecoverableLoss);
         }
+        // Never block the capture wait longer than what's left before the next scheduled tick — if
+        // encode+send already ate into the budget (or overran it), wait no longer than 0 rather than
+        // a full interval, so a slow tick doesn't compound into permanent lag.
+        let wait = next_deadline.saturating_duration_since(Instant::now());
         // The captured frame borrows `capture` (GAT lifetime), so the borrow must end before any
         // rebuild call. We resolve to a rebuild/stop flag inside the match and act after it.
         let mut rebuild = false;
-        match capture.next_frame(sig.frame_interval) {
+        match capture.next_frame(wait) {
             Ok(Some(frame)) => {
                 // Mid-stream resolution / monitor / DPI change: the captured frame no longer matches
                 // the encoder's configured size. Reconfigure the encoder to the new dimensions and
@@ -1150,7 +1163,19 @@ where
         if rebuild && capture.start(&sig.opts).is_err() {
             break;
         }
-        std::thread::sleep(sig.frame_interval);
+        // Sleep only whatever remains before the deadline this tick already targeted (typically ~0,
+        // since `next_frame` above waited out most or all of it). Then advance by exactly one
+        // interval — except after a stall (rebuild, or a slow tick that ran past the deadline), where
+        // re-basing off `now` avoids a burst of back-to-back catch-up frames.
+        let remaining = next_deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            std::thread::sleep(remaining);
+        }
+        next_deadline = if rebuild || Instant::now() > next_deadline + sig.frame_interval {
+            Instant::now() + sig.frame_interval
+        } else {
+            next_deadline + sig.frame_interval
+        };
     }
     capture.stop();
 }

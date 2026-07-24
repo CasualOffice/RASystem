@@ -852,13 +852,122 @@ impl VideoSink {
 /// stream without letting the already-arrived frames behind it wait on it (see [`VideoSource`]).
 pub const MAX_IN_FLIGHT_STREAMS: usize = 8;
 
-/// Grace window a gap candidate gets before [`VideoSource`] reports it as a real
-/// [`VideoEvent::FrameDropped`]: once a higher `frame_id` finishes ahead of `next_expected`,
-/// `expected` has this long (from that moment) to still show up before the gap is declared.
-/// Chosen as a generous multiple of a typical same-region RTT (low tens of ms) so an ordinary
-/// reordering race resolves within the window without a false drop, while a genuinely lost frame is
-/// still reported promptly (a fraction of one 60fps frame interval's worth of frames, not seconds).
+/// Formerly the fixed grace window a gap candidate got before [`VideoSource`] reported it as a real
+/// [`VideoEvent::FrameDropped`]. Replaced by [`adaptive_gap_grace`], which derives the window from
+/// the connection's *live* RTT each time a gap candidate is first observed, instead of one constant
+/// tuned for "a typical same-region RTT" regardless of the actual path. Kept only so any external
+/// reference to the old name fails to compile loudly rather than silently reading a stale value.
+#[deprecated(since = "0.0.4", note = "replaced by adaptive_gap_grace(rtt_us)")]
 pub const GAP_GRACE: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// Lower bound on [`adaptive_gap_grace`]'s output. Keeps the window responsive on LAN/loopback
+/// paths where the live RTT is near-zero — without a floor, the formula would collapse toward zero
+/// and report a gap almost as soon as a higher `frame_id` finishes, which is exactly the false-drop
+/// failure mode the grace window exists to avoid.
+const GAP_GRACE_MIN: std::time::Duration = std::time::Duration::from_millis(60);
+
+/// Upper bound on [`adaptive_gap_grace`]'s output. Keeps loss reporting timely even on
+/// high-latency/intercontinental paths (measured RTT well into the hundreds of ms): even at the
+/// ceiling, a 60fps stream still reports a real loss within a few dozen frames, not seconds.
+const GAP_GRACE_MAX: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Multiplier applied to the live RTT sample (as a `/2`-scaled integer: `5/2` = `2.5`) to derive the
+/// grace window. Empirical heuristic covering typical reordering from concurrent per-frame stream
+/// reads plus one QUIC retransmit-recovery cycle; deliberately conservative (see `docs/22` on-device
+/// tuning follow-up) rather than the tightest value that merely happens to pass today's tests.
+const GAP_GRACE_RTT_MULT_NUM: u64 = 5;
+const GAP_GRACE_RTT_MULT_DEN: u64 = 2;
+
+/// Compute an adaptive grace-window [`Duration`] from a live RTT sample.
+///
+/// Heuristic: 2.5x the observed RTT accommodates typical reordering from concurrent per-frame
+/// stream reads (see [`VideoSource`]) plus a retransmit-recovery cycle, bounded to
+/// [`GAP_GRACE_MIN`, `GAP_GRACE_MAX`] so the window stays responsive on LAN/loopback (near-zero
+/// RTT) without ballooning unboundedly on a pathological/unmeasured RTT.
+///
+/// `rtt_us` is the smoothed round-trip time in **microseconds**, as sourced by [`sample_rtt_us`]
+/// (identical extraction to [`ConnHealth::rtt_us`], so the video path and the ABR loop agree on
+/// what the "current RTT" is). `0` (unobserved — e.g. no path sample taken yet) is floored to `1`
+/// to avoid degenerate all-zero math; the result still clamps to [`GAP_GRACE_MIN`] regardless.
+///
+/// Pure — unit-tested below without a live connection.
+#[must_use]
+fn adaptive_gap_grace(rtt_us: u32) -> std::time::Duration {
+    let rtt_us = u64::from(rtt_us).max(1);
+    let grace_us = rtt_us
+        .saturating_mul(GAP_GRACE_RTT_MULT_NUM)
+        .saturating_div(GAP_GRACE_RTT_MULT_DEN);
+    let clamped_us = grace_us.clamp(
+        u64::try_from(GAP_GRACE_MIN.as_micros()).unwrap_or(u64::MAX),
+        u64::try_from(GAP_GRACE_MAX.as_micros()).unwrap_or(u64::MAX),
+    );
+    std::time::Duration::from_micros(clamped_us)
+}
+
+/// Sample the live RTT (in **microseconds**) from a connection's currently-selected QUIC path,
+/// falling back to the first known path if none is explicitly selected (e.g. mid-migration).
+/// Non-blocking: reads in-memory path stats only, never the network — safe to call from the hot
+/// video-receive path. Mirrors [`map_health`]'s extraction exactly, so [`VideoSource`]'s adaptive
+/// grace window and [`HealthObserver`]'s reported RTT are always reading the same live number.
+/// Returns `0` if the connection has no path yet (unobserved).
+#[must_use]
+fn sample_rtt_us(conn: &Connection) -> u32 {
+    let paths = conn.paths();
+    let selected = paths
+        .iter()
+        .find(iroh::endpoint::Path::is_selected)
+        .or_else(|| paths.iter().next());
+    match selected {
+        Some(p) => u32::try_from(p.rtt().as_micros()).unwrap_or(u32::MAX),
+        None => 0,
+    }
+}
+
+#[cfg(test)]
+mod adaptive_gap_grace_tests {
+    use super::{adaptive_gap_grace, GAP_GRACE_MAX, GAP_GRACE_MIN};
+
+    #[test]
+    fn floors_at_the_minimum_for_near_zero_rtt() {
+        assert_eq!(adaptive_gap_grace(0), GAP_GRACE_MIN);
+        assert_eq!(adaptive_gap_grace(1), GAP_GRACE_MIN);
+        assert_eq!(adaptive_gap_grace(10), GAP_GRACE_MIN);
+    }
+
+    #[test]
+    fn scales_2_5x_rtt_within_bounds() {
+        // 50ms RTT -> 2.5 * 50ms = 125ms, comfortably inside [60ms, 400ms].
+        assert_eq!(
+            adaptive_gap_grace(50_000),
+            std::time::Duration::from_millis(125)
+        );
+    }
+
+    #[test]
+    fn ceils_at_the_maximum_for_high_rtt() {
+        // 200ms RTT -> 2.5 * 200ms = 500ms, clamped down to the 400ms ceiling.
+        assert_eq!(adaptive_gap_grace(200_000), GAP_GRACE_MAX);
+        assert_eq!(adaptive_gap_grace(1_000_000), GAP_GRACE_MAX);
+    }
+
+    #[test]
+    fn saturates_cleanly_on_extreme_input() {
+        // u32::MAX microseconds is ~71 minutes; the multiply-then-divide must not overflow/panic
+        // and must still land at the ceiling.
+        assert_eq!(adaptive_gap_grace(u32::MAX), GAP_GRACE_MAX);
+    }
+
+    #[test]
+    fn is_monotonic_nondecreasing_in_rtt() {
+        let samples = [0u32, 1, 10, 1_000, 24_000, 50_000, 100_000, 200_000];
+        let mut prev = std::time::Duration::ZERO;
+        for rtt in samples {
+            let grace = adaptive_gap_grace(rtt);
+            assert!(grace >= prev, "grace decreased at rtt={rtt}us");
+            prev = grace;
+        }
+    }
+}
 
 /// Controller-side droppable video receiver (`PerFrameStream`). Accepts up to
 /// [`MAX_IN_FLIGHT_STREAMS`] per-frame uni streams **concurrently**, reads each to the FIN
@@ -900,7 +1009,10 @@ pub struct VideoSource {
     /// the other `accept_uni` tasks block forever with no more stream traffic coming, and the count
     /// never reaches zero — a real hang. A short **time-based** grace window has no such failure mode
     /// (a timer always fires): `expected` gets this long, from the moment the candidate first appears,
-    /// to show up before the gap is reported as real.
+    /// to show up before the gap is reported as real. The window's *length* is adaptive
+    /// ([`adaptive_gap_grace`], keyed to the connection's live RTT via [`sample_rtt_us`] at the moment
+    /// the candidate is opened), not a single constant tuned for one assumed network — see
+    /// [`Self::recv`].
     gap_watch_deadline: Option<tokio::time::Instant>,
 }
 
@@ -949,9 +1061,9 @@ impl VideoSource {
     /// transport failure (the connection is gone); a malformed or oversized single frame is skipped,
     /// not fatal. Streams are accepted and read concurrently (bounded), but frames are always
     /// delivered to the caller in ascending `frame_id` order with the same gap-detection semantics as
-    /// the serial version — a gap is reported only once [`GAP_GRACE`] has passed with `expected` still
-    /// missing, never merely because a higher-numbered frame's concurrent read happened to finish
-    /// first (see `gap_watch_deadline`).
+    /// the serial version — a gap is reported only once its adaptive grace window
+    /// ([`adaptive_gap_grace`]) has passed with `expected` still missing, never merely because a
+    /// higher-numbered frame's concurrent read happened to finish first (see `gap_watch_deadline`).
     pub async fn recv(&mut self) -> Result<VideoEvent, TransportError> {
         loop {
             // Deliver a frame stashed behind a just-reported gap before doing anything else.
@@ -1084,7 +1196,7 @@ impl VideoSource {
             // for a frame that is still genuinely in flight and about to complete, forcing a spurious
             // decoder freeze + keyframe request (see `ras_core::session` `RecoverWithKeyframe`). So a
             // higher id only starts (or extends nothing — see below) a grace-window *watch* here; the
-            // actual gap report happens when [`GAP_GRACE`] elapses, above.
+            // actual gap report happens when the adaptive grace window elapses, above.
             match self.next_expected {
                 Some(expected) if frame.frame_id < expected => {} // stale: drop, loop again
                 Some(expected) if frame.frame_id > expected => {
@@ -1092,9 +1204,12 @@ impl VideoSource {
                     // Start the deadline only once per gap candidate — a later higher arrival while
                     // one is already running must not reset/extend it (that could stall the report
                     // indefinitely under a steady trickle of higher frames arriving before `expected`
-                    // ever will).
+                    // ever will). The window's length is sampled fresh from the live connection RTT
+                    // right now, at the moment the candidate opens — not a fixed constant — so it
+                    // tracks the actual path (LAN vs. WAN) this session is running over.
                     if self.gap_watch_deadline.is_none() {
-                        self.gap_watch_deadline = Some(tokio::time::Instant::now() + GAP_GRACE);
+                        let grace = adaptive_gap_grace(sample_rtt_us(&self.conn));
+                        self.gap_watch_deadline = Some(tokio::time::Instant::now() + grace);
                     }
                 }
                 _ => {
@@ -2230,11 +2345,14 @@ mod iroh_session_tests {
         fast_stream.write_all(&frame2.data).await.unwrap();
         fast_stream.finish().unwrap();
 
-        // Release frame 1 well *within* the gap-candidate grace window (`GAP_GRACE`) — modeling a
-        // stream that is merely slower than frame 2's, not actually lost. If a higher id immediately
-        // (falsely) declared the gap instead of waiting out the grace window, frame 1 would already
-        // have been reported as `FrameDropped` by the time this runs.
-        tokio::time::sleep(GAP_GRACE / 4).await;
+        // Release frame 1 well *within* the gap-candidate grace window — modeling a stream that is
+        // merely slower than frame 2's, not actually lost. If a higher id immediately (falsely)
+        // declared the gap instead of waiting out the grace window, frame 1 would already have been
+        // reported as `FrameDropped` by the time this runs. The window is adaptive (keyed to this
+        // connection's live, near-zero loopback RTT, so it clamps to `GAP_GRACE_MIN`) — sample it the
+        // same way `VideoSource` does rather than hardcoding an assumed value.
+        let grace = adaptive_gap_grace(sample_rtt_us(conn));
+        tokio::time::sleep(grace / 4).await;
         slow_stream.write_all(&frame1.data).await.unwrap();
         slow_stream.finish().unwrap();
 

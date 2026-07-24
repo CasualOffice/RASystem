@@ -19,6 +19,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
 use objc2_core_foundation::CFRetained;
+use objc2_core_graphics::{CGDisplayPixelsHigh, CGDisplayPixelsWide, CGMainDisplayID};
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
@@ -27,12 +28,13 @@ use objc2_core_video::{
 };
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
-    SCStreamOutput, SCStreamOutputType, SCWindow,
+    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
+    SCStreamDelegate, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 use ras_media::{
-    CaptureOptions, CaptureTimestampUs, CapturedFrame, CpuBgraFrame, MediaError, PlatformSurface,
-    RemoteDisplayBounds, ScreenCaptureBackend, StreamConfig, SurfaceKind, VideoCodec,
+    CaptureOptions, CaptureTimestampUs, CapturedFrame, CpuBgraFrame, MediaError, MonitorDef,
+    MonitorId, PlatformSurface, RemoteDisplayBounds, ScreenCaptureBackend, StreamConfig,
+    SurfaceKind, VideoCodec,
 };
 use ras_protocol::{ErrorCode, RasError};
 
@@ -283,6 +285,9 @@ pub struct MacScreenCapture {
     codec: VideoCodec,
     /// Captured display's global bounds (logical/points), read from `SCDisplay.frame` at `start`.
     bounds: Option<RemoteDisplayBounds>,
+    /// The full descriptor (geometry + HiDPI scale) of the display currently being captured, set at
+    /// `start()` (ADR-081). `None` when no capture is active.
+    captured_monitor: Option<MonitorDef>,
 }
 
 impl MacScreenCapture {
@@ -298,6 +303,7 @@ impl MacScreenCapture {
             target_fps: 60,
             codec: VideoCodec::H264AnnexB,
             bounds: None,
+            captured_monitor: None,
         }
     }
 }
@@ -348,6 +354,10 @@ impl ScreenCaptureBackend for MacScreenCapture {
             width: frame.size.width.max(0.0) as u32,
             height: frame.size.height.max(0.0) as u32,
         });
+        // The full descriptor (geometry + HiDPI scale) of the display we are about to capture
+        // (ADR-081), so `captured_display()` can report it once capture is live.
+        // SAFETY: `display` is the same live SCDisplay used above.
+        self.captured_monitor = Some(unsafe { monitor_def_for_display(&display) });
 
         // Exclude our own overlay / consent / indicator windows from capture, matched by CGWindowID.
         // Without this the always-on-top overlay we draw the viewer's remote pointer on would be
@@ -471,6 +481,20 @@ impl ScreenCaptureBackend for MacScreenCapture {
         self.bounds
     }
 
+    fn enumerate_displays(&self) -> Vec<MonitorDef> {
+        // Host-local query only (Inv 1) — a fresh `SCShareableContent` fetch each call (not cached),
+        // so a display hot-plugged/removed since the last call is reflected. Graceful degradation: an
+        // unavailable `SCShareableContent` (e.g. Screen-Recording permission not yet granted) yields
+        // an empty list, so the app shows no picker rather than erroring.
+        shareable_content()
+            .map(|content| enumerate_monitor_defs(&content))
+            .unwrap_or_default()
+    }
+
+    fn captured_display(&self) -> Option<MonitorDef> {
+        self.captured_monitor
+    }
+
     fn stop(&mut self) {
         if let Some(s) = self.stream.as_ref() {
             stop_capture_blocking(s);
@@ -479,8 +503,77 @@ impl ScreenCaptureBackend for MacScreenCapture {
         self.output = None;
         self.queue = None;
         self.bounds = None;
+        self.captured_monitor = None;
         *lock(&self.slot.frame) = None;
     }
+}
+
+/// Build the full [`MonitorDef`] for one `SCDisplay` (ADR-081). `SCDisplay` itself exposes only
+/// `displayID`/`width`/`height` (logical points)/`frame`; the HiDPI `scale_percent` and `primary`
+/// flag come from CoreGraphics `CGDisplayPixelsWide/High` (physical pixels) and `CGMainDisplayID`
+/// respectively, so this is where the two APIs are combined into the one descriptor.
+///
+/// SAFETY (caller obligation): `display` must be a live `SCDisplay` from a just-fetched
+/// `SCShareableContent` (mirrors the existing `unsafe` call sites in `start`/`enumerate_displays`).
+unsafe fn monitor_def_for_display(display: &SCDisplay) -> MonitorDef {
+    // SAFETY: `display` is live for the duration of this call (caller obligation above).
+    let (id, logical_width, logical_height, frame) = unsafe {
+        (
+            display.displayID(),
+            display.width().max(0) as u32,
+            display.height().max(0) as u32,
+            display.frame(),
+        )
+    };
+    // Physical pixel backing store for this display (independent of `SCDisplay`'s logical points),
+    // giving the exact scale ratio without relying on any private/undocumented API.
+    let pixel_width = CGDisplayPixelsWide(id) as u32;
+    let pixel_height = CGDisplayPixelsHigh(id) as u32;
+    let scale_percent = if logical_width > 0 {
+        // Round to the nearest integer percent (100 = 1.0x, 150 = 1.5x, 200 = 2.0x Retina).
+        ((u64::from(pixel_width) * 100 + u64::from(logical_width) / 2) / u64::from(logical_width))
+            .clamp(1, u64::from(u16::MAX)) as u16
+    } else {
+        100
+    };
+    MonitorDef {
+        id: MonitorId(id),
+        left: frame.origin.x as i32,
+        top: frame.origin.y as i32,
+        logical_width,
+        logical_height,
+        pixel_width: if pixel_width > 0 {
+            pixel_width
+        } else {
+            logical_width
+        },
+        pixel_height: if pixel_height > 0 {
+            pixel_height
+        } else {
+            logical_height
+        },
+        scale_percent,
+        primary: id == CGMainDisplayID(),
+    }
+}
+
+/// Enumerate every `SCDisplay` in `content` as [`MonitorDef`]s, primary first, then left-to-right /
+/// top-to-bottom by layout position (ADR-081 §"Primary-first by convention").
+fn enumerate_monitor_defs(content: &SCShareableContent) -> Vec<MonitorDef> {
+    // SAFETY: `content` is a live, just-fetched `SCShareableContent`.
+    let displays = unsafe { content.displays() };
+    let mut defs: Vec<MonitorDef> = (0..displays.count())
+        .map(|i| {
+            let d = displays.objectAtIndex(i);
+            // SAFETY: `d` is a live element of `displays`, itself live for this call.
+            unsafe { monitor_def_for_display(&d) }
+        })
+        .collect();
+    defs.sort_by(|a, b| {
+        // Primary first (false < true, so negate), then top-to-bottom, then left-to-right.
+        (!a.primary, a.top, a.left).cmp(&(!b.primary, b.top, b.left))
+    });
+    defs
 }
 
 /// Synchronously fetch shareable content (SCK's API is completion-handler based).
