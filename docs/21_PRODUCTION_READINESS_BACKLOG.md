@@ -6,6 +6,16 @@
 > "compiles + loopback-green." This is the source-of-truth backlog for the production-hardening
 > campaign; the live task tracker mirrors its P0/P1 items. Supporting per-competitor research and the
 > requirements checklist are archived alongside in the workflow transcript.
+>
+> **Update (2026-07-24):** this is a dated snapshot, not a live tracker — see `docs/23` for current
+> state. Several items marked P0/not-done below have since landed at the **code level** (still needing
+> the on-device verification each item's "Done" criteria describes): **X1** real reconnection (ADR-091,
+> concrete re-dial + endpoint re-proof within the window), **X2** no-black-screen (forced-IDR wired
+> across resume/reconnect/config-change), **L2** Wayland host input (`ras-input-linux::libei` over the
+> RemoteDesktop portal). **S5** (permanent fuzz gate) is effectively already satisfied — the repo's
+> proptest-based fuzz-style tests run as ordinary `cargo test` on every CI push, not a separate
+> corpus-based `cargo fuzz` harness. Everything else below (Windows W-items, most Distribution D-items,
+> the remaining X/L/M items) is unchanged.
 
 This confirms the critical reality: the state machine has `Suspended` but **re-dial itself is deferred** ("Phase 1 has no re-dial"). That's a concrete P0. I have enough verified ground truth. Let me write the backlog.
 
