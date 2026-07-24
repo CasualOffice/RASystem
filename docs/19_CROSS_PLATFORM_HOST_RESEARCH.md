@@ -128,9 +128,10 @@ this is genuinely new work, not a crate swap.
 
 ## 4. Recommended Windows stack
 
-Windows is the eventual production target; the team has no Windows hardware, so this stays
-**CI-compile-gated** until a runner or device is available. Build a first-party `ras-media-windows` +
-`ras-input-windows` mirroring the macOS crates.
+Windows is the eventual production target. The team now has Windows hardware access (confirmed
+2026-07) and has run a basic Share/Connect session on it, but most of the Windows-specific surface
+below is still **CI-compile-gated only** pending a fuller on-device pass. Build a first-party
+`ras-media-windows` + `ras-input-windows` mirroring the macOS crates.
 
 | Concern | Recommendation | License | Notes |
 |---|---|---|---|

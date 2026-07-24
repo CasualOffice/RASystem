@@ -52,8 +52,12 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
 > off-device-verified** (unit / loopback / compile / `cargo-deny` green) **unless it explicitly says
 > "on-device."** The load-bearing gap is that **almost none of the networked or OS-level paths have
 > been verified on real hardware or a real two-machine network** — OS capture/input, real iroh
-> sessions, audio, the contacts layer. **Windows has never been run at all** (no test hardware; it is
-> CI-compile-gated only). **Linux viewing is limited** (WebKitGTK often can't decode H.264 → honest
+> sessions, audio, the contacts layer. **Windows now has a confirmed on-device run** (2026-07): a basic
+> Share/Connect two-machine session worked, surfacing the same cross-platform bugs seen on macOS/Linux
+> (disconnect propagation, cursor/screen scaling, multi-monitor) — those have since been fixed in code
+> but **not yet re-verified on Windows hardware after landing**; most other Windows paths (audio,
+> clipboard, file transfer, the newer control/input backends) remain compile-gated only, not yet run.
+> **Linux viewing is limited** (WebKitGTK often can't decode H.264 → honest
 > error) and **Linux host needs X11/Xwayland** (pure Wayland unsupported). Builds are **unsigned**
 > (Gatekeeper/SmartScreen warn), auto-update is **wired but inert** (owner must provision the signing
 > key), and the **SDK — the actual embeddable product (S1) — is not started** (today: two reference
@@ -231,8 +235,9 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   side's own lifecycle stream); the host send reuses a **generalized outbound-control channel** the
   cursor task now shares. Loopback-tested both directions; the app chat panel is the on-device follow-up. **Still pending:** the **on-device** GUI run of the real CGEvent injection + PostEvent-TCC prompt +
   Secure-Input drop (macOS); the analogous **Linux on-device** XTEST run (a real X11/Xwayland session);
-  the **Windows on-device** `SendInput` run (**needs Windows hardware the team lacks** — stays
-  CI-compile-gated on `windows-latest`); a macOS **global-hotkey** emergency stop (baseline stop is the
+  the **Windows on-device** `SendInput` run (the team now has Windows hardware access and has run a
+  basic Share/Connect session on it, but this specific input path has not yet been on-device verified —
+  stays CI-compile-gated on `windows-latest` for now); a macOS **global-hotkey** emergency stop (baseline stop is the
   always-visible Stop button, which already drives `revoke_all` + `release_all`; no kernel SAS on macOS
   — SAS stays the Windows path); and the Linux **`uinput`/libei** + Windows **Session-0 service/agent
   split (S4)** follow-ups (docs/19 §3/§4). **Controller keyboard app-wiring has landed (ADR-075):**
