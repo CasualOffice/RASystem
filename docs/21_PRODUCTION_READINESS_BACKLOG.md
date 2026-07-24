@@ -74,14 +74,21 @@ I have enough verified ground truth to write the backlog. Key confirmations: 20 
 *Severity:* **P1** · *Platforms:* all · *Fixability:* `CODE-NOW` (netem/network-link-conditioner on our own machines).
 *Done:* Under injected 5% loss + 60 ms jitter, latency stays bounded (no queue growth), bitrate drops then *recovers* when the link clears, and no frame-queue latency build-up. Reproducible benchmark harness committed.
 
-**X8. Relative-pointer / mouse-capture (pointer-lock) path verified**
-*Why it matters:* Checklist [TS] for games/3D/CAD. `PointerMoveRelative` (ADR-087) + all three OS overrides landed at the code level but never run. Without a verified raw-delta path, we can't serve the creative/gaming use case Parsec owns.
+**X8. Relative-pointer / mouse-capture (pointer-lock) path verified** — controller UI now landed
+(2026-07-24), was the actual gap: `PointerMoveRelative` (ADR-087) + all three OS overrides existed at
+the wire/OS level, but nothing in the app ever engaged the browser's Pointer Lock API or sent a relative
+delta — a controller had no way to reach this path at all. Now wired: a default-OFF "🔒 Pointer lock"
+toggle (shown only while a control lease is held), click-to-lock on the canvas,
+`pointerlockchange`-driven state, `movementX`/`movementY` forwarded via a new `input_pointer_move_relative`
+command (mirrors `input_pointer_move`'s lease/generation/seq stamping exactly), and a safety release
+(exit lock + uncheck) the instant control ends so a revoked lease never traps the local pointer.
+*Why it matters:* Checklist [TS] for games/3D/CAD. Without this path we can't serve the creative/gaming use case Parsec owns.
 *Severity:* **P1** · *Platforms:* macOS, Linux · *Fixability:* macOS `CODE-NOW`, Linux `LINUX-DEV`.
-*Done:* Pointer-lock in a controller drives raw deltas into a real game/3D app on a real host with correct clamping to the desktop union.
+*Done:* App check/clippy/fmt clean; JS syntax-checked. Remaining: a real on-device run — pointer-lock in a live controller driving raw deltas into a real game/3D app on a real host, confirming the OS-side clamping to the desktop union (already unit-tested at the backend layer) holds end-to-end.
 
 ### P2 — Polish
 
-**X9. Connection diagnostics readout (RTT / bw / loss / fps / codec / direct-vs-relay)** — [TS] operability, surfaced from the existing `HealthObserver`. `CODE-NOW`. *Done:* live per-session stats panel + exportable.
+**X9. Connection diagnostics readout (RTT / bw / loss / fps / codec / direct-vs-relay)** — DONE. Already fully wired: `HealthObserver` → `QualitySample` → `LifecycleEvent::ConnectionQuality`, drained in the app (`drain_viewer_lifecycle`) and emitted as `conn-quality`, rendered live in the viewer UI (`#conn-stats`: path · RTT · loss% · fps · Mbps, updated each host stats tick). Not done: an explicit codec field in the readout and an export button — minor, not worth a separate item.
 **X10. HEVC/AV1 + 4:4:4 for crisp text** — [DIFF] vs RustDesk's AV1. `CODE-NOW`/`LINUX-DEV`. *Done:* optional codec negotiated, text-sharpness A/B better than H.264 baseline.
 
 ---

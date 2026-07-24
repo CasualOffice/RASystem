@@ -737,6 +737,8 @@ const stopBtn = document.getElementById("stop");
 const controlBtn = document.getElementById("control");
 const macMod = document.getElementById("macmod");
 const macModCb = document.getElementById("macmod-cb");
+const ptrLock = document.getElementById("ptrlock");
+const ptrLockCb = document.getElementById("ptrlock-cb");
 const banner = document.getElementById("banner");
 const reconnectBanner = document.getElementById("reconnect-banner");
 const connStats = document.getElementById("conn-stats");
@@ -771,6 +773,15 @@ let swapPrimaryMod = false;
 if (macModCb) {
   macModCb.addEventListener("change", () => {
     swapPrimaryMod = macModCb.checked;
+  });
+}
+
+if (ptrLockCb) {
+  ptrLockCb.addEventListener("change", () => {
+    // Unchecking mid-lock releases immediately — don't wait for a click/Esc.
+    if (!ptrLockCb.checked && document.pointerLockElement === canvas) {
+      document.exitPointerLock();
+    }
   });
 }
 
@@ -1606,6 +1617,14 @@ function clearControlTimers() {
 function setControlState(state) {
   controlState = state;
   controlling = state === "granted" && active;
+  // Pointer lock (backlog X8) only makes sense while a lease is actually held — hide the toggle and
+  // safety-release the lock (+ uncheck) the instant control ends, so a revoked/denied/lost lease never
+  // leaves the local pointer trapped/hidden inside the webview.
+  if (ptrLock) ptrLock.hidden = !controlling;
+  if (!controlling) {
+    if (ptrLockCb) ptrLockCb.checked = false;
+    if (document.pointerLockElement === canvas) document.exitPointerLock();
+  }
   if (!controlBtn) return;
   controlBtn.classList.remove("armed", "pending", "denied");
   switch (state) {
@@ -1786,11 +1805,35 @@ controlBtn.addEventListener("click", async () => {
 const heldButtons = new Set(); // buttons currently pressed on the host, for best-effort release
 let lastNx = 0;
 let lastNy = 0;
+// Pointer lock (backlog X8, ADR-087 §3.6): for games/3D/CAD apps that read raw mouse *motion*, not
+// cursor *position* — the continuous-follow absolute model above can't drive those (there is no
+// meaningful "position" to follow once the OS cursor is captured/hidden by the remote app itself).
+// Click the canvas while the toggle is on to engage; Esc (browser-native) or losing control releases
+// it. `clientX/clientY` are not meaningful while locked (frozen at the lock point, spec-dependent), so
+// this branches to raw `movementX`/`movementY` deltas instead of `normInput`'s absolute mapping.
+let pointerLocked = false;
+document.addEventListener("pointerlockchange", () => {
+  pointerLocked = document.pointerLockElement === canvas;
+});
+canvas.addEventListener("click", () => {
+  if (controlling && ptrLockCb && ptrLockCb.checked && document.pointerLockElement !== canvas) {
+    canvas.requestPointerLock();
+  }
+});
+function clampI16(n) {
+  return Math.max(-32768, Math.min(32767, Math.round(n)));
+}
 window.addEventListener("pointermove", (e) => {
   if (!controlling) return;
   const now = performance.now();
   if (now - lastMoveAt < 8) return; // ~120 Hz cap
   lastMoveAt = now;
+  if (pointerLocked) {
+    const dx = clampI16(e.movementX);
+    const dy = clampI16(e.movementY);
+    if (dx !== 0 || dy !== 0) invoke("input_pointer_move_relative", { dx, dy });
+    return;
+  }
   const p = normInput(e);
   if (p) {
     lastNx = p.nx;

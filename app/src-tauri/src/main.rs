@@ -1304,6 +1304,24 @@ async fn input_pointer_move(state: State<'_, AppState>, nx: u16, ny: u16) -> Res
     Ok(())
 }
 
+/// Move the host's OS pointer by a **relative** pixel delta (ADR-087) instead of an absolute
+/// position — the pointer-lock path (backlog X8): a viewer with the browser's Pointer Lock API
+/// engaged forwards raw `movementX`/`movementY` here instead of `input_pointer_move`, so games/3D/CAD
+/// apps that read raw mouse deltas (not cursor position) work over a remote session. Same
+/// `pointer.move` capability as absolute movement — gated identically (Inv 15).
+#[tauri::command]
+async fn input_pointer_move_relative(
+    state: State<'_, AppState>,
+    dx: i16,
+    dy: i16,
+) -> Result<(), String> {
+    send_input_action(
+        &state,
+        ras_protocol::InputAction::PointerMoveRelative { dx, dy },
+    );
+    Ok(())
+}
+
 /// Press or release a pointer button (`"left"`/`"right"`/`"middle"`) at a normalized position.
 #[tauri::command]
 async fn input_pointer_button(
@@ -3322,6 +3340,7 @@ fn main() {
             request_control,
             is_controlling,
             input_pointer_move,
+            input_pointer_move_relative,
             input_pointer_button,
             input_pointer_wheel,
             input_key,
