@@ -123,3 +123,35 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: app/src-tauri/Cargo.toml
+
+  # Compile-check the unified app on Linux. The app is a separate manifest outside the root workspace
+  # (heavy WebView deps) and was previously built ONLY at release (tauri-action) — so an app-level Linux
+  # regression (e.g. a new per-OS backend that doesn't compile) would surface at release, not in push-CI.
+  # This closes that gap: a full `cargo check` of the app on Linux, with all its native deps present
+  # (WebKitGTK, PipeWire/Pulse, ALSA mic, V4L2 camera, libvpx VP9). Mirrors ubuntu-22.04 like release.yml
+  # (the glibc compatibility floor). Not a bundle — just the Rust compile, which is where the risk is.
+  app-linux:
+    name: app compile-check (linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux system deps
+        run: |
+          sudo add-apt-repository -y ppa:pipewire-debian/pipewire-upstream
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libpipewire-0.3-dev \
+            libpulse-dev \
+            libdbus-1-dev \
+            libclang-dev \
+            pkg-config \
+            libvpx-dev \
+            libasound2-dev \
+            libv4l-dev
+      - name: app cargo check (incl. the Linux camera-send path)
+        run: cargo check --manifest-path app/src-tauri/Cargo.toml --all-targets
