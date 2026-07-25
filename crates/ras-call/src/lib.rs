@@ -27,6 +27,10 @@
 pub mod manager;
 pub use manager::{CallError, CallManager, InviteResponse, MuteState};
 
+/// The pure call runtime: maps call events → wire messages + media directives + lifecycle events.
+pub mod runtime;
+pub use runtime::{CallAction, CallLifecycleEvent, CallRuntime};
+
 use ras_protocol::ErrorCode;
 
 /// The media a call carries. Re-exported from `ras-protocol` as the single canonical media-kind type
