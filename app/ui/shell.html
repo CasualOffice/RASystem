@@ -63,6 +63,11 @@
       <div class="stage">
         <!-- remote camera (video call) — WebCodecs decode target; hidden until frames arrive -->
         <canvas class="callvideo" id="callVideo" hidden></canvas>
+        <!-- shown when the remote peer turns their camera off (driven by their mute signal) -->
+        <div class="camoff" id="camOff" hidden>
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m23 7-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/><path d="M2 2l20 20"/></svg>
+          <span id="camOffName">Camera off</span>
+        </div>
         <div class="ctimer mono" id="ctimer">00:00</div>
         <div class="qual" title="Connection: good · direct"><b></b><b></b><b></b></div>
         <div class="rmt-name" id="rmtname">Priya Nair</div>
