@@ -1297,6 +1297,16 @@ fn audio_pump(
         Err(_) => return,
     };
     if encoder.configure(&config).is_err() {
+        // KNOWN GAP (Windows audio, on-device follow-up): the capture backend returned a native
+        // rate/channel layout the Opus encoder can't take. The Windows WASAPI loopback path reports the
+        // endpoint's *native* format and does not resample, so a 44.1 kHz or 5.1-surround endpoint lands
+        // here and the pump exits — while the session still shows "AUDIO SHARED" with no audio flowing
+        // (a silent failure of a disclosed feature, Inv 7). The correct fix is to resample/downmix to
+        // 48 kHz stereo in the Windows backend AND surface an honest `AudioUnavailable` lifecycle event
+        // so the app drops the indicator; both need a real Windows audio device to build+verify (macOS/
+        // Linux force 48 kHz stereo server-side, so they never reach this branch). ras-core is
+        // deliberately log-free (observability is the typed event/audit stream), so there is no
+        // proportionate inline signal to add here without that event — tracked for the Windows pass.
         capture.stop();
         return;
     }

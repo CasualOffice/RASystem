@@ -693,7 +693,14 @@ fn add_contact(
 fn remove_contact(state: State<'_, AppState>, id: String) -> Result<(), String> {
     use ras_identity::{ContactBook, ContactId};
     let cid = ContactId::from_bytes(parse_contact_id(&id)?);
-    contacts_of(&state)?.remove(&cid);
+    let book = contacts_of(&state)?;
+    book.remove(&cid);
+    // Remove is a REVOKE — a security-relevant kill-switch, unlike an ordinary label edit. The trait
+    // mutation persists best-effort; here we additionally force a durable save and SURFACE any write
+    // error, because a silently-dropped revoke would let the removed contact reload as active on the
+    // next restart (re-enabling their signals/presence/reachability). Fail loud, not open.
+    book.save()
+        .map_err(|_| "removed the contact, but could not save the change to disk".to_string())?;
     // Stop presence for the removed contact: drop the handle (aborts its beacon loop + leaves the
     // topic) and clear its cached state so its dot goes dark. Best-effort; guarded for presence-off.
     stop_presence_for(&state, &cid);
@@ -719,6 +726,13 @@ fn set_contact_blocked(
         // Unblocked ⇒ resume live presence (best-effort; no-op if already running or presence off).
         spawn_presence_for(&state, cid);
     }
+    // Block is a kill-switch (Inv 1) — force a durable save and surface a write failure rather than
+    // swallow it (the trait mutation alone persists best-effort). A silently-dropped block would let
+    // the blocked contact reload as active on restart. Unblock goes through the same path for symmetry
+    // (a dropped unblock is only a convenience regression, but there's no reason to leave it best-
+    // effort once block isn't).
+    book.save()
+        .map_err(|_| "updated the contact, but could not save the change to disk".to_string())?;
     Ok(())
 }
 
