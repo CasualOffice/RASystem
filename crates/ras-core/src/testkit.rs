@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use tokio::sync::{mpsc, watch};
 
+use crate::call::CallTransport;
 use crate::deps::{
     AudioSink, AudioSourceDyn, ControlChannelDyn, DialTarget, FrameSink, PeerIdentity, PushResult,
     SessionTransport, VideoSinkDyn, VideoSourceDyn,
@@ -671,4 +672,133 @@ impl FrameSink for CountingFrameSink {
             .store(frame.frame_id, Ordering::Relaxed);
         PushResult::Sent
     }
+}
+
+// ── Symmetric call transport loopback (ADR-106, L5t) ─────────────────────────────────────────────
+/// One end of an in-memory **call** — unlike [`LoopbackTransport`] (one-way, role-restricted), a call
+/// peer holds *both* an audio/video sink and source, so a call's symmetric media can be exercised
+/// off-device. Build a wired pair with [`call_loopback`]; each side's egress feeds the other's ingress.
+pub struct CallLoopback {
+    control: Mutex<Option<LoopbackControl>>,
+    audio_sink: Mutex<Option<mpsc::Sender<EncodedAudio>>>,
+    audio_source: Mutex<Option<mpsc::Receiver<EncodedAudio>>>,
+    video_sink: Mutex<Option<mpsc::Sender<VideoEvent>>>,
+    video_source: Mutex<Option<mpsc::Receiver<VideoEvent>>>,
+    cut: watch::Receiver<bool>,
+    // Keeps the (never-signalled) cut sender alive for both peers.
+    _cut_keepalive: Arc<watch::Sender<bool>>,
+}
+
+fn taken(what: &'static str) -> CoreError {
+    CoreError::fatal(ErrorCode::Internal, what)
+}
+
+#[async_trait]
+impl CallTransport for CallLoopback {
+    async fn control_channel(&self) -> Result<Box<dyn ControlChannelDyn>, CoreError> {
+        self.control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|c| Box::new(c) as Box<dyn ControlChannelDyn>)
+            .ok_or_else(|| taken("call control channel already taken"))
+    }
+    async fn audio_sink(&self) -> Result<Box<dyn AudioSink>, CoreError> {
+        self.audio_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|tx| {
+                Box::new(LoopbackAudioSink {
+                    tx,
+                    cut: self.cut.clone(),
+                }) as Box<dyn AudioSink>
+            })
+            .ok_or_else(|| taken("call audio sink already taken"))
+    }
+    async fn audio_source(&self) -> Result<Box<dyn AudioSourceDyn>, CoreError> {
+        self.audio_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|rx| {
+                Box::new(LoopbackAudioSource {
+                    rx,
+                    cut: self.cut.clone(),
+                }) as Box<dyn AudioSourceDyn>
+            })
+            .ok_or_else(|| taken("call audio source already taken"))
+    }
+    async fn video_sink(&self) -> Result<Box<dyn VideoSinkDyn>, CoreError> {
+        self.video_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|tx| {
+                Box::new(LoopbackSink {
+                    tx,
+                    cut: self.cut.clone(),
+                }) as Box<dyn VideoSinkDyn>
+            })
+            .ok_or_else(|| taken("call video sink already taken"))
+    }
+    async fn video_source(&self) -> Result<Box<dyn VideoSourceDyn>, CoreError> {
+        self.video_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|rx| {
+                Box::new(LoopbackSource {
+                    rx,
+                    cut: self.cut.clone(),
+                }) as Box<dyn VideoSourceDyn>
+            })
+            .ok_or_else(|| taken("call video source already taken"))
+    }
+}
+
+/// Two [`CallTransport`] peers wired crosswise over `tokio` channels — no iroh, no sockets. Each peer's
+/// egress (audio/video sink, control send) feeds the other's ingress, so a symmetric call flows both
+/// ways. Models the real `casual-ras/call/1` transport (ADR-106) for off-device tests.
+#[must_use]
+pub fn call_loopback() -> (Arc<CallLoopback>, Arc<CallLoopback>) {
+    let (cut_tx, cut_rx) = watch::channel(false);
+    let keep = Arc::new(cut_tx);
+    // control: a→b and b→a (bidi)
+    let (a2b_ctl_tx, a2b_ctl_rx) = mpsc::channel(64);
+    let (b2a_ctl_tx, b2a_ctl_rx) = mpsc::channel(64);
+    // audio: a→b and b→a
+    let (a2b_aud_tx, a2b_aud_rx) = mpsc::channel(256);
+    let (b2a_aud_tx, b2a_aud_rx) = mpsc::channel(256);
+    // video: a→b and b→a
+    let (a2b_vid_tx, a2b_vid_rx) = mpsc::channel(8);
+    let (b2a_vid_tx, b2a_vid_rx) = mpsc::channel(8);
+
+    let a = Arc::new(CallLoopback {
+        control: Mutex::new(Some(LoopbackControl {
+            tx: a2b_ctl_tx,
+            rx: b2a_ctl_rx,
+            cut: cut_rx.clone(),
+        })),
+        audio_sink: Mutex::new(Some(a2b_aud_tx)),
+        audio_source: Mutex::new(Some(b2a_aud_rx)),
+        video_sink: Mutex::new(Some(a2b_vid_tx)),
+        video_source: Mutex::new(Some(b2a_vid_rx)),
+        cut: cut_rx.clone(),
+        _cut_keepalive: keep.clone(),
+    });
+    let b = Arc::new(CallLoopback {
+        control: Mutex::new(Some(LoopbackControl {
+            tx: b2a_ctl_tx,
+            rx: a2b_ctl_rx,
+            cut: cut_rx.clone(),
+        })),
+        audio_sink: Mutex::new(Some(b2a_aud_tx)),
+        audio_source: Mutex::new(Some(a2b_aud_rx)),
+        video_sink: Mutex::new(Some(b2a_vid_tx)),
+        video_source: Mutex::new(Some(a2b_vid_rx)),
+        cut: cut_rx,
+        _cut_keepalive: keep,
+    });
+    (a, b)
 }
