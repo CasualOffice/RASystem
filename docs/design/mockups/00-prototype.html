@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Casual RAS — desktop prototype</title>
+<style>
+/* ============ foundation (docs/25 tokens + primitives, inlined) ============ */
+:root{
+  --bg:#0A0B0F;--surface-1:#0F1117;--surface-2:#14161D;--surface-3:#191C24;--surface-4:#20242E;--surface-5:#272C38;
+  --line:#262A34;--line-soft:#1C2029;--line-strong:#333A47;
+  --ink:#E7E9ED;--ink-dim:#9BA1AD;--ink-faint:#6B717E;
+  --accent:#6E79D6;--accent-hover:#7f8ae2;--accent-press:#5b66c4;--accent-glow:rgba(110,121,214,0.16);--accent-ink:#eef0fc;
+  --online:#3FB950;--online-glow:rgba(63,185,80,0.15);--away:#C9CDD6;--amber:#D2A83B;--amber-glow:rgba(210,168,59,0.15);
+  --danger:#E5484D;--danger-hover:#f05a5f;--danger-glow:rgba(229,72,77,0.16);
+  --session:#FF6B35;--session-soft:rgba(255,107,53,0.16);--session-line:rgba(255,107,53,0.55);
+  --sans:ui-sans-serif,-apple-system,"Segoe UI",Roboto,system-ui,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+  --r-sm:6px;--r-md:8px;--r-lg:12px;--r-pill:999px;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --ease:cubic-bezier(0.2,0,0,1);--t-fast:120ms;--t-mid:160ms;--t-slow:200ms;
+  --shadow-pop:0 12px 32px -8px rgba(0,0,0,0.6),0 0 0 1px var(--line);
+}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;overflow:hidden}
+.label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint)}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}.dim{color:var(--ink-dim)}.faint{color:var(--ink-faint)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-sm)}
+button{font-family:inherit}
+/* avatar + presence */
+.avatar{position:relative;flex:none;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;overflow:visible}
+.avatar.s28{width:28px;height:28px;font-size:12px}.avatar.s32{width:32px;height:32px;font-size:12px}
+.avatar.s40{width:40px;height:40px;font-size:14px}.avatar.s46{width:46px;height:46px;font-size:16px}.avatar.s72{width:72px;height:72px;font-size:26px}
+.presence{position:absolute;right:-1px;bottom:-1px;width:13px;height:13px;border-radius:50%;background:var(--bg);display:grid;place-items:center}
+.presence.s46{width:15px;height:15px;right:0;bottom:0}
+.presence.online i{width:8px;height:8px;border-radius:50%;background:var(--online);display:block}
+.presence.away i{width:8px;height:8px;border-radius:50%;border:2px solid var(--away);display:block}
+.presence.dnd i{width:8px;height:8px;border-radius:50%;background:var(--danger);position:relative;display:block}
+.presence.dnd i::after{content:"";position:absolute;inset:3px 1.5px;background:var(--bg);border-radius:1px}
+.presence.offline i{width:8px;height:8px;border-radius:50%;border:2px solid var(--ink-faint);display:block}
+.presence.insession{width:15px;height:15px}
+.presence.insession i{width:11px;height:9px;border-radius:2px;background:var(--session);position:relative;box-shadow:0 0 0 2px var(--bg);display:block}
+.presence.insession i::after{content:"";position:absolute;left:50%;bottom:-3px;transform:translateX(-50%);width:5px;height:2px;background:var(--session);border-radius:1px}
+/* buttons */
+.btn{font-size:14px;font-weight:500;line-height:1;cursor:pointer;border:1px solid transparent;border-radius:var(--r-md);padding:9px 14px;color:var(--ink);background:transparent;transition:background var(--t-fast) var(--ease),border-color var(--t-fast) var(--ease)}
+.btn:hover{background:var(--surface-4)}
+.btn-primary{background:var(--accent);color:var(--accent-ink)}.btn-primary:hover{background:var(--accent-hover)}
+.btn-ghost{border-color:var(--line);color:var(--ink-dim)}.btn-ghost:hover{border-color:var(--line-strong);color:var(--ink);background:var(--surface-3)}
+.btn-danger{background:var(--danger);color:#fff}.btn-danger:hover{background:var(--danger-hover)}
+.iconbtn{width:34px;height:34px;padding:0;display:grid;place-items:center;border-radius:var(--r-md);color:var(--ink-dim);background:transparent;border:0;cursor:pointer;transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease)}
+.iconbtn:hover{background:var(--surface-4);color:var(--ink)}
+.iconbtn.on{background:var(--accent-glow);color:var(--accent)}
+/* pills */
+.badge{min-width:19px;height:19px;padding:0 6px;border-radius:var(--r-pill);background:var(--accent);color:var(--accent-ink);font-size:11px;font-weight:600;display:inline-grid;place-items:center;font-variant-numeric:tabular-nums}
+.badge.muted{background:var(--surface-5);color:var(--ink-dim)}
+.chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border:1px solid var(--line);border-radius:var(--r-pill);background:var(--surface-3);font-size:12px;color:var(--ink-dim);cursor:pointer}
+.chip.mine{border-color:var(--accent);background:var(--accent-glow);color:var(--accent)}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--surface-5);border-radius:999px;border:3px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background:var(--line-strong)}
+
+/* ============ shell ============ */
+.app{display:grid;grid-template-columns:72px 320px 1fr;height:100vh}
+/* rail */
+.rail{background:var(--surface-1);border-right:1px solid var(--line-soft);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:6px}
+.rail-mark{width:38px;height:38px;border-radius:11px;background:var(--accent);display:grid;place-items:center;color:#fff;font-weight:700;font-size:17px;margin-bottom:10px}
+.nav{position:relative;width:44px;height:44px;border-radius:12px;display:grid;place-items:center;color:var(--ink-dim);cursor:pointer;border:0;background:transparent;transition:background var(--t-fast),color var(--t-fast)}
+.nav:hover{background:var(--surface-3);color:var(--ink)}
+.nav.active{color:var(--ink);background:var(--surface-3)}
+.nav.active::before{content:"";position:absolute;left:-14px;top:11px;bottom:11px;width:3px;border-radius:0 3px 3px 0;background:var(--accent)}
+.nav .dot{position:absolute;top:9px;right:9px;width:8px;height:8px;border-radius:50%;background:var(--accent);border:2px solid var(--surface-1)}
+.rail-spacer{flex:1}
+/* list column */
+.list{background:var(--surface-2);border-right:1px solid var(--line-soft);display:flex;flex-direction:column;min-width:0}
+.list-head{padding:16px 16px 10px;display:flex;flex-direction:column;gap:12px}
+.list-head .title{font-size:18px;font-weight:600;letter-spacing:-.01em;display:flex;align-items:center;justify-content:space-between}
+.search{display:flex;align-items:center;gap:8px;height:34px;padding:0 10px;background:var(--surface-3);border:1px solid var(--line);border-radius:var(--r-md);color:var(--ink-faint);font-size:13px}
+.convs{flex:1;overflow-y:auto;padding:4px 8px 10px}
+.conv{display:grid;grid-template-columns:46px 1fr auto;grid-template-rows:auto auto;column-gap:12px;align-items:center;height:62px;padding:0 8px;border-radius:var(--r-md);cursor:pointer;transition:background var(--t-fast)}
+.conv:hover{background:var(--surface-3)}
+.conv.active{background:var(--surface-3)}
+.conv .avatar{grid-row:1/3}
+.conv .cname{grid-column:2;font-weight:500;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+.conv .ctime{grid-column:3;font-size:11.5px;color:var(--ink-faint);font-family:var(--mono);align-self:start;margin-top:2px}
+.conv .cprev{grid-column:2;font-size:13px;color:var(--ink-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conv .cmeta{grid-column:3;align-self:end;display:flex;align-items:center;gap:6px;margin-bottom:2px}
+.conv.muted .cname,.conv.muted .cprev{color:var(--ink-faint)}
+.conv .cprev.session{color:var(--session);font-weight:500}
+/* main pane */
+.main{background:var(--surface-3);display:flex;flex-direction:column;min-width:0}
+.topbar{height:56px;flex:none;border-bottom:1px solid var(--line-soft);display:flex;align-items:center;gap:12px;padding:0 16px}
+.topbar .who{display:flex;align-items:center;gap:10px;min-width:0}
+.topbar .who .nm{font-weight:600;font-size:15px}
+.topbar .who .st{font-size:12px;color:var(--ink-dim)}
+.topbar .actions{margin-left:auto;display:flex;gap:2px}
+.thread{flex:1;overflow-y:auto;padding:16px 20px 8px}
+.daydiv{display:flex;align-items:center;gap:12px;margin:14px 0;color:var(--ink-faint);font-size:12px}
+.daydiv::before,.daydiv::after{content:"";flex:1;height:1px;background:var(--line-soft)}
+.msg{display:grid;grid-template-columns:64px 1fr;padding:2px 8px;border-radius:var(--r-md);position:relative}
+.msg:hover{background:var(--surface-4)}
+.msg .gut{grid-column:1;padding-top:2px}
+.msg .body{grid-column:2;min-width:0}
+.msg .hd{display:flex;align-items:baseline;gap:8px}
+.msg .hd .snm{font-weight:600;font-size:14px}
+.msg .hd .stm{font-size:11px;color:var(--ink-faint);font-family:var(--mono)}
+.msg .txt{font-size:14.5px;color:var(--ink);margin-top:1px;overflow-wrap:anywhere}
+.msg.grouped .hovertime{grid-column:1;font-size:10px;color:var(--ink-faint);font-family:var(--mono);text-align:right;padding-right:12px;padding-top:4px;opacity:0}
+.msg.grouped:hover .hovertime{opacity:1}
+.reacts{display:flex;gap:6px;margin-top:5px}
+.react-add{opacity:0;transition:opacity var(--t-fast)}
+.msg:hover .react-add{opacity:1}
+.msg-img{margin-top:6px;width:280px;height:150px;border-radius:var(--r-md);border:1px solid var(--line);background:radial-gradient(60% 50% at 30% 25%,rgba(110,121,214,.30),transparent 70%),radial-gradient(50% 60% at 78% 70%,rgba(110,121,214,.14),transparent 70%),var(--surface-2);position:relative;overflow:hidden}
+.msg-img .imeta{position:absolute;left:10px;bottom:8px;font-size:11px;color:var(--ink-dim);font-family:var(--mono);background:rgba(10,11,15,.6);padding:2px 7px;border-radius:var(--r-pill)}
+.filecard{margin-top:6px;display:flex;align-items:center;gap:12px;width:320px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
+.filecard .fi{width:36px;height:36px;border-radius:var(--r-sm);background:var(--surface-4);display:grid;place-items:center;color:var(--ink-dim)}
+.filecard .fn{font-size:13.5px;font-weight:500}.filecard .fs{font-size:11.5px;color:var(--ink-faint);font-family:var(--mono)}
+/* composer */
+.composer{flex:none;padding:12px 20px 16px}
+.cbox{display:flex;align-items:center;gap:8px;background:var(--surface-4);border:1px solid var(--line);border-radius:var(--r-lg);padding:6px 8px 6px 10px}
+.cbox:focus-within{border-color:var(--line-strong)}
+.cbox input{flex:1;background:transparent;border:0;outline:none;color:var(--ink);font-family:inherit;font-size:14.5px;padding:6px 2px}
+.cbox input::placeholder{color:var(--ink-faint)}
+.send{width:32px;height:32px;border-radius:var(--r-md);background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;border:0;cursor:pointer}
+.send:disabled{background:var(--surface-5);color:var(--ink-faint);cursor:default}
+
+/* ============ overlays (call / consent / session) ============ */
+.scrim{position:fixed;inset:0;background:rgba(6,7,10,.55);display:none;z-index:40}
+.scrim.show{display:block}
+/* incoming call — desktop corner window */
+.callwin{position:fixed;right:24px;bottom:24px;width:352px;background:var(--surface-3);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:20px;z-index:60;display:none}
+.callwin.show{display:block}
+.callwin .cav{margin:0 auto 12px;background:radial-gradient(circle at 34% 30%,var(--accent) 0%,transparent 56%),radial-gradient(circle at 72% 70%,var(--accent-press) 0%,transparent 58%),var(--surface-5);filter:saturate(.85) brightness(1.05)}
+.callwin .cnm{text-align:center;font-size:19px;font-weight:600}
+.callwin .csub{text-align:center;font-size:12.5px;color:var(--ink-dim);margin-top:2px}
+.callwin .csec{display:flex;justify-content:center;gap:18px;margin:14px 0 4px;font-size:12px}
+.callwin .csec a{color:var(--ink-dim);cursor:pointer}.callwin .csec a:hover{color:var(--ink)}
+.callwin .cbtns{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:12px}
+.cbtn{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;border:0;cursor:pointer;color:#fff}
+.cbtn.audio{background:var(--online)}.cbtn.video{background:var(--online)}.cbtn.decline{background:var(--danger)}
+.cbtn.sm{width:44px;height:44px}
+.cbtn-lbl{font-size:10.5px;color:var(--ink-dim);text-align:center;margin-top:5px}
+/* in-call stage (fills main) */
+.incall{position:absolute;inset:0;background:#07080c;display:none;flex-direction:column;z-index:20}
+.incall.show{display:flex}
+.stage{flex:1;position:relative;background:linear-gradient(160deg,#141824,#0b0d13 70%);display:grid;place-items:center;overflow:hidden}
+.stage .rmt-name{position:absolute;left:16px;bottom:16px;font-size:13px;color:var(--ink);background:rgba(10,11,15,.5);backdrop-filter:blur(8px);padding:5px 11px;border-radius:var(--r-pill)}
+.stage .qual{position:absolute;right:16px;top:16px;display:flex;align-items:flex-end;gap:3px;height:18px;background:rgba(10,11,15,.5);padding:6px 8px;border-radius:var(--r-pill)}
+.stage .qual b{width:4px;background:var(--online);border-radius:1px}.stage .qual b:nth-child(1){height:6px}.stage .qual b:nth-child(2){height:10px}.stage .qual b:nth-child(3){height:14px}
+.stage .selfview{position:absolute;right:16px;bottom:78px;width:150px;height:96px;border-radius:var(--r-md);border:1px solid var(--line-strong);background:radial-gradient(circle at 60% 40%,#2a3346,#12151d);box-shadow:0 6px 18px -6px rgba(0,0,0,.5)}
+.stage .ctimer{position:absolute;left:16px;top:16px;font-family:var(--mono);font-size:12.5px;color:var(--ink-dim);background:rgba(10,11,15,.5);padding:5px 9px;border-radius:var(--r-pill)}
+.callbar{position:absolute;left:50%;bottom:20px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:9px 12px;background:rgba(20,22,29,.72);backdrop-filter:blur(16px);border:1px solid var(--line);border-radius:var(--r-pill)}
+.callbar .cbtn{width:44px;height:44px;background:var(--surface-4)}
+.callbar .cbtn.on{background:var(--accent);color:#fff}
+.callbar .cbtn.end{background:var(--danger);margin-left:6px}
+/* voice call variant reuse stage; PiP pill */
+.pip{position:fixed;right:24px;bottom:24px;width:228px;display:none;align-items:center;gap:10px;padding:10px;background:var(--surface-3);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);z-index:55}
+.pip.show{display:flex}
+.pip .pth{width:40px;height:40px;border-radius:var(--r-md);background:radial-gradient(circle at 60% 40%,#2a3346,#12151d);flex:none}
+.pip .pnm{font-size:13px;font-weight:500;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pip .picon{width:32px;height:32px;border-radius:var(--r-md);border:0;display:grid;place-items:center;cursor:pointer;background:var(--surface-4);color:var(--ink-dim)}
+.pip .picon.end{background:var(--danger);color:#fff}
+/* consent card */
+.consent{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:440px;background:var(--surface-3);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:22px;z-index:60;display:none}
+.consent.show{display:block}
+.consent .kick{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--amber)}
+.consent .kick i{width:7px;height:7px;border-radius:50%;background:var(--amber);box-shadow:0 0 0 4px var(--amber-glow)}
+.consent .chd{display:flex;align-items:center;gap:12px;margin:12px 0 4px}
+.consent .chd .t{font-size:16px;font-weight:600}
+.consent .matchcode{font-family:var(--mono);font-size:12.5px;color:var(--ink-dim);margin:8px 0 14px}
+.consent .matchcode b{color:var(--ink)}
+.caprow{display:flex;align-items:center;gap:12px;padding:9px 8px;border-radius:var(--r-md)}
+.caprow:hover{background:var(--surface-4)}
+.capbody{flex:1;min-width:0}.capbody .cn{font-size:13.5px;font-weight:500}.capbody .cd{font-size:12px;color:var(--ink-faint)}
+.switch{position:relative;width:34px;height:20px;flex:none;cursor:pointer}
+.switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+.switch .tk{position:absolute;inset:0;background:var(--surface-5);border:1px solid var(--line-strong);border-radius:var(--r-pill);transition:background var(--t-fast),border-color var(--t-fast)}
+.switch .th{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--ink-dim);transition:transform var(--t-fast),background var(--t-fast)}
+.switch input:checked~.tk{background:var(--accent);border-color:var(--accent)}
+.switch input:checked~.th{transform:translateX(14px);background:#fff}
+.consent .foot{display:flex;align-items:center;gap:10px;margin-top:16px}
+.consent .foot .btn{flex:1}
+.remember{display:flex;align-items:flex-start;gap:8px;margin-top:12px;font-size:12px;color:var(--ink-dim)}
+.remember input{margin-top:2px;accent-color:var(--accent)}
+/* live remote-session (controller pov, fills main) */
+.session{position:absolute;inset:0;display:none;flex-direction:column;z-index:20}
+.session.show{display:flex}
+.desk{flex:1;position:relative;background:linear-gradient(150deg,#20304a,#101826);overflow:hidden}
+.desk .menubar{height:26px;background:rgba(255,255,255,.06);display:flex;align-items:center;gap:16px;padding:0 14px;font-size:12px;color:#dfe3ea;backdrop-filter:blur(6px)}
+.desk .win{position:absolute;border-radius:8px;background:#1c2230;border:1px solid rgba(255,255,255,.08);box-shadow:0 20px 50px -20px rgba(0,0,0,.6)}
+.desk .win .wt{height:28px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:6px;padding:0 10px}
+.desk .win .wt i{width:10px;height:10px;border-radius:50%;background:#3a4152}
+.desk .osc{position:absolute;width:16px;height:22px;pointer-events:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}
+.sesstoolbar{position:absolute;left:50%;top:14px;transform:translateX(-50%);display:flex;align-items:center;gap:4px;padding:6px;background:rgba(20,22,29,.82);backdrop-filter:blur(16px);border:1px solid var(--line);border-radius:var(--r-pill);z-index:5}
+.sesstoolbar .sb{height:32px;padding:0 10px;border-radius:var(--r-pill);border:0;background:transparent;color:var(--ink-dim);font-size:12.5px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:6px}
+.sesstoolbar .sb:hover{background:var(--surface-4);color:var(--ink)}
+.sesstoolbar .sb.stop{background:var(--danger);color:#fff}
+.sesstoolbar .sep{width:1px;height:18px;background:var(--line);margin:0 3px}
+.telemetry{position:absolute;left:14px;bottom:14px;font-family:var(--mono);font-size:11px;color:var(--ink-dim);background:rgba(10,11,15,.55);padding:5px 9px;border-radius:var(--r-pill);z-index:5}
+.ctrl-badge{position:absolute;right:14px;bottom:14px;display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--session);background:var(--session-soft);border:1px solid var(--session-line);padding:5px 11px;border-radius:var(--r-pill);z-index:5}
+.ctrl-badge i{width:7px;height:7px;border-radius:50%;background:var(--session)}
+/* owner "you are being controlled" bar (fixed, un-hideable) */
+.ownerbar{position:fixed;left:0;right:0;bottom:0;height:52px;display:none;align-items:center;gap:14px;padding:0 18px;background:var(--session-soft);border-top:2px solid var(--session-line);z-index:70;backdrop-filter:blur(8px)}
+.ownerbar.show{display:flex}
+.ownerbar .odot{width:9px;height:9px;border-radius:50%;background:var(--session);box-shadow:0 0 0 4px var(--session-soft);animation:pulse 1.6s var(--ease) infinite}
+.ownerbar .otx{font-size:13px;font-weight:600;color:var(--session)}
+.ownerbar .olock{font-size:11.5px;color:var(--ink-dim);display:flex;align-items:center;gap:5px}
+.ownerbar .ostop{margin-left:auto}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@media (prefers-reduced-motion:reduce){.ownerbar .odot{animation:none}}
+/* toast */
+.toast{position:fixed;right:24px;top:24px;display:flex;align-items:center;gap:10px;padding:11px 14px;background:var(--surface-3);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-pop);z-index:80;font-size:13.5px;transform:translateX(120%);transition:transform var(--t-slow) var(--ease)}
+.toast.show{transform:none}
+.toast .td{width:8px;height:8px;border-radius:50%;background:var(--online);flex:none}
+/* hint */
+.hint{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);font-size:12px;color:var(--ink-faint);background:var(--surface-2);border:1px solid var(--line);padding:6px 12px;border-radius:var(--r-pill);z-index:90}
+.hint b{color:var(--ink-dim);font-weight:600}
+svg{stroke-linecap:round;stroke-linejoin:round}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- rail -->
+  <nav class="rail" aria-label="Primary">
+    <div class="rail-mark" title="Casual RAS">C</div>
+    <button class="nav active" title="Contacts" aria-current="page">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="10" cy="8" r="4"/><path d="M21 21v-2a4 4 0 0 0-3-3.9"/></svg>
+    </button>
+    <button class="nav" title="Recent">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+    </button>
+    <button class="nav" title="Calls"><span class="dot"></span>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4h4l2 5-3 2a12 12 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/></svg>
+    </button>
+    <button class="nav" title="Activity">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 12h4l2 7 4-14 2 7h4"/></svg>
+    </button>
+    <div class="rail-spacer"></div>
+    <button class="nav" title="You — online" style="padding:0">
+      <span class="avatar s40" style="background:#4a5578">YM<span class="presence online"><i></i></span></span>
+    </button>
+    <button class="nav" title="Settings">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.6-2-3.4-2.4 1a7 7 0 0 0-1.7-1L14.5 2h-4l-.3 2.4a7 7 0 0 0-1.7 1l-2.4-1-2 3.4L4 11a7 7 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 1.7 1l.3 2.4h4l.3-2.4a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6a7 7 0 0 0 .1-1z"/></svg>
+    </button>
+  </nav>
+
+  <!-- list -->
+  <div class="list">
+    <div class="list-head">
+      <div class="title">Messages
+        <button class="iconbtn" title="New message">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+        </button>
+      </div>
+      <div class="search"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>Search contacts</div>
+    </div>
+    <div class="convs" id="convs"></div>
+  </div>
+
+  <!-- main -->
+  <div class="main" id="main">
+    <div class="topbar" id="topbar"></div>
+    <div class="thread" id="thread"></div>
+    <div class="composer">
+      <form class="cbox" id="composer">
+        <button class="iconbtn" type="button" title="Attach"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.5 12.5 21a4.5 4.5 0 0 1-6.4-6.4L15 5.7A3 3 0 0 1 19.2 10l-8.9 8.8a1.5 1.5 0 0 1-2.1-2.1l7.9-7.9"/></svg></button>
+        <input id="cinput" placeholder="Message…" autocomplete="off" />
+        <button class="iconbtn" type="button" title="Emoji"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M8 14a4.5 4.5 0 0 0 8 0"/><path d="M9 9h.01M15 9h.01"/></svg></button>
+        <button class="send" id="send" type="submit" title="Send" disabled><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></button>
+      </form>
+    </div>
+
+    <!-- in-call stage overlay (inside main) -->
+    <div class="incall" id="incall">
+      <div class="stage">
+        <div class="ctimer mono" id="ctimer">00:00</div>
+        <div class="qual" title="Connection: good · direct"><b></b><b></b><b></b></div>
+        <div class="rmt-name" id="rmtname">Priya Nair</div>
+        <div class="selfview" title="Your camera"></div>
+        <div class="callbar">
+          <button class="cbtn on" id="btnMute" title="Mute"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/><path d="M19 10a7 7 0 0 1-14 0M12 19v3"/></svg></button>
+          <button class="cbtn" id="btnCam" title="Camera"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m23 7-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button>
+          <button class="cbtn" title="Share screen"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></button>
+          <button class="cbtn" title="More"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg></button>
+          <button class="cbtn end" id="btnMinCall" title="Minimize (keep call)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 12h14"/></svg></button>
+          <button class="cbtn end" id="btnHang" title="Hang up"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M22 16.9A16 16 0 0 1 3 6a2 2 0 0 1 2-2h3l1.5 4-2 1.5a12 12 0 0 0 6 6l1.5-2 4 1.5V17a2 2 0 0 1-2 2" transform="rotate(135 12 12)"/></svg></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- live remote session overlay (controller pov, inside main) -->
+    <div class="session" id="session">
+      <div class="desk">
+        <div class="menubar"><b style="font-weight:600">Finder</b><span>File</span><span>Edit</span><span>View</span><span style="margin-left:auto" class="mono">2:14 PM</span></div>
+        <div class="win" style="left:60px;top:70px;width:340px;height:200px"><div class="wt"><i></i><i></i><i></i><span style="color:#aeb4c0;font-size:11px;margin-left:6px">app.rs — ras-core</span></div></div>
+        <div class="win" style="right:70px;top:120px;width:300px;height:170px"><div class="wt"><i></i><i></i><i></i><span style="color:#aeb4c0;font-size:11px;margin-left:6px">Terminal</span></div></div>
+        <svg class="osc" style="left:300px;top:200px" viewBox="0 0 16 22" fill="#f4f5f8" stroke="#0b0d13" stroke-width="1"><path d="M1 1l13 9-5.5 1.2L11 18l-2.5 1-2.6-6L1 15z"/></svg>
+        <div class="sesstoolbar">
+          <button class="sb" title="Switch display"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/></svg>Display 1</button>
+          <span class="sep"></span>
+          <button class="sb" title="Quality">HD</button>
+          <button class="sb" title="Capabilities">Control · Clipboard</button>
+          <button class="sb" title="Send file"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12M8 7l4-4 4 4"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg></button>
+          <button class="sb" title="Chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+          <span class="sep"></span>
+          <button class="sb stop" id="btnSessStop">Stop</button>
+        </div>
+        <div class="telemetry">12 ms · 0.1% loss · direct</div>
+        <div class="ctrl-badge"><i></i>Controlling Priya Nair</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- incoming call window -->
+<div class="callwin" id="callwin" role="dialog" aria-label="Incoming call">
+  <div class="avatar s72 cav" id="cwav" aria-hidden="true"></div>
+  <div class="cnm" id="cwname">Priya Nair</div>
+  <div class="csub">Casual RAS · <b style="color:var(--ink)">Incoming video call</b></div>
+  <div class="csec"><a>Message</a><a>Remind me</a></div>
+  <div class="cbtns">
+    <div><button class="cbtn audio sm" id="btnAcceptA" title="Accept audio"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4h4l2 5-3 2a12 12 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/></svg></button><div class="cbtn-lbl">Audio</div></div>
+    <div><button class="cbtn video" id="btnAcceptV" title="Accept video"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m23 7-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button><div class="cbtn-lbl">Video</div></div>
+    <div><button class="cbtn decline sm" id="btnDecline" title="Decline"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M18 6 6 18M6 6l12 12"/></svg></button><div class="cbtn-lbl">Decline</div></div>
+  </div>
+</div>
+
+<!-- PiP -->
+<div class="pip" id="pip">
+  <div class="pth"></div>
+  <div class="pnm" id="pipname">Priya Nair</div>
+  <button class="picon" title="Mute"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/><path d="M19 10a7 7 0 0 1-14 0"/></svg></button>
+  <button class="picon" id="btnExpand" title="Back to call"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button>
+  <button class="picon end" id="btnPipEnd" title="Hang up"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+</div>
+
+<!-- consent card -->
+<div class="consent" id="consent" role="dialog" aria-label="Access request">
+  <span class="kick"><i></i>Access request</span>
+  <div class="chd">
+    <span class="avatar s40" style="background:#7a5c3a">AR</span>
+    <div class="t"><b id="reqname">Alex Rivera</b> wants to access your screen</div>
+  </div>
+  <div class="matchcode">Match code · <b>K7QP</b> · <b>4M2X</b> · <b>9RJT</b></div>
+  <div class="caps">
+    <div class="caprow"><div class="capbody"><div class="cn">View screen</div><div class="cd">See what's on your display.</div></div>
+      <label class="switch"><input type="checkbox" checked aria-label="View screen"><span class="tk"></span><span class="th"></span></label></div>
+    <div class="caprow"><div class="capbody"><div class="cn">Control keyboard &amp; mouse</div><div class="cd">Move the pointer and type. One controller at a time.</div></div>
+      <label class="switch"><input type="checkbox" aria-label="Control"><span class="tk"></span><span class="th"></span></label></div>
+    <div class="caprow"><div class="capbody"><div class="cn">Clipboard</div><div class="cd">Copy text between machines.</div></div>
+      <label class="switch"><input type="checkbox" aria-label="Clipboard"><span class="tk"></span><span class="th"></span></label></div>
+    <div class="caprow"><div class="capbody"><div class="cn">File transfer — Downloads only</div><div class="cd">Send files into your Downloads folder.</div></div>
+      <label class="switch"><input type="checkbox" aria-label="Files"><span class="tk"></span><span class="th"></span></label></div>
+  </div>
+  <label class="remember"><input type="checkbox"><span>Remember Alex — skip this prompt next time. Every connection still mints a fresh, per-action-checked grant; this only skips the pop-up.</span></label>
+  <div class="foot">
+    <button class="btn btn-ghost" id="btnDeny">Deny</button>
+    <button class="btn btn-primary" id="btnAllow">Allow</button>
+  </div>
+</div>
+
+<!-- owner "being controlled" bar (un-hideable) -->
+<div class="ownerbar" id="ownerbar">
+  <span class="odot"></span>
+  <span class="otx">REMOTE CONTROL ACTIVE — Alex Rivera is controlling your screen</span>
+  <span class="olock"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Can't be hidden</span>
+  <button class="btn btn-danger ostop" id="btnOwnerStop">Stop</button>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<div class="toast" id="toast"><span class="td"></span><span id="toasttx">Ready</span></div>
+<div class="hint">Click a <b>contact</b> · the <b>call</b> / <b>screen</b> icons in the top bar drive the real flows · <b>Esc</b> closes overlays</div>
+
+<script>
+(function(){
+  "use strict";
+  const el = s => document.querySelector(s);
+  const contacts = [
+    {id:"priya", name:"Priya Nair", init:"PN", color:"#3f5b8a", pres:"online", time:"2:41 PM", prev:"Sounds good — calling you now.", unread:0, msgs:[
+      {who:"them",name:"Priya Nair",time:"2:38 PM",text:"Did the reconnect fix land? I want to test the WiFi-blip resume."},
+      {who:"me",name:"You",time:"2:39 PM",text:"Yep, merged this morning. Sharing now — you should see the reconnect fire in about ten seconds.",img:true},
+      {who:"them",name:"Priya Nair",time:"2:41 PM",text:"Perfect. Sounds good — calling you now.",react:true},
+    ]},
+    {id:"alex", name:"Alex Rivera", init:"AR", color:"#7a5c3a", pres:"insession", time:"2:33 PM", prev:"Screen shared with you", session:true, unread:0, msgs:[
+      {who:"them",name:"Alex Rivera",time:"2:30 PM",text:"Can you take a look at my build? Something's off with the linker on Windows."},
+      {who:"me",name:"You",time:"2:31 PM",text:"Sure — send a screen-access request and I'll drive."},
+      {who:"them",name:"Alex Rivera",time:"2:33 PM",text:"Requesting now.",file:true},
+    ]},
+    {id:"devon", name:"Devon Cole", init:"DC", color:"#4a6b57", pres:"away", time:"1:12 PM", prev:"Devon: let's sync after lunch", unread:2, msgs:[
+      {who:"them",name:"Devon Cole",time:"1:10 PM",text:"The audio pump refactor is ready for review whenever."},
+      {who:"them",name:"Devon Cole",time:"1:12 PM",text:"Let's sync after lunch?"},
+    ]},
+    {id:"marcus", name:"Marcus Bell", init:"MB", color:"#6b4a63", pres:"dnd", time:"11:48 AM", prev:"You: shipped the token pass 👍", unread:0, msgs:[
+      {who:"me",name:"You",time:"11:48 AM",text:"Shipped the token pass, take a look when you're free."},
+    ]},
+    {id:"sofia", name:"Sofia Lindqvist", init:"SL", color:"#3a5f6b", pres:"offline", time:"Yesterday", prev:"Sofia: thanks for the help earlier", muted:true, unread:0, msgs:[
+      {who:"them",name:"Sofia Lindqvist",time:"Yesterday",text:"Thanks for the help earlier — the portal consent finally worked."},
+    ]},
+    {id:"nadia", name:"Nadia Okonkwo", init:"NO", color:"#5a5478", pres:"online", time:"Yesterday", prev:"Nadia: reviewing the ADRs now", unread:0, msgs:[
+      {who:"them",name:"Nadia Okonkwo",time:"Yesterday",text:"Reviewing the ADRs now — the call-signaling split looks right."},
+    ]},
+  ];
+
+  let active = "priya", inCall = false, callWith = null, inSession = false;
+
+  // ---- render list ----
+  const presIcon = p => `<span class="presence ${p}"><i></i></span>`;
+  const convs = el("#convs");
+  function renderList(){
+    convs.innerHTML = contacts.map(c=>`
+      <div class="conv ${c.id===active?'active':''} ${c.muted?'muted':''}" data-id="${c.id}" tabindex="0" role="button">
+        <span class="avatar s46" style="background:${c.color}">${c.init}${presIcon(c.pres)}</span>
+        <span class="cname">${c.name}</span>
+        <span class="ctime">${c.time}</span>
+        <span class="cprev ${c.session?'session':''}">${c.prev}</span>
+        <span class="cmeta">${c.muted?'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--ink-faint)" stroke-width="1.8"><path d="M8 4 4 8H2v8h2l4 4zM16 8a5 5 0 0 1 0 8"/><path d="m2 2 20 20"/></svg>':''}${c.unread?`<span class="badge ${c.muted?'muted':''}">${c.unread}</span>`:''}</span>
+      </div>`).join("");
+  }
+
+  // ---- render conversation ----
+  function esc(s){return s.replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
+  function renderMain(){
+    const c = contacts.find(x=>x.id===active);
+    el("#topbar").innerHTML = `
+      <div class="who">
+        <span class="avatar s32" style="background:${c.color}">${c.init}${presIcon(c.pres)}</span>
+        <div><div class="nm">${c.name}</div><div class="st">${c.pres==='online'?'Active now':c.pres==='insession'?'In a session with you':c.pres==='away'?'Away':c.pres==='dnd'?'Do not disturb':'Offline'}</div></div>
+      </div>
+      <div class="actions">
+        <button class="iconbtn" id="actCall" title="Voice call"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4h4l2 5-3 2a12 12 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/></svg></button>
+        <button class="iconbtn" id="actVideo" title="Video call"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m23 7-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button>
+        <button class="iconbtn" id="actScreen" title="Request / share screen"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></button>
+        <button class="iconbtn" title="Details"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg></button>
+      </div>`;
+    const th = el("#thread");
+    let html = `<div class="daydiv">Today</div>`;
+    let lastWho=null;
+    c.msgs.forEach(m=>{
+      const grouped = m.who===lastWho; lastWho=m.who;
+      const cc = m.who==='me' ? {init:'YM',color:'#4a5578',name:'You'} : {init:c.init,color:c.color,name:m.name};
+      html += `<div class="msg ${grouped?'grouped':''}">`;
+      if(grouped){ html+=`<div class="hovertime">${m.time}</div>`; }
+      else { html+=`<div class="gut"><span class="avatar s40" style="background:${cc.color}">${cc.init}</span></div>`; }
+      html+=`<div class="body">`;
+      if(!grouped) html+=`<div class="hd"><span class="snm">${cc.name}</span><span class="stm">${m.time}</span></div>`;
+      html+=`<div class="txt">${esc(m.text)}</div>`;
+      if(m.img) html+=`<div class="msg-img"><span class="imeta">reconnect-demo.png · 240 KB</span></div>`;
+      if(m.file) html+=`<div class="filecard"><span class="fi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span><div style="flex:1"><div class="fn">build-log-windows.txt</div><div class="fs">18.4 KB · Downloads</div></div><button class="iconbtn" title="Save"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12M8 11l4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></button></div>`;
+      if(m.react) html+=`<div class="reacts"><span class="chip mine">👍 3</span><span class="chip react-add" title="Add reaction"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg></span></div>`;
+      html+=`</div></div>`;
+    });
+    th.innerHTML = html;
+    th.scrollTop = th.scrollHeight;
+    el("#cinput").placeholder = "Message "+c.name.split(' ')[0]+"…";
+  }
+
+  // ---- toast ----
+  let toastT;
+  function toast(msg,color){
+    const t=el("#toast"); el("#toasttx").textContent=msg;
+    t.querySelector('.td').style.background = color||'var(--online)';
+    t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),2600);
+  }
+
+  // ---- interactions ----
+  convs.addEventListener("click",e=>{const r=e.target.closest('.conv'); if(r){active=r.dataset.id; renderList(); renderMain();}});
+  convs.addEventListener("keydown",e=>{if((e.key==='Enter'||e.key===' ')&&e.target.classList.contains('conv')){e.preventDefault();active=e.target.dataset.id;renderList();renderMain();}});
+
+  // composer
+  const cin=el("#cinput"), send=el("#send");
+  cin.addEventListener("input",()=>{send.disabled=!cin.value.trim();});
+  el("#composer").addEventListener("submit",e=>{e.preventDefault(); const v=cin.value.trim(); if(!v)return;
+    const c=contacts.find(x=>x.id===active); c.msgs.push({who:'me',name:'You',time:'now',text:v}); cin.value=''; send.disabled=true; renderMain();});
+
+  // top-bar actions (delegated, since topbar re-renders)
+  el("#topbar").addEventListener("click",e=>{
+    if(e.target.closest('#actCall')) startIncoming(false);
+    else if(e.target.closest('#actVideo')) startIncoming(true);
+    else if(e.target.closest('#actScreen')) openConsent();
+  });
+
+  // --- call flow ---
+  const callwin=el("#callwin"), scrim=el("#scrim"), incall=el("#incall"), pip=el("#pip");
+  let timerInt, secs=0;
+  function startIncoming(video){
+    callWith = contacts.find(x=>x.id===active);
+    el("#cwname").textContent=callWith.name;
+    el("#cwav").textContent=callWith.init;
+    callwin.querySelector('.csub b').textContent = video?"Incoming video call":"Incoming voice call";
+    callwin.classList.add('show'); scrim.classList.add('show');
+  }
+  function connectCall(){
+    callwin.classList.remove('show'); scrim.classList.remove('show'); pip.classList.remove('show');
+    el("#rmtname").textContent=callWith.name;
+    incall.classList.add('show'); inCall=true; secs=0; tick(); clearInterval(timerInt); timerInt=setInterval(tick,1000);
+    toast("Connected · "+callWith.name);
+  }
+  function tick(){el("#ctimer").textContent = String(Math.floor(secs/60)).padStart(2,'0')+":"+String(secs%60).padStart(2,'0'); secs++;}
+  function endCall(){incall.classList.remove('show'); pip.classList.remove('show'); inCall=false; clearInterval(timerInt); toast("Call ended","var(--ink-faint)");}
+  function minCall(){incall.classList.remove('show'); pip.classList.add('show'); el("#pipname").textContent=callWith.name; toast("Call minimized — still connected");}
+  el("#btnAcceptA").onclick=connectCall; el("#btnAcceptV").onclick=connectCall;
+  el("#btnDecline").onclick=()=>{callwin.classList.remove('show');scrim.classList.remove('show');toast("Declined","var(--ink-faint)");};
+  el("#btnHang").onclick=endCall; el("#btnPipEnd").onclick=endCall;
+  el("#btnMinCall").onclick=minCall; el("#btnExpand").onclick=()=>{pip.classList.remove('show');incall.classList.add('show');};
+  el("#btnMute").onclick=e=>{e.currentTarget.classList.toggle('on');};
+  el("#btnCam").onclick=e=>{e.currentTarget.classList.toggle('on');};
+
+  // --- consent -> session flow ---
+  const consent=el("#consent"), session=el("#session"), ownerbar=el("#ownerbar");
+  function openConsent(){el("#reqname").textContent=contacts.find(x=>x.id===active).name.split(' ')[0]==='Alex'?'Alex Rivera':contacts.find(x=>x.id===active).name; consent.classList.add('show'); scrim.classList.add('show');}
+  el("#btnDeny").onclick=()=>{consent.classList.remove('show');scrim.classList.remove('show');toast("Access denied","var(--danger)");};
+  el("#btnAllow").onclick=()=>{consent.classList.remove('show');scrim.classList.remove('show'); startSession();};
+  function startSession(){session.classList.add('show'); ownerbar.classList.add('show'); inSession=true; toast("Session live · fresh grant issued","var(--session)");}
+  function endSession(){session.classList.remove('show'); ownerbar.classList.remove('show'); inSession=false; toast("Session ended — control revoked","var(--session)");}
+  el("#btnSessStop").onclick=endSession; el("#btnOwnerStop").onclick=endSession;
+
+  // scrim / esc close transient overlays (never the owner bar — Inv 7)
+  function closeTransient(){callwin.classList.remove('show'); consent.classList.remove('show'); scrim.classList.remove('show');}
+  scrim.onclick=closeTransient;
+  document.addEventListener("keydown",e=>{
+    if(e.key==='Escape') closeTransient();
+    // demo emergency-stop hotkey
+    if(e.key==='Escape' && e.shiftKey){ if(inCall)endCall(); if(inSession)endSession(); }
+  });
+
+  renderList(); renderMain();
+})();
+</script>
+</body>
+</html>
