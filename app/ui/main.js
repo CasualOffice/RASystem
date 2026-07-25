@@ -1126,8 +1126,11 @@ let presenceAvailable = true;
 // Set one contact row's presence dot to a three-state value: "unknown" | "online" | "offline".
 // No-op if the row isn't rendered (not in the contacts view).
 function setPresenceState(contactId, state) {
+  // CSS.escape the interpolated id: today it's a hex/pubkey string (can't contain " or ]), but escaping
+  // makes the selector robust if the id source ever changes — a raw " would otherwise throw SyntaxError
+  // and silently break presence updates.
   const row = contactsList.querySelector(
-    `.contact-row[data-contact-id="${contactId}"]`,
+    `.contact-row[data-contact-id="${CSS.escape(contactId)}"]`,
   );
   if (!row) return;
   const dot = row.querySelector(".presence-dot");
@@ -1843,14 +1846,14 @@ window.addEventListener("pointermove", (e) => {
   if (pointerLocked) {
     const dx = clampI16(e.movementX);
     const dy = clampI16(e.movementY);
-    if (dx !== 0 || dy !== 0) invoke("input_pointer_move_relative", { dx, dy });
+    if (dx !== 0 || dy !== 0) invoke("input_pointer_move_relative", { dx, dy }).catch(() => {});
     return;
   }
   const p = normInput(e);
   if (p) {
     lastNx = p.nx;
     lastNy = p.ny;
-    invoke("input_pointer_move", { nx: p.nx, ny: p.ny });
+    invoke("input_pointer_move", { nx: p.nx, ny: p.ny }).catch(() => {});
   }
 });
 function forwardButton(e, down) {
@@ -1866,11 +1869,11 @@ function forwardButton(e, down) {
     // Prime the exact position first so the press lands where the cursor is shown and the target app
     // has seen a hover before the click (some macOS controls need it). The button event carries the
     // position too, but an explicit move avoids any drift from the throttled hover stream.
-    invoke("input_pointer_move", { nx: p.nx, ny: p.ny });
+    invoke("input_pointer_move", { nx: p.nx, ny: p.ny }).catch(() => {});
   } else {
     heldButtons.delete(button);
   }
-  invoke("input_pointer_button", { nx: p.nx, ny: p.ny, button, down });
+  invoke("input_pointer_button", { nx: p.nx, ny: p.ny, button, down }).catch(() => {});
 }
 window.addEventListener("pointerdown", (e) => forwardButton(e, true));
 window.addEventListener("pointerup", (e) => forwardButton(e, false));
@@ -1905,7 +1908,7 @@ window.addEventListener("wheel", (e) => {
   if (!controlling) return;
   e.preventDefault();
   const clamp = (v) => Math.max(-32768, Math.min(32767, Math.round(-v / 40)));
-  invoke("input_pointer_wheel", { dx: clamp(e.deltaX), dy: clamp(e.deltaY) });
+  invoke("input_pointer_wheel", { dx: clamp(e.deltaX), dy: clamp(e.deltaY) }).catch(() => {});
 }, { passive: false });
 function forwardKey(e, down) {
   if (!controlling) return;
@@ -1941,7 +1944,7 @@ function syncLockState(e) {
   if (caps === lastCaps && num === lastNum) return;
   lastCaps = caps;
   lastNum = num;
-  invoke("input_set_lock_state", { capsLock: caps, numLock: num });
+  invoke("input_set_lock_state", { capsLock: caps, numLock: num }).catch(() => {});
 }
 window.addEventListener("keydown", (e) => forwardKey(e, true));
 window.addEventListener("keyup", (e) => forwardKey(e, false));
@@ -2553,7 +2556,7 @@ const messages = (function () {
   function setUnreadBadge(id) {
     const n = unread.get(id) || 0;
     for (const badge of document.querySelectorAll(
-      `.contact-unread[data-contact-id="${id}"]`,
+      `.contact-unread[data-contact-id="${CSS.escape(id)}"]`,
     )) {
       badge.hidden = n === 0;
       badge.textContent = n > 9 ? "9+" : String(n);
