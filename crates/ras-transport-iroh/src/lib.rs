@@ -1654,7 +1654,9 @@ impl HealthObserver {
 /// Derive a [`ConnHealth`] from one connection's live QUIC stats. Sourced honestly:
 /// - `rtt_us` / `estimated_bandwidth_bps` / `path` come from the **selected** network path's
 ///   [`PathStats`] (`rtt`, congestion window, relay-vs-direct); bandwidth is the BDP estimate
-///   `cwnd·8 / rtt` (bits/sec), saturating.
+///   `cwnd·8 / rtt` (bits/sec), saturating. If no path is confirmed yet (very early in
+///   connection life, or mid-migration between paths), `path` reports [`PathKind::Migrating`]
+///   rather than guessing [`PathKind::Direct`] — `rtt_us`/`estimated_bandwidth_bps` are `0` too.
 /// - `loss_fraction` is the lost-vs-sent datagram ratio **over the interval since the last read**
 ///   (windowed via `prev_loss`), so a burst of loss no longer depresses the estimate for the rest of
 ///   the session — the ABR can raise the bitrate again once the link recovers.
@@ -1670,13 +1672,16 @@ fn map_health(conn: &Connection, prev_loss: &Mutex<Option<LossSample>>) -> ConnH
         .find(iroh::endpoint::Path::is_selected)
         .or_else(|| paths.iter().next());
 
+    // `None` means no path is confirmed yet (very early in connection life, or mid-migration
+    // between paths) — genuinely unknown, not "direct". Track that separately so we never
+    // default a confirmed-direct claim out of missing data (see `path` below).
     let (rtt_us, cwnd_bytes, is_relay) = match selected {
         Some(p) => (
             u32::try_from(p.rtt().as_micros()).unwrap_or(u32::MAX),
             p.stats().cwnd,
-            p.is_relay(),
+            Some(p.is_relay()),
         ),
-        None => (0, 0, false),
+        None => (0, 0, None),
     };
 
     // BDP estimate: cwnd (bytes) · 8 / rtt (seconds) = bits/sec. Guard rtt=0 (loopback reports
@@ -1704,10 +1709,14 @@ fn map_health(conn: &Connection, prev_loss: &Mutex<Option<LossSample>>) -> ConnH
     };
 
     ConnHealth {
-        path: if is_relay {
-            PathKind::Relayed
-        } else {
-            PathKind::Direct
+        // No confirmed path yet is an unresolved state, not a confirmed-direct one. `PathKind`
+        // has no bare "unknown" variant, so `Migrating` — already documented as a state every
+        // consumer must handle — is the honest, least-invasive stand-in (Direct implies a
+        // specific hole-punch guarantee this state doesn't have).
+        path: match is_relay {
+            Some(true) => PathKind::Relayed,
+            Some(false) => PathKind::Direct,
+            None => PathKind::Migrating,
         },
         rtt_us,
         loss_fraction,
