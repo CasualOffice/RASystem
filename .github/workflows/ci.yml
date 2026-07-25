@@ -26,7 +26,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libdbus-1-dev libclang-dev pkg-config libvpx-dev libasound2-dev
+          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libdbus-1-dev libclang-dev pkg-config libvpx-dev libasound2-dev libv4l-dev
       # macOS libvpx: the unified app now links ras-media-vpx on macOS too (codec negotiation — a macOS
       # host can encode VP9 for WebKitGTK viewers that can't decode our H.264). The app builds in
       # release.yml, but install libvpx here as well so the ras-media-vpx build/test step below is
@@ -88,17 +88,21 @@ jobs:
           cargo test --manifest-path crates/ras-media-vpx/Cargo.toml
       # ras-camera (call camera capture) is excluded from the workspace so its heavy cross-platform
       # dep (nokhwa) can't break the main build. The pure conversion/adapter core (default features)
-      # is verified on ubuntu + macOS; the nokhwa backend (`--features capture`, AVFoundation) is
-      # compile-checked on macOS only (its Linux V4L2 / Windows MediaFoundation builds are the
-      # on-device follow-up). fmt/clippy/test on its own manifest so it stays gated.
+      # is verified on ubuntu + macOS; the nokhwa backend (`--features capture`) is compile-checked on
+      # ALL THREE OSes (macOS AVFoundation / Linux V4L2 / Windows MediaFoundation) so the non-macOS
+      # camera-send path is proven to build before it is wired into the app. fmt/clippy/test on its own
+      # manifest so it stays gated.
       - name: ras-camera (call camera — pure core)
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest'
         run: |
           cargo fmt --manifest-path crates/ras-camera/Cargo.toml -- --check
           cargo clippy --manifest-path crates/ras-camera/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/ras-camera/Cargo.toml
-      - name: ras-camera (nokhwa backend compile-check)
-        if: matrix.os == 'macos-latest'
+      # The nokhwa backend needs a platform camera framework at build time: V4L2 headers on Linux
+      # (libv4l-dev, installed above), the Windows SDK's Media Foundation on Windows (present on the
+      # runner), AVFoundation on macOS. Compile-checked on each so a broken cross-platform build is
+      # caught here, not at release.
+      - name: ras-camera (nokhwa backend compile-check — all OSes)
         run: cargo clippy --manifest-path crates/ras-camera/Cargo.toml --all-targets --features capture -- -D warnings
       - name: bench (hot-path smoke + sanity ceiling)
         # Not a precise perf gate — runs the hand-rolled micro-benchmarks so a gross regression
