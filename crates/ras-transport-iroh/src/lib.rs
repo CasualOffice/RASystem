@@ -44,6 +44,12 @@ pub const BOOTSTRAP_ALPN: &[u8] = b"casual-ras/bootstrap/1";
 /// `ras_signal::net::recv_signal`, never to a media session (Inv 9 — separate planes).
 pub const SIGNAL_ALPN: &[u8] = b"casual-ras/signal/1";
 
+/// ALPN for a **1:1 call** media session (ADR-106) — deliberately distinct from the screen-session
+/// [`ALPN`] so a call and a screen share are independent connections (being in a call never implies
+/// screen access, and vice-versa). Dialed peer-to-peer by saved contact id; the call's symmetric media
+/// planes are built with [`Session::call_planes`].
+pub const CALL_ALPN: &[u8] = b"casual-ras/call/1";
+
 /// Ed25519 public key of a peer (newtype over `iroh::EndpointId`, the 1.x rename of `NodeId`).
 /// This is identity — authenticates *who*, never *what they may do*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1491,6 +1497,26 @@ impl Session {
     #[must_use]
     pub fn connection(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Build **both** directions of the call media planes (ADR-106) from this connection, ignoring the
+    /// session role — a 1:1 call peer both sends and receives. Reuses the exact per-frame-stream video
+    /// and Opus-over-datagram audio machinery as the one-way session planes; the underlying QUIC
+    /// connection carries uni-streams and datagrams in both directions, so a peer running an opener
+    /// ([`VideoSink`]/[`AudioSink`]) *and* an acceptor ([`VideoSource`]/[`AudioSource`]) on the same
+    /// connection sends its own capture while receiving the peer's. The call's control plane is the
+    /// separate bidi [`control`](Self::control). For `ras_core::call::CallTransport` (the symmetric
+    /// call transport). **On-device follow-up:** the true two-endpoint symmetric flow needs a real
+    /// call over the [`CALL_ALPN`] to verify.
+    #[must_use]
+    pub fn call_planes(&self) -> (VideoSink, VideoSource, AudioSink, AudioSource) {
+        let conn = self.conn.clone();
+        (
+            VideoSink::spawn(conn.clone()),
+            VideoSource::new(conn.clone()),
+            AudioSink::spawn(conn.clone()),
+            AudioSource::new(conn),
+        )
     }
 
     /// Consume the wrapper and return the raw `iroh::Connection`, to hand to `Gossip::handle_connection`.

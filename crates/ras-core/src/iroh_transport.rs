@@ -17,6 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use crate::call::CallTransport;
 use crate::deps::{
     AudioSink, AudioSourceDyn, ControlChannelDyn, DialTarget, PeerIdentity, SessionTransport,
     VideoSinkDyn, VideoSourceDyn,
@@ -346,6 +347,95 @@ struct IrohAudioSource(IrohAudioSourceInner);
 impl AudioSourceDyn for IrohAudioSource {
     async fn next(&mut self) -> Result<EncodedAudio, CoreError> {
         self.0.recv().await
+    }
+}
+
+/// Symmetric 1:1 **call** media transport over iroh (ADR-106) — the iroh impl of
+/// [`crate::call::CallTransport`], analogous to [`IrohSessionTransport`] but **bidirectional**: this
+/// peer both captures + sends *and* receives + plays. Wraps an already-established call [`Session`]
+/// (dialed / accepted over [`ras_transport_iroh::CALL_ALPN`] by the app, dial-by-contact-id, contacts-
+/// only) plus the [`Endpoint`] that owns it, so the connection outlives the session. Both media
+/// directions are built once (via [`Session::call_planes`], which spawns the per-frame-stream + audio-
+/// datagram tasks); each plane is handed out once, and control is the session's separate bidi channel.
+///
+/// **ON-DEVICE VERIFICATION PENDING:** this reuses the fully-tested one-way primitives run both ways,
+/// but the true two-endpoint symmetric flow needs a real call over `CALL_ALPN` on two machines. The
+/// off-device composition is proven by the `CallTransport` loopback + the driver-over-transport capstone
+/// in `crate::call`.
+pub struct IrohCallTransport {
+    // Keep the endpoint alive so the connection + its background tasks outlive the session.
+    _endpoint: Arc<Endpoint>,
+    // Behind an async mutex only so `control_channel()` can `.await` the bidi-stream open/accept.
+    session: tokio::sync::Mutex<Session>,
+    // Each media plane is fetched once (take-once), mirroring the loopback transport's semantics.
+    video_sink: std::sync::Mutex<Option<VideoSink>>,
+    video_source: std::sync::Mutex<Option<VideoSource>>,
+    audio_sink: std::sync::Mutex<Option<IrohAudioSinkInner>>,
+    audio_source: std::sync::Mutex<Option<IrohAudioSourceInner>>,
+}
+
+impl IrohCallTransport {
+    /// Wrap an established call session. Builds both media directions immediately (spawning their
+    /// tasks); the app fetches each plane once and attaches its capture/playback.
+    #[must_use]
+    pub fn new(endpoint: Arc<Endpoint>, session: Session) -> Self {
+        let (vsink, vsrc, asink, asrc) = session.call_planes();
+        Self {
+            _endpoint: endpoint,
+            session: tokio::sync::Mutex::new(session),
+            video_sink: std::sync::Mutex::new(Some(vsink)),
+            video_source: std::sync::Mutex::new(Some(vsrc)),
+            audio_sink: std::sync::Mutex::new(Some(asink)),
+            audio_source: std::sync::Mutex::new(Some(asrc)),
+        }
+    }
+}
+
+fn call_plane_taken(what: &'static str) -> CoreError {
+    CoreError::fatal(ErrorCode::Internal, what)
+}
+
+#[async_trait]
+impl CallTransport for IrohCallTransport {
+    async fn control_channel(&self) -> Result<Box<dyn ControlChannelDyn>, CoreError> {
+        let chan = self.session.lock().await.control().await?;
+        Ok(Box::new(IrohControlChannel(chan)))
+    }
+
+    async fn audio_sink(&self) -> Result<Box<dyn AudioSink>, CoreError> {
+        self.audio_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|s| Box::new(IrohAudioSink(s)) as Box<dyn AudioSink>)
+            .ok_or_else(|| call_plane_taken("call audio sink already taken"))
+    }
+
+    async fn audio_source(&self) -> Result<Box<dyn AudioSourceDyn>, CoreError> {
+        self.audio_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|s| Box::new(IrohAudioSource(s)) as Box<dyn AudioSourceDyn>)
+            .ok_or_else(|| call_plane_taken("call audio source already taken"))
+    }
+
+    async fn video_sink(&self) -> Result<Box<dyn VideoSinkDyn>, CoreError> {
+        self.video_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|s| Box::new(IrohVideoSink(s)) as Box<dyn VideoSinkDyn>)
+            .ok_or_else(|| call_plane_taken("call video sink already taken"))
+    }
+
+    async fn video_source(&self) -> Result<Box<dyn VideoSourceDyn>, CoreError> {
+        self.video_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|s| Box::new(IrohVideoSource(s)) as Box<dyn VideoSourceDyn>)
+            .ok_or_else(|| call_plane_taken("call video source already taken"))
     }
 }
 
