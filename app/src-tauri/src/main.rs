@@ -881,7 +881,11 @@ async fn presence_poll_loop(
             .map(|(id, _)| *id)
             .collect();
         for id in now_offline {
-            last.insert(id, false);
+            // Prune the entry entirely rather than storing `false`: a `None` entry is behaviorally
+            // identical here (online-detection tests `!= Some(&true)`; offline-detection only iterates
+            // entries that ARE present), so removing keeps `last` bounded to currently-online contacts
+            // instead of accreting a dead entry for every distinct id ever seen over the app's lifetime.
+            last.remove(&id);
             let _ = app.emit(
                 "presence",
                 PresencePayload {
