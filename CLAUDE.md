@@ -92,6 +92,20 @@ write an ADR (see `docs/14_DECISIONS_ADR.md`) and get sign-off. Do not invert it
   live drop→resume round-trip (reconnect logic is unit-verified over two local iroh endpoints but the
   same-peer re-dial fights iroh connection pooling in a hermetic test), and the Linux/Windows
   secure-window + notification paths (compile-gated in CI, no on-device run).
+- **Contacts-first shell + calling spine (2026-07).** The desktop shell (`app/ui/shell.*`, the
+  contacts-first main window, docs/25) has folded in the full remote-session stack as self-contained
+  modules over the shipped commands: the **WebCodecs viewer** (`viewer.js`), **OS-input control**
+  (`control.js`, the Phase-3 take-control FSM + input forwarding), **shared-audio playback**
+  (`audio.js`), and **in-session chat / clipboard / file-transfer** panels — each on-device-verify
+  pending but a faithful port of the running `main.js` paths (which stay untouched). **Calling
+  (ADR-103/104 now Accepted, owner sign-off)** is being built bottom-up per
+  `docs/design/phase-call-design.md`: **L0 landed** — the two deny-by-default capabilities
+  `audio.mic.capture` / `video.camera.capture` in `ras-policy` (recognized-but-withheld like
+  `audio.listen`); **L1 landed** — the pure call FSM crate **`ras-call`** (`CallState`/`CallEvent`/
+  `transition`, total/fail-closed/terminal-once, clock-injected, mirroring the session FSM; Inv 1 keeps a
+  ring in `Ringing` until the local user accepts, Inv 4 lets `Hangup` end any in-progress call, Inv 12's
+  never-recorded core retained). Remaining call layers (signal + control wire, orchestration, OS mic/
+  camera backends, app ring/PiP UI) are L2–L6, still pending.
 - **Phase 0 complete — Milestone M0 reached.** The design doc set is done and the Cargo workspace
   skeleton builds clean. **Phases 1 and 2 are implemented and green (M1 media/transport landed, M3
   authorization reached);** the design gates (`docs/design/phase-1-design.md`, `phase-2-design.md`)
@@ -661,6 +675,7 @@ casual-ras/
     ras-grant/            # access requests, session grants, issuer trait, unattended-access model (ADR-085)
     ras-policy/           # capability intersection, local policy, signed-catalogue file push (ADR-086)
     ras-control/          # control leases, generations, input routing + OsInputSink/ClipboardSink seams
+    ras-call/             # pure 1:1 call state machine (CallState/CallEvent/transition, ADR-103/104)
     ras-clipboard/        # cross-platform clipboard write backend (arboard; set-never-paste, ADR-079)
     ras-files/            # safe file-write backend (O_NOFOLLOW|O_EXCL; symlink/clobber refusal, ADR-090)
     ras-media/            # capture/encode/decode traits + pipeline (video + audio, ADR-077)
