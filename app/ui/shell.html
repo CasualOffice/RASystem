@@ -112,6 +112,12 @@
             <button class="send" type="submit" title="Send"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></button>
           </form>
         </div>
+        <!-- sender-side file-transfer progress card (file_begin → file_chunk → file_end) -->
+        <div class="filesend" id="fileSend" hidden>
+          <div class="fs-top"><span class="fs-name" id="fileSendName"></span><span class="fs-pct mono" id="fileSendPct"></span></div>
+          <div class="fs-track"><div class="fs-fill" id="fileSendFill"></div></div>
+          <div class="fs-bot"><span class="fs-state" id="fileSendState"></span><button class="fs-cancel" id="fileSendCancel">Cancel</button></div>
+        </div>
         <div class="telemetry">12 ms · 0.1% loss · direct</div>
         <div class="ctrl-badge"><i></i>Controlling Priya Nair</div>
       </div>
@@ -197,6 +203,20 @@
   <div class="drawer-hd"><span class="label">Details</span><button class="iconbtn" id="btnDrawerClose" title="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
   <div class="drawer-body" id="drawerBody"></div>
 </aside>
+
+<!-- hidden sender file picker -->
+<input type="file" id="filePicker" hidden />
+
+<!-- receiver-side incoming-file offer (Inv 1: local Allow/Deny; Deny is the safe default) -->
+<div class="fileoffer" id="fileOffer" role="dialog" aria-label="Incoming file" hidden>
+  <span class="kick"><i></i>Incoming file</span>
+  <div class="fo-body">
+    <span class="fo-ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+    <div class="fo-meta"><b class="fo-name" id="fileOfferName"></b><span class="fo-size dim" id="fileOfferSize"></span></div>
+  </div>
+  <div class="fo-timeout dim" id="fileOfferTimeout"></div>
+  <div class="fo-ft"><button class="btn btn-ghost" id="fileOfferDeny">Deny</button><button class="btn btn-primary" id="fileOfferAccept">Accept — save to Downloads</button></div>
+</div>
 
 <div class="scrim" id="scrim"></div>
 <div class="toast" id="toast"><span class="td"></span><span id="toasttx">Ready</span></div>

@@ -322,6 +322,7 @@
     viewCanvas.hidden = true; deskdemo.hidden = false; sessHud.hidden = true; sessFatal.hidden = true;
     const ab = audioBtn(); if (ab) ab.hidden = true;
     resetSessionChat(); // wipe chat content + collapse (Inv 8 hygiene — no stale chat lingers)
+    resetFileTransfer(); // cancel any in-flight send + close a pending offer
     toast("Session ended — control revoked", "var(--session)");
   }
   el("#btnSessStop").onclick = endSession; el("#btnOwnerStop").onclick = endSession;
@@ -374,8 +375,96 @@
     catch (_) { toast("Couldn't send clipboard", "var(--danger)"); }
   }
   el("#btnSendClip").onclick = sendClipboard;
-  el("#btnSendFile").onclick = () => toast("File transfer lands in the next update", "var(--amber)");
   chatEmpty();
+
+  // ---- file transfer (sender: file_begin→file_chunk→file_end; receiver: file-offer→respond_file_offer) ----
+  // The host resolves the destination from a leaf filename into its sandbox (Downloads); the controller
+  // never sends a path (Inv 6). Content is never logged (Inv 8). Sender is gated on a live viewer session.
+  const CHUNK = 256 * 1024;               // 256 KiB per file_chunk
+  const ACCEPT_TIMEOUT_MS = 95000;         // mirrors the host's file-offer consent window (+slack)
+  const OFFER_TIMEOUT_MS = 60000;          // receiver auto-deny
+  // Host's stable rejection codes (ErrorCode Debug strings) → honest text. Content-free (enum tags only).
+  const REJECT_REASONS = {
+    ConsentDenied: "The other side declined.",
+    CapabilityDenied: "File transfer is not authorized.",
+    InvalidMessage: "The file couldn't be accepted (unsafe name, wrong target, or too large).",
+    SessionRevoked: "The session was stopped.", LeaseInvalid: "The session was stopped.",
+    Internal: "The other side couldn't receive the file.",
+  };
+  const rejectReasonText = (code) => (code && REJECT_REASONS[code]) || "The transfer was rejected.";
+  const fmtSize = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB";
+
+  const filePicker = el("#filePicker"), fileSend = el("#fileSend");
+  const fsName = el("#fileSendName"), fsPct = el("#fileSendPct"), fsFill = el("#fileSendFill"), fsState = el("#fileSendState"), fsCancel = el("#fileSendCancel");
+  let sending = false, cancelled = false, acceptResolve = null, acceptReject = null;
+
+  function fsSet(state, cls) { fsState.textContent = state; fsState.className = "fs-state" + (cls ? " " + cls : ""); }
+  function fsProgress(done, total) { const p = total ? Math.floor((done / total) * 100) : 0; fsFill.style.width = p + "%"; fsPct.textContent = p + "%"; }
+  function showCard(name) { fsName.textContent = name; fsName.title = name; fsFill.className = "fs-fill"; fsFill.style.width = "0%"; fsPct.textContent = ""; fsCancel.disabled = false; fileSend.hidden = false; }
+  function hideCardLater(ms) { setTimeout(() => { if (!sending) fileSend.hidden = true; }, ms); }
+  function waitForAccept() {
+    return new Promise((resolve, reject) => {
+      acceptResolve = resolve; acceptReject = reject;
+      setTimeout(() => { if (acceptReject) settleAccept(false, "timeout"); }, ACCEPT_TIMEOUT_MS);
+    });
+  }
+  function settleAccept(ok, reason) { const res = acceptResolve, rej = acceptReject; acceptResolve = acceptReject = null; if (ok && res) res(); else if (!ok && rej) rej(reason || "declined"); }
+
+  async function sendFile(file) {
+    if (sending || !viewerLive || !LIVE) return;
+    sending = true; cancelled = false;
+    fsCancel.disabled = false; showCard(file.name); fsSet("Waiting for the other side to accept…", "receiving");
+    try { await invoke("file_begin", { filename: file.name, size: file.size }); }
+    catch (_) { return failTransfer("Couldn't start the transfer."); }
+    try { await waitForAccept(); }
+    catch (reason) { if (reason === "timeout") return failTransfer("No response — the transfer timed out."); if (reason === "cancelled") return finishCancel(); return declineTransfer(reason); }
+    if (cancelled) return finishCancel();
+    fsSet("Sending…", "receiving"); fsProgress(0, file.size);
+    let off = 0;
+    try {
+      while (off < file.size) {
+        if (cancelled) return finishCancel();
+        const end = Math.min(off + CHUNK, file.size);
+        const buf = await file.slice(off, end).arrayBuffer();
+        if (cancelled) return finishCancel();
+        await invoke("file_chunk", { bytes: Array.from(new Uint8Array(buf)) });
+        off = end; fsProgress(off, file.size);
+      }
+      await invoke("file_end");
+    } catch (_) { return failTransfer("Transfer failed — the connection may have dropped."); }
+    fsFill.className = "fs-fill ok"; fsSet("Sent ✓", "ok"); fsPct.textContent = "100%"; fsCancel.disabled = true;
+    sending = false; hideCardLater(2600);
+  }
+  function failTransfer(msg) { try { invoke("file_end"); } catch (_) {} fsFill.className = "fs-fill err"; fsSet(msg, "err"); fsCancel.disabled = true; sending = false; hideCardLater(4000); }
+  function declineTransfer(code) { fsFill.className = "fs-fill err"; fsSet(rejectReasonText(code), "err"); fsCancel.disabled = true; sending = false; hideCardLater(3200); }
+  function finishCancel() { try { invoke("file_end"); } catch (_) {} fsFill.className = "fs-fill err"; fsSet("Canceled.", "err"); fsCancel.disabled = true; sending = false; hideCardLater(2200); }
+  function resetFileTransfer() {
+    if (sending) { cancelled = true; settleAccept(false, "cancelled"); }
+    sending = false; fileSend.hidden = true;
+    clearOfferTimers(); const fo = el("#fileOffer"); if (fo) fo.hidden = true;
+  }
+  function pickFile() { if (!viewerLive) { toast("Start a session first", "var(--amber)"); return; } if (sending) return; filePicker.value = ""; filePicker.click(); }
+  el("#btnSendFile").onclick = pickFile;
+  filePicker.addEventListener("change", () => { const f = filePicker.files && filePicker.files[0]; if (f) sendFile(f); });
+  fsCancel.onclick = () => { if (!sending) { fileSend.hidden = true; return; } cancelled = true; settleAccept(false, "cancelled"); };
+
+  // Receiver: an incoming offer → local Allow/Deny (Inv 1). Deny is the safe default (Esc / timeout).
+  const fileOffer = el("#fileOffer"), foName = el("#fileOfferName"), foSize = el("#fileOfferSize"), foTimeout = el("#fileOfferTimeout");
+  let offerTimer = null, offerCountdown = null;
+  function clearOfferTimers() { if (offerTimer) { clearTimeout(offerTimer); offerTimer = null; } if (offerCountdown) { clearInterval(offerCountdown); offerCountdown = null; } }
+  function respondOffer(accept) { clearOfferTimers(); fileOffer.hidden = true; if (LIVE) { try { invoke("respond_file_offer", { accept }); } catch (_) {} } }
+  function openOffer(filename, size) {
+    clearOfferTimers();
+    foName.textContent = filename; foName.title = filename; foSize.textContent = "· " + fmtSize(size);
+    fileOffer.hidden = false; setTimeout(() => el("#fileOfferDeny").focus(), 60);
+    let left = Math.round(OFFER_TIMEOUT_MS / 1000);
+    foTimeout.textContent = "Auto-declines in " + left + "s if no response.";
+    offerCountdown = setInterval(() => { left -= 1; foTimeout.textContent = left > 0 ? "Auto-declines in " + left + "s if no response." : "Declining…"; }, 1000);
+    offerTimer = setTimeout(() => respondOffer(false), OFFER_TIMEOUT_MS);
+  }
+  el("#fileOfferAccept").onclick = () => respondOffer(true);
+  el("#fileOfferDeny").onclick = () => respondOffer(false);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !fileOffer.hidden) respondOffer(false); });
 
   function closeTransient() { callwin.classList.remove("show"); consent.classList.remove("show"); scrim.classList.remove("show"); }
   scrim.onclick = closeTransient;
@@ -403,6 +492,13 @@
     listen("chat-message", (e) => { const text = typeof e.payload === "string" ? e.payload : String(e.payload ?? ""); if (text) appendChat(text, false); });
     // Peer pushed us clipboard text — content-free byte count only (Inv 8).
     listen("clipboard-received", (e) => { const n = Number(e.payload) || 0; chatNotice("Received clipboard · " + n + " bytes", true); if (!chatOpen) openChat(); });
+    // File transfer (sender side): the host consented / refused our offer.
+    listen("file-accepted", () => settleAccept(true));
+    listen("file-rejected", (e) => settleAccept(false, e.payload || "Rejected"));
+    // File transfer (receiver side): an incoming offer, and a completed drop.
+    listen("file-offer", (e) => { const p = e.payload || {}; openOffer(typeof p.filename === "string" ? p.filename : "file", Number(p.size) || 0); });
+    listen("file-offer-closed", () => { clearOfferTimers(); fileOffer.hidden = true; });
+    listen("file-received", (e) => { const p = e.payload || {}; const fn = typeof p.filename === "string" ? p.filename : "file"; toast("Received " + fn + " · " + fmtSize(Number(p.size) || 0) + " → Downloads", "var(--online)"); });
   }
 
   // ---- add-contact modal (real: my_identity + add_contact) ----
