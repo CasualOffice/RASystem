@@ -26,7 +26,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libdbus-1-dev libclang-dev pkg-config libvpx-dev libasound2-dev
+          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libdbus-1-dev libclang-dev pkg-config libvpx-dev libasound2-dev libv4l-dev
       # macOS libvpx: the unified app now links ras-media-vpx on macOS too (codec negotiation — a macOS
       # host can encode VP9 for WebKitGTK viewers that can't decode our H.264). The app builds in
       # release.yml, but install libvpx here as well so the ras-media-vpx build/test step below is
@@ -88,17 +88,21 @@ jobs:
           cargo test --manifest-path crates/ras-media-vpx/Cargo.toml
       # ras-camera (call camera capture) is excluded from the workspace so its heavy cross-platform
       # dep (nokhwa) can't break the main build. The pure conversion/adapter core (default features)
-      # is verified on ubuntu + macOS; the nokhwa backend (`--features capture`, AVFoundation) is
-      # compile-checked on macOS only (its Linux V4L2 / Windows MediaFoundation builds are the
-      # on-device follow-up). fmt/clippy/test on its own manifest so it stays gated.
+      # is verified on ubuntu + macOS; the nokhwa backend (`--features capture`) is compile-checked on
+      # ALL THREE OSes (macOS AVFoundation / Linux V4L2 / Windows MediaFoundation) so the non-macOS
+      # camera-send path is proven to build before it is wired into the app. fmt/clippy/test on its own
+      # manifest so it stays gated.
       - name: ras-camera (call camera — pure core)
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest'
         run: |
           cargo fmt --manifest-path crates/ras-camera/Cargo.toml -- --check
           cargo clippy --manifest-path crates/ras-camera/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/ras-camera/Cargo.toml
-      - name: ras-camera (nokhwa backend compile-check)
-        if: matrix.os == 'macos-latest'
+      # The nokhwa backend needs a platform camera framework at build time: V4L2 headers on Linux
+      # (libv4l-dev, installed above), the Windows SDK's Media Foundation on Windows (present on the
+      # runner), AVFoundation on macOS. Compile-checked on each so a broken cross-platform build is
+      # caught here, not at release.
+      - name: ras-camera (nokhwa backend compile-check — all OSes)
         run: cargo clippy --manifest-path crates/ras-camera/Cargo.toml --all-targets --features capture -- -D warnings
       - name: bench (hot-path smoke + sanity ceiling)
         # Not a precise perf gate — runs the hand-rolled micro-benchmarks so a gross regression
@@ -119,3 +123,35 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: app/src-tauri/Cargo.toml
+
+  # Compile-check the unified app on Linux. The app is a separate manifest outside the root workspace
+  # (heavy WebView deps) and was previously built ONLY at release (tauri-action) — so an app-level Linux
+  # regression (e.g. a new per-OS backend that doesn't compile) would surface at release, not in push-CI.
+  # This closes that gap: a full `cargo check` of the app on Linux, with all its native deps present
+  # (WebKitGTK, PipeWire/Pulse, ALSA mic, V4L2 camera, libvpx VP9). Mirrors ubuntu-22.04 like release.yml
+  # (the glibc compatibility floor). Not a bundle — just the Rust compile, which is where the risk is.
+  app-linux:
+    name: app compile-check (linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux system deps
+        run: |
+          sudo add-apt-repository -y ppa:pipewire-debian/pipewire-upstream
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libpipewire-0.3-dev \
+            libpulse-dev \
+            libdbus-1-dev \
+            libclang-dev \
+            pkg-config \
+            libvpx-dev \
+            libasound2-dev \
+            libv4l-dev
+      - name: app cargo check (incl. the Linux camera-send path)
+        run: cargo check --manifest-path app/src-tauri/Cargo.toml --all-targets

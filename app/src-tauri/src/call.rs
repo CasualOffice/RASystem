@@ -320,9 +320,10 @@ fn spawn_media_supervisor(
     })
 }
 
-/// Camera egress (send our camera): macOS only for now (AVFoundation via `ras-camera`). A no-op on other
-/// platforms — a video call there is receive-only for video (voice both ways).
-#[cfg(target_os = "macos")]
+/// Camera egress (send our camera): macOS (AVFoundation) + Linux (V4L2), both via `ras-camera`. A no-op
+/// on Windows for now — a video call there is receive-only for video (voice both ways) until the Windows
+/// camera encode path lands (Windows has no libvpx; needs a codec decision).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn start_camera_egress(app: &AppHandle, tp: &Arc<IrohCallTransport>, stop: Arc<AtomicBool>) {
     if let Ok(sink) = tp.video_sink().await {
         stop.store(false, Ordering::SeqCst);
@@ -331,7 +332,7 @@ async fn start_camera_egress(app: &AppHandle, tp: &Arc<IrohCallTransport>, stop:
         std::thread::spawn(move || camera_pump(app, tp, sink, stop));
     }
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 async fn start_camera_egress(
     _app: &AppHandle,
     _tp: &Arc<IrohCallTransport>,
@@ -339,10 +340,10 @@ async fn start_camera_egress(
 ) {
 }
 
-/// Camera capture → VP9 encode → send loop (blocking; own thread). macOS only. Each encoded frame goes
-/// two places: to the peer (`sink`) and to our own webview as a `call-selfvideo` self-view (reusing the
-/// same encoded bytes — the camera is opened once, never twice). Never logs a pixel (Inv 8).
-#[cfg(target_os = "macos")]
+/// Camera capture → VP9 encode → send loop (blocking; own thread). macOS + Linux. Each encoded frame
+/// goes two places: to the peer (`sink`) and to our own webview as a `call-selfvideo` self-view (reusing
+/// the same encoded bytes — the camera is opened once, never twice). Never logs a pixel (Inv 8).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn camera_pump(
     app: AppHandle,
     tp: Arc<IrohCallTransport>,

@@ -126,6 +126,11 @@ ras-media-openh264 = { path = "../../crates/ras-media-openh264" }
 # decode the H.264 OpenH264 emitted (the black-screen/lag fix); it decodes VP9 natively. Links system
 # libvpx (bindgen/pkg-config), so it is deliberately Linux-only + excluded from the root workspace.
 ras-media-vpx = { path = "../../crates/ras-media-vpx" }
+# Camera capture for video calls (ADR-103), Linux (V4L2 via nokhwa). The camera frame is CPU BGRA,
+# encoded with the same VP9 software encoder (ras-media-vpx) macOS uses for the camera — universally
+# WebCodecs-decodable, so a Linux caller's camera renders on every peer. A video call still receives +
+# renders the peer's camera regardless.
+ras-camera = { path = "../../crates/ras-camera", features = ["capture"] }
 # Phase-3 OS-input backend for Linux (ADR-070): XTEST over pure-Rust x11rb. Feeds the viewer's input
 # to the X server on X11/Xwayland sessions.
 ras-input-linux = { path = "../../crates/ras-input-linux" }
