@@ -81,6 +81,10 @@ bytes = "1"
 # runs if the grant carries `audio.listen` AND the transport has an audio plane (both true here), so it is
 # inert unless the host opted in on the Share screen (default OFF).
 ras-audio-opus = { path = "../../crates/ras-audio-opus" }
+# 1:1 calling (ADR-103/104/106): the pure call FSM/runtime + the cross-platform microphone capture
+# backend. Camera (ras-camera) is a follow-up; voice calling lands first.
+ras-call = { path = "../../crates/ras-call" }
+ras-mic = { path = "../../crates/ras-mic" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tauri-plugin-global-shortcut = "2"
 
