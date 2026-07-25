@@ -17,9 +17,10 @@ use crate::audio::{
     AudioCaptureBackend, AudioCodec, AudioConfig, AudioEncoderBackend, CapturedAudio, EncodedAudio,
 };
 use crate::{
-    CaptureOptions, CaptureTimestampUs, CapturedFrame, ColorSpace, EncodedFrame, FrameId,
-    MediaError, MonitorDef, MonitorId, PlatformSurface, ScreenCaptureBackend, StreamConfig,
-    VideoCodec, VideoEncoderBackend, VideoTransportKind,
+    CameraCaptureBackend, CameraDef, CameraFacing, CameraId, CameraOptions, CaptureOptions,
+    CaptureTimestampUs, CapturedFrame, ColorSpace, EncodedFrame, FrameId, MediaError, MonitorDef,
+    MonitorId, PlatformSurface, ScreenCaptureBackend, StreamConfig, VideoCodec,
+    VideoEncoderBackend, VideoTransportKind,
 };
 
 /// Annex-B start code prefixed before every NAL unit.
@@ -178,6 +179,92 @@ impl ScreenCaptureBackend for SyntheticCaptureBackend {
             scale_percent: 100,
             primary: true,
         })
+    }
+
+    fn stop(&mut self) {
+        self.started = false;
+    }
+}
+
+/// Deterministic **camera** capture double (ADR-103). Produces the same [`SyntheticFrame`] as the
+/// screen backend — so a camera frame feeds the shared [`SyntheticEncoder`]/`VideoEncoderBackend`
+/// unchanged — lets the call video path be exercised end-to-end in CI with no real camera/permission.
+pub struct SyntheticCameraCapture {
+    width: u32,
+    height: u32,
+    fps: u32,
+    counter: u64,
+    started: bool,
+    codec: VideoCodec,
+}
+
+impl SyntheticCameraCapture {
+    /// New synthetic camera producing `width`×`height` frames.
+    #[must_use]
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            fps: 30,
+            counter: 0,
+            started: false,
+            codec: VideoCodec::H264AnnexB,
+        }
+    }
+
+    fn stream_config(&self) -> StreamConfig {
+        StreamConfig {
+            codec: self.codec,
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            target_bitrate_bps: 2_000_000, // a call camera runs leaner than a shared desktop
+            color: ColorSpace::Bt709Limited,
+            video_transport: VideoTransportKind::PerFrameStream,
+        }
+    }
+}
+
+impl CameraCaptureBackend for SyntheticCameraCapture {
+    type Frame<'a>
+        = SyntheticFrame
+    where
+        Self: 'a;
+
+    fn start(&mut self, opts: &CameraOptions) -> Result<StreamConfig, MediaError> {
+        self.width = opts.target_width.max(2);
+        self.height = opts.target_height.max(2);
+        self.fps = opts.target_fps.max(1);
+        self.counter = 0;
+        self.started = true;
+        self.codec = opts.codec.unwrap_or(VideoCodec::H264AnnexB);
+        Ok(self.stream_config())
+    }
+
+    fn next_frame(
+        &mut self,
+        _timeout: core::time::Duration,
+    ) -> Result<Option<Self::Frame<'_>>, MediaError> {
+        let captured_at_us = self.counter.saturating_mul(1_000_000) / u64::from(self.fps);
+        self.counter += 1;
+        Ok(Some(SyntheticFrame {
+            captured_at_us,
+            width: self.width,
+            height: self.height,
+        }))
+    }
+
+    fn config(&self) -> StreamConfig {
+        self.stream_config()
+    }
+
+    /// One synthetic front camera, so the picker path can be exercised without a real device.
+    fn enumerate_cameras(&self) -> Vec<CameraDef> {
+        vec![CameraDef {
+            id: CameraId("synthetic-cam-0".to_string()),
+            label: "Synthetic Camera".to_string(),
+            facing: CameraFacing::Front,
+        }]
     }
 
     fn stop(&mut self) {
@@ -461,6 +548,43 @@ mod tests {
             out.push(enc.encode(f).unwrap().unwrap());
         }
         (cap, enc, out)
+    }
+
+    #[test]
+    fn synthetic_camera_frames_feed_the_shared_encoder() {
+        // A camera frame is the same CapturedFrame the screen path produces, so it must encode through
+        // the shared VideoEncoderBackend unchanged (ADR-103 — reuse the video pipeline for the camera).
+        let mut cam = SyntheticCameraCapture::new(640, 480);
+        let cfg = cam
+            .start(&CameraOptions {
+                target_width: 1280,
+                target_height: 720,
+                target_fps: 24,
+                ..CameraOptions::default()
+            })
+            .unwrap();
+        assert_eq!((cfg.width, cfg.height, cfg.fps), (1280, 720, 24));
+        assert_eq!(cam.config().width, 1280);
+
+        let mut enc = SyntheticEncoder::new();
+        enc.configure(&cfg).unwrap();
+        // First encoded camera frame must be a self-contained keyframe (a decoder starts on an IDR).
+        let f0 = cam.next_frame(core::time::Duration::ZERO).unwrap().unwrap();
+        let enc0 = enc.encode(f0).unwrap().unwrap();
+        assert!(enc0.is_keyframe, "first camera frame must be a keyframe");
+        // Subsequent frames advance the monotonic id with no gaps.
+        let f1 = cam.next_frame(core::time::Duration::ZERO).unwrap().unwrap();
+        let enc1 = enc.encode(f1).unwrap().unwrap();
+        assert_eq!(enc1.frame_id, enc0.frame_id + 1);
+    }
+
+    #[test]
+    fn synthetic_camera_enumerates_a_local_device() {
+        let cam = SyntheticCameraCapture::new(640, 480);
+        let cams = cam.enumerate_cameras();
+        assert_eq!(cams.len(), 1);
+        assert_eq!(cams[0].id, CameraId("synthetic-cam-0".to_string()));
+        assert_eq!(cams[0].facing, CameraFacing::Front);
     }
 
     #[test]

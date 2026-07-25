@@ -316,6 +316,68 @@ pub struct CaptureOptions {
     pub codec: Option<VideoCodec>,
 }
 
+/// An OS camera device identifier (opaque; comes from [`CameraCaptureBackend::enumerate_cameras`]).
+/// Content-free — a device handle, never a stream sample (Inv 8).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CameraId(pub String);
+
+/// Which way a camera points, for the local picker label. `Unknown` when the OS doesn't report it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraFacing {
+    /// User-facing (selfie) camera.
+    Front,
+    /// World-facing (rear) camera.
+    Back,
+    /// An external / USB camera.
+    External,
+    /// The OS did not report a facing.
+    Unknown,
+}
+
+/// A camera the **local user** can choose for a call (ADR-103). Enumerated for a host-local picker so
+/// the owner picks their own camera (Inv 1); the controller never selects it. Metadata only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraDef {
+    /// Opaque device id to pass back in [`CameraOptions::device`].
+    pub id: CameraId,
+    /// Human label for the picker (e.g. "FaceTime HD Camera").
+    pub label: String,
+    /// Which way it points.
+    pub facing: CameraFacing,
+}
+
+/// How to start camera capture for a 1:1 call (ADR-103). Parallel to [`CaptureOptions`] but for a
+/// camera — no monitor/window fields; a device selection + a target geometry/rate + the same codec
+/// negotiation seam. All fields are the host's own choice; none affect authorization (Inv 9).
+#[derive(Debug, Clone)]
+pub struct CameraOptions {
+    /// The camera to open; `None` = the OS default camera.
+    pub device: Option<CameraId>,
+    /// Desired frame width (px). The backend may negotiate the nearest supported size and report the
+    /// actual one in the returned [`StreamConfig`].
+    pub target_width: u32,
+    /// Desired frame height (px).
+    pub target_height: u32,
+    /// Desired capture rate (fps).
+    pub target_fps: u32,
+    /// The **negotiated** codec the capture declares in its returned [`StreamConfig`] (same role as
+    /// [`CaptureOptions::codec`]). `None` = the backend's platform default. Media capability only —
+    /// never authorization (Inv 9).
+    pub codec: Option<VideoCodec>,
+}
+
+impl Default for CameraOptions {
+    fn default() -> Self {
+        Self {
+            device: None,
+            target_width: 1280,
+            target_height: 720,
+            target_fps: 30,
+            codec: None,
+        }
+    }
+}
+
 /// The captured display's bounds in the desktop's global coordinate space, **logical units**
 /// (points, top-left origin, y-down) — the space macOS global coordinates and Tauri
 /// `LogicalPosition`/`LogicalSize` share, so the host UI can size its pointer overlay to cover
@@ -434,6 +496,43 @@ pub trait ScreenCaptureBackend: Send {
     }
 
     /// Stop capture and release resources.
+    fn stop(&mut self);
+}
+
+/// Camera frame source for a **1:1 call** (ADR-103). Mirrors [`ScreenCaptureBackend`] but for a
+/// camera: no monitor/window/overlay concerns, produces the same [`CapturedFrame`] the shared
+/// [`VideoEncoderBackend`] already consumes (BGRA via [`SurfaceKind::CpuBgra`] on the software path),
+/// so **no new encoder or wire type** is needed — a camera frame is just another `EncodedFrame`
+/// source (ADR-103 §"reuse the pipeline"). Empty off-platform, exactly like the screen backends. Pull-
+/// based, blocking-with-timeout: the pacer drops frames it can't keep up with (call video is
+/// droppable — a stalled camera must never freeze audio, the pointer, or End).
+pub trait CameraCaptureBackend: Send {
+    /// The backend's captured-frame type.
+    type Frame<'a>: CapturedFrame
+    where
+        Self: 'a;
+
+    /// Open the selected camera at the requested geometry/rate; returns the negotiated
+    /// [`StreamConfig`] (the backend may pick the nearest supported size, so read it back).
+    fn start(&mut self, opts: &CameraOptions) -> Result<StreamConfig, MediaError>;
+
+    /// Block until the next frame or `timeout`. `Ok(None)` = timed out (no new frame yet). A
+    /// recoverable `Err` (device unplugged / reset) means the caller rebuilds via [`Self::start`].
+    fn next_frame(
+        &mut self,
+        timeout: core::time::Duration,
+    ) -> Result<Option<Self::Frame<'_>>, MediaError>;
+
+    /// The currently negotiated config.
+    fn config(&self) -> StreamConfig;
+
+    /// Enumerate cameras for a **local** picker (Inv 1 — the owner picks their own camera). Default:
+    /// empty ("unknown" — the app opens the OS default). Not session or wire state.
+    fn enumerate_cameras(&self) -> Vec<CameraDef> {
+        Vec::new()
+    }
+
+    /// Stop capture and release the device.
     fn stop(&mut self);
 }
 
