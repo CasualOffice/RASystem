@@ -89,8 +89,12 @@ impl AudioEncoderBackend for OpusEncoder {
         let ch = channels(config.channels)?;
         let mut enc = OpusEnc::new(sr, ch, Application::Audio)
             .map_err(|_| enc_err("opus encoder init failed"))?;
-        enc.set_bitrate(Bitrate::BitsPerSecond(config.target_bitrate_bps as i32))
-            .map_err(|_| enc_err("opus set_bitrate failed"))?;
+        // Same clamp as `set_bitrate` below: an out-of-range (>2.1 Gbps) u32 must saturate, not
+        // wrap negative, before reaching the FFI boundary.
+        enc.set_bitrate(Bitrate::BitsPerSecond(
+            config.target_bitrate_bps.min(i32::MAX as u32) as i32,
+        ))
+        .map_err(|_| enc_err("opus set_bitrate failed"))?;
         self.enc = Some(enc);
         self.config = *config;
         self.frame_len = config.frame_samples() as usize * config.channels as usize;
@@ -131,8 +135,10 @@ impl AudioEncoderBackend for OpusEncoder {
             .enc
             .as_mut()
             .ok_or_else(|| enc_err("opus encoder not configured"))?;
-        enc.set_bitrate(Bitrate::BitsPerSecond(bitrate_bps as i32))
-            .map_err(|_| enc_err("opus set_bitrate failed"))?;
+        enc.set_bitrate(Bitrate::BitsPerSecond(
+            bitrate_bps.min(i32::MAX as u32) as i32
+        ))
+        .map_err(|_| enc_err("opus set_bitrate failed"))?;
         self.config.target_bitrate_bps = bitrate_bps;
         Ok(())
     }
