@@ -64,6 +64,14 @@ pub const RECORDING_STOP: &str = "recording.stop";
 /// Receive the host's output (system) audio, host→controller (ADR-077). Live-only, never recorded
 /// (Inv 12); default OFF and always disclosed by an Inv-7 indicator when active.
 pub const AUDIO_LISTEN: &str = "audio.listen";
+/// Capture and send this machine's **microphone** for a 1:1 call (ADR-103). Two-way media, so this is
+/// a distinct grant from `audio.listen` (which is output-only). Consent-gated, live-only, **never
+/// recorded** (Inv 12 as expanded by ADR-103); default OFF, always disclosed by an Inv-7 indicator.
+pub const MIC_CAPTURE: &str = "audio.mic.capture";
+/// Capture and send this machine's **camera** for a 1:1 call (ADR-103). Consent-gated, live-only,
+/// **never recorded** (Inv 12 as expanded by ADR-103); default OFF, always disclosed by an Inv-7
+/// indicator. Separate from screen capture (`screen.view`) — a call camera is not the desktop.
+pub const CAMERA_CAPTURE: &str = "video.camera.capture";
 
 /// The full set of **recognized** capability identifiers (catalogue version 1). Anything not here is
 /// unknown and denied. Versioned: a new identifier means a new catalogue version, never a silent add.
@@ -88,6 +96,8 @@ pub const CATALOGUE_V1: &[&str] = &[
     RECORDING_START,
     RECORDING_STOP,
     AUDIO_LISTEN,
+    MIC_CAPTURE,
+    CAMERA_CAPTURE,
 ];
 
 /// The capabilities the **MVP host** will actually grant (Phase 2 = view-only + visual pointer +
@@ -434,6 +444,21 @@ mod tests {
         let requested = set(&[AUDIO_LISTEN, "screen.view"]);
         let granted = grantable(&requested, &phase3_default_policy(), &requested);
         assert!(!granted.contains(AUDIO_LISTEN));
+    }
+
+    #[test]
+    fn call_capture_caps_are_recognized_but_withheld_by_default() {
+        // mic + camera are in the catalogue (a request naming them is understood, ADR-103) …
+        assert!(is_recognized(MIC_CAPTURE) && is_recognized(CAMERA_CAPTURE));
+        // … but neither is grantable under any default policy (two-way media is default OFF, Inv 12).
+        assert!(!phase2_default_policy().contains(MIC_CAPTURE));
+        assert!(!phase2_default_policy().contains(CAMERA_CAPTURE));
+        assert!(!phase3_default_policy().contains(MIC_CAPTURE));
+        assert!(!phase3_default_policy().contains(CAMERA_CAPTURE));
+        // Even a request + consent for them grants nothing under the default policy.
+        let requested = set(&[MIC_CAPTURE, CAMERA_CAPTURE, "screen.view"]);
+        let granted = grantable(&requested, &phase3_default_policy(), &requested);
+        assert!(!granted.contains(MIC_CAPTURE) && !granted.contains(CAMERA_CAPTURE));
     }
 
     #[test]

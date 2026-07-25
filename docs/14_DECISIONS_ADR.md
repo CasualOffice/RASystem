@@ -1455,7 +1455,13 @@
     distinct-admitted / stale-forgotten / bounded; workspace test/clippy/fmt, app check/clippy/fmt/deny —
     green). Content-free drop log (Inv 8). On-device-pending: nothing specific — it's loopback-complete.
 
-- **ADR-103 · 1:1 voice/video calling: expand the media posture from output-only to two-way (mic + camera capture), consent-gated and never recorded · Proposed (pending sign-off).**
+- **ADR-103 · 1:1 voice/video calling: expand the media posture from output-only to two-way (mic + camera capture), consent-gated and never recorded · Accepted (2026-07, owner sign-off).**
+  - **Sign-off note (2026-07).** Accepted by the owner as part of the contacts-first product build. The
+    load-bearing part of Inv 12 — **live-only, never recorded, no media at rest** — is **retained
+    unchanged**; the accepted change is the media *directionality + source* (output-only → two-way; screen
+    → also mic + camera), made safe by explicit consent + deny-by-default capabilities + per-message host
+    gating + unspoofable per-source indicators. No recording path is added. Build order is bottom-up: the
+    two capabilities + the pure call FSM (`ras-call`, ADR-104) first, then the wire, then the OS backends.
   - **Context.** Today Inv 12 holds the audio posture at **output audio only — no microphone, no two-way voice, live-only, never recorded** (ADR-077, `ras-media::audio`); and the capture pipeline captures the **screen**, not a camera (`ScreenCaptureBackend`). The contacts-first reframe (docs/25 §7, §12) introduces **1:1 voice/video calling**, which inherently needs **microphone capture** and **camera capture** — a two-way media flow the current architecture does not have. This is **not** a violation of Inv 12 done right, but it is a deliberate, hard-to-reverse expansion of the media posture and touches Inv 2/7/11/12/15, so it gets an ADR. This ADR decides *how* calling reuses the proven pipeline vs. what is genuinely new, and records the exact invariant-preserving posture; it does **not** cover call *signaling* (INVITE/RING/ACCEPT/HANGUP + the in-call state machine — its own ADR, docs/25 §12).
   - **Decision — reuse the pipeline in both directions; add only two new capture backends.**
     - **Audio, both directions:** reuse the existing **Opus over iroh unreliable QUIC datagrams** path (ADR-077/080, the `RAU1` `AudioPacketHeader`, PLC-covered loss, no HOL blocking) — now run **symmetrically**, one datagram stream each way. The `AudioEncoderBackend`/`AudioDecoderBackend`/`AudioConfig`/`EncodedAudio` types and `ras-audio-opus` are **unchanged and reused verbatim** for the mic→peer direction.
@@ -1524,15 +1530,26 @@ IMPLEMENTATION NOTES (for the plan):
     or media byte). **Emergency-stop and hangup always override** everything in flight (Inv 4-aligned): a
     hangup or the global stop drives the FSM to a terminal state and tears down media capture synchronously
     before its next send, exactly as `emergency_stop` does for a control session.
-  - **Status. Proposed (pending sign-off).** Not yet Accepted — needs the owner's approval. Design-gated on
-    ADR-103 landing first, since the security story leans on per-message mic/camera gating. No code until
-    Accepted (CLAUDE §9).
+  - **Status. Accepted (2026-07, owner sign-off).** Accepted alongside ADR-103. Build order: the pure call
+    FSM first (landed — see the deviation note below), then the signal + control-plane wire, then wiring.
   - **Implementation (notes for the plan).** New `SignalPayload` variants (out-of-session, `ras-signal`):
     `CallInvite`/`CallCancel` (two canonical tags, extend encode/decode, reuse sign/verify/replay-guard).
     New `ControlMsg` variants (in-session, `ras-protocol`): `CallAccept`/`CallReject`/`CallBusy`/`CallHangup`/
     `CallMuteState` (bounded fail-closed codec, no `content` field). The call FSM is a new pure module
     `ras-core::call` (a `CallState` enum + `CallFsm`, clock-injected, total/fail-closed/terminal-once,
     one-active-call). `CallMediaKind` lives in `ras-protocol` so both planes reference one canonical type.
+  - **Deviation (2026-07, as landed).** The pure FSM shipped as its **own crate `ras-call`** (not a
+    `ras-core::call` module), matching the crate-per-concern pattern of `ras-control`/`ras-policy` and
+    keeping it dependency-light (only `ras-protocol` for `ErrorCode`) and `ras-core`-free so it can be
+    reused by both the app and any future SDK without pulling the orchestrator. The `CallState` enum +
+    the pure `transition(state, event) -> CallTransition` function mirror the session FSM's shape exactly
+    (total, fail-closed to `Invalid`, terminal-once, clock supplied by the caller for ring timeouts).
+    `CallMedia { Voice, Video }` (the media-kind type) lives in `ras-call` for now; it moves to / is
+    re-exported from `ras-protocol` as `CallMediaKind` when the wire variants land (so both planes share
+    one canonical type, per the note above). The two capabilities landed in `ras-policy` as
+    `audio.mic.capture` / `video.camera.capture` (recognized-but-withheld, deny-by-default). One-active-
+    call enforcement is a caller-side concern layered on the FSM (the FSM refuses a second `Dial`/`Ring`
+    from any non-`Idle` state — a `Busy` reply is the caller's response), landing with the signal wire.
 
 - **ADR-105 · Contact-requests-access flow: a signaling+UX layer over the unchanged authorization core · Proposed (pending sign-off).**
   - **The load-bearing point, stated first and structurally.** This adds a **second remote-access initiation path** — a saved contact *asks* to view/control my screen — **alongside** the existing `CASUALRAS1:` ticket/link flow (§8 Flow 1). It is a **signaling + consent-UX layer on top of the UNCHANGED authorization core.** A contact-access request is an *intent*, never a credential (exactly like the existing `AccessRequestIntent`, ADR-095): on receipt it does **nothing** but raise the same local **consent card** the owner must act on (Inv 1). Accepting still runs the *identical, untouched* path — the controller signs a fresh endpoint-bound `AccessRequest`, the host `validate_access_request`s it, and `LocalHostGrantIssuer::issue` mints a fresh, short-lived, sender-constrained `SessionGrant` whose scope is `requested ∩ policy ∩ consented`, enforced per-message host-side (Inv 3/9/15) and overridable by emergency stop (Inv 4). **There is no new authorization primitive, no grant/lease change, no security bypass** — the request only *chooses who gets prompted and with what pre-filled checklist*. `ras-grant` is not modified by this ADR.
