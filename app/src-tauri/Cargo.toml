@@ -95,6 +95,10 @@ tauri-plugin-global-shortcut = "2"
 # role is decode-only and works everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
 ras-media-macos = { path = "../../crates/ras-media-macos" }
+# Camera capture for video calls (ADR-103), macOS-only for now (dev-lead platform, AVFoundation) so the
+# heavy cross-platform nokhwa dep can't affect the Linux/Windows app build; a video call still receives
+# + renders the peer's camera on every platform, and sends the local camera on macOS.
+ras-camera = { path = "../../crates/ras-camera", features = ["capture"] }
 # macOS can now ALSO encode VP9 for Linux/WebKitGTK viewers that can't decode our H.264 (codec
 # negotiation, follow-up to ADR-063). The macOS SCK capture exposes a CPU-BGRA surface in VP9 mode so
 # this software encoder can consume it; VideoToolbox H.264 stays the default hardware path. Links Brew

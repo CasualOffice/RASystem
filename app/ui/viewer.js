@@ -178,6 +178,12 @@
       connectContact: (id) => connect({ contactId: id }),
       connectTicket: (ticket) => connect({ ticket }),
       requestKeyframe: () => { try { invoke("request_keyframe"); } catch (_) {} },
+      // Feed one RCFG/RAS1 blob (already-received frames pushed from Rust, e.g. call video) into the
+      // decoder → canvas, without a connect. Reuses the full decode path (config gate, keyframe gate,
+      // reconfigure-retry cap).
+      feed: (msg) => onMessage(msg),
+      // Reset the decoder + canvas (call ended).
+      resetSink: () => reset(),
       isLive: () => live,
       async disconnect() {
         try { await invoke("disconnect"); } catch (_) {}
