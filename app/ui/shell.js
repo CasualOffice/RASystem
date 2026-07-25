@@ -567,7 +567,26 @@
       }
       if (callVid) callVid.feed(e.payload);
     });
-    const stopCallVideo = () => { if (callVid) { callVid.resetSink(); callVid = null; } if (callCanvas) callCanvas.hidden = true; };
+    // Local self-view: our own camera frames looped back from Rust (same encoded VP9 as we send the
+    // peer — the camera is opened once). Decode + render into the small self-view canvas. Inv 8: bytes only.
+    const selfCanvas = el("#selfView");
+    let selfVid = null;
+    listen("call-selfvideo", (e) => {
+      if (!selfVid && window.RASViewer && selfCanvas) {
+        selfCanvas.hidden = false;
+        selfVid = window.RASViewer.createViewer({
+          canvas: selfCanvas,
+          invoke: () => Promise.resolve(),
+          Channel: T.core && T.core.Channel,
+          onStatus: () => {}, onFatal: () => {}, onLive: () => {},
+        });
+      }
+      if (selfVid) selfVid.feed(e.payload);
+    });
+    const stopCallVideo = () => {
+      if (callVid) { callVid.resetSink(); callVid = null; } if (callCanvas) callCanvas.hidden = true;
+      if (selfVid) { selfVid.resetSink(); selfVid = null; } if (selfCanvas) selfCanvas.hidden = true;
+    };
     listen("call-audio-inactive", stopCallVideo);
     // Host denied a control request, or revoked an active lease mid-session (Inv 4). Content-free.
     listen("control-consent-denied", () => { if (controller) controller.notifyConsentDenied(); });

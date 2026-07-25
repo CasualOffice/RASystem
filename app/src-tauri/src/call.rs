@@ -269,7 +269,7 @@ fn spawn_media_supervisor(
                                 }));
                             }
                         }
-                        start_camera_egress(&tp, Arc::clone(&mic_stop)).await;
+                        start_camera_egress(&app, &tp, Arc::clone(&mic_stop)).await;
                     }
                 }
                 MediaCmd::Stop => {
@@ -289,18 +289,26 @@ fn spawn_media_supervisor(
 /// Camera egress (send our camera): macOS only for now (AVFoundation via `ras-camera`). A no-op on other
 /// platforms — a video call there is receive-only for video (voice both ways).
 #[cfg(target_os = "macos")]
-async fn start_camera_egress(tp: &Arc<IrohCallTransport>, stop: Arc<AtomicBool>) {
+async fn start_camera_egress(app: &AppHandle, tp: &Arc<IrohCallTransport>, stop: Arc<AtomicBool>) {
     if let Ok(sink) = tp.video_sink().await {
         stop.store(false, Ordering::SeqCst);
-        std::thread::spawn(move || camera_pump(sink, stop));
+        let app = app.clone();
+        std::thread::spawn(move || camera_pump(app, sink, stop));
     }
 }
 #[cfg(not(target_os = "macos"))]
-async fn start_camera_egress(_tp: &Arc<IrohCallTransport>, _stop: Arc<AtomicBool>) {}
+async fn start_camera_egress(
+    _app: &AppHandle,
+    _tp: &Arc<IrohCallTransport>,
+    _stop: Arc<AtomicBool>,
+) {
+}
 
-/// Camera capture → H.264 encode → send loop (blocking; own thread). macOS only. Never logs a pixel.
+/// Camera capture → VP9 encode → send loop (blocking; own thread). macOS only. Each encoded frame goes
+/// two places: to the peer (`sink`) and to our own webview as a `call-selfvideo` self-view (reusing the
+/// same encoded bytes — the camera is opened once, never twice). Never logs a pixel (Inv 8).
 #[cfg(target_os = "macos")]
-fn camera_pump(sink: Box<dyn ras_core::deps::VideoSinkDyn>, stop: Arc<AtomicBool>) {
+fn camera_pump(app: AppHandle, sink: Box<dyn ras_core::deps::VideoSinkDyn>, stop: Arc<AtomicBool>) {
     use ras_media::{CameraCaptureBackend, CameraOptions, VideoCodec, VideoEncoderBackend};
     let mut cam = ras_camera::NokhwaCameraCapture::new();
     // Declare VP9 so the negotiated StreamConfig (and thus the RCFG the webview reads) matches the VP9
@@ -321,10 +329,13 @@ fn camera_pump(sink: Box<dyn ras_core::deps::VideoSinkDyn>, stop: Arc<AtomicBool
     if enc.configure(&cfg).is_err() {
         return;
     }
+    let mut self_configured = false;
     while !stop.load(Ordering::SeqCst) {
         match cam.next_frame(std::time::Duration::from_millis(100)) {
             Ok(Some(frame)) => {
                 if let Ok(Some(pkt)) = enc.encode(frame) {
+                    // Self-view first (borrows), then hand the frame to the peer sink (moves).
+                    emit_video_frame(&app, "call-selfvideo", &pkt, &mut self_configured);
                     sink.send_frame(pkt);
                 }
             }
@@ -335,6 +346,32 @@ fn camera_pump(sink: Box<dyn ras_core::deps::VideoSinkDyn>, stop: Arc<AtomicBool
     cam.stop();
 }
 
+/// Emit one encoded video frame to the webview over `event` as session-format blobs: a one-shot `RCFG`
+/// config blob (on the first frame, so the JS decoder configures for the exact codec/size) then the
+/// `RAS1` frame blob. Shared by the peer-camera render (`call-video`) and the local self-view
+/// (`call-selfvideo`). Content-free at the log layer — never logs a pixel (Inv 8).
+fn emit_video_frame(
+    app: &AppHandle,
+    event: &str,
+    frame: &ras_media::EncodedFrame,
+    configured: &mut bool,
+) {
+    if !*configured {
+        let c = &frame.config;
+        let codec = c.codec.webcodecs_string(c.width, c.height);
+        let json = serde_json::json!({
+            "codec": codec, "width": c.width, "height": c.height, "fps": c.fps,
+        })
+        .to_string();
+        let mut blob = Vec::with_capacity(4 + json.len());
+        blob.extend_from_slice(&crate::CONFIG_MAGIC.to_le_bytes());
+        blob.extend_from_slice(json.as_bytes());
+        let _ = app.emit(event, blob);
+        *configured = true;
+    }
+    let _ = app.emit(event, ras_core::frame_channel::encode_frame_blob(frame));
+}
+
 /// Video ingress: read the peer's camera frames and forward them to the webview as `call-video` blobs —
 /// one `RCFG` config blob (from the first frame's config) then `RAS1` frame blobs (the session format).
 async fn forward_call_video(app: AppHandle, src: &mut Box<dyn ras_core::deps::VideoSourceDyn>) {
@@ -343,23 +380,7 @@ async fn forward_call_video(app: AppHandle, src: &mut Box<dyn ras_core::deps::Vi
         let ras_transport_iroh::VideoEvent::Frame(frame) = ev else {
             continue; // a FrameDropped marker — nothing to render
         };
-        if !configured {
-            let c = &frame.config;
-            let codec = c.codec.webcodecs_string(c.width, c.height);
-            let json = serde_json::json!({
-                "codec": codec, "width": c.width, "height": c.height, "fps": c.fps,
-            })
-            .to_string();
-            let mut blob = Vec::with_capacity(4 + json.len());
-            blob.extend_from_slice(&crate::CONFIG_MAGIC.to_le_bytes());
-            blob.extend_from_slice(json.as_bytes());
-            let _ = app.emit("call-video", blob);
-            configured = true;
-        }
-        let _ = app.emit(
-            "call-video",
-            ras_core::frame_channel::encode_frame_blob(&frame),
-        );
+        emit_video_frame(&app, "call-video", &frame, &mut configured);
     }
 }
 
