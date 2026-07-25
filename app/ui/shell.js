@@ -202,6 +202,9 @@
   function showInCall(name, label) {
     callwin.classList.remove("show"); scrim.classList.remove("show"); pip.classList.remove("show");
     el("#rmtname").textContent = name || ""; incall.classList.add("show"); inCall = true;
+    // Mic starts unmuted; the camera button reflects the call kind (on for a video call, off for voice).
+    el("#btnMute").classList.add("on");
+    el("#btnCam").classList.toggle("on", !!callVideo);
     clearInterval(timerInt);
     if (label) { el("#ctimer").textContent = label; } // e.g. "Calling…" / "Connecting…"
     else { secs = 0; tick(); timerInt = setInterval(tick, 1000); }
@@ -244,7 +247,11 @@
   el("#btnPipEnd").onclick = () => { callInvoke("call_hangup").catch(() => {}); if (!LIVE) endCall("Call ended"); };
   el("#btnMinCall").onclick = minCall; el("#btnExpand").onclick = () => { pip.classList.remove("show"); incall.classList.add("show"); };
   el("#btnMute").onclick = (e) => { e.currentTarget.classList.toggle("on"); pushMute(); };
-  el("#btnCam").onclick = (e) => { e.currentTarget.classList.toggle("on"); pushMute(); };
+  el("#btnCam").onclick = (e) => {
+    const on = e.currentTarget.classList.toggle("on");
+    pushMute();                                                  // tell the peer (video_muted = !on)
+    callInvoke("call_set_camera", { on }).catch(() => {});       // actually start/stop our camera + self-view
+  };
 
   // ---- consent -> session flow ----
   const consent = el("#consent"), session = el("#session"), ownerbar = el("#ownerbar");
@@ -583,6 +590,8 @@
       }
       if (selfVid) selfVid.feed(e.payload);
     });
+    // Local camera turned off mid-call — clear the self-view (the pump stopped emitting frames).
+    listen("call-selfvideo-off", () => { if (selfVid) { selfVid.resetSink(); selfVid = null; } if (selfCanvas) selfCanvas.hidden = true; });
     const stopCallVideo = () => {
       if (callVid) { callVid.resetSink(); callVid = null; } if (callCanvas) callCanvas.hidden = true;
       if (selfVid) { selfVid.resetSink(); selfVid = null; } if (selfCanvas) selfCanvas.hidden = true;

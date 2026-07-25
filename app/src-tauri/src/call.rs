@@ -138,6 +138,8 @@ impl CallSignalSink for SignalSink {
 struct MediaCtl(mpsc::UnboundedSender<MediaCmd>);
 enum MediaCmd {
     Start(CallMedia),
+    /// Local user toggled the camera mid-call: start/stop capture + self-view (video calls only).
+    Camera(bool),
     Stop,
 }
 impl CallMediaController for MediaCtl {
@@ -235,12 +237,17 @@ fn spawn_media_supervisor(
     tokio::spawn(async move {
         let mut a_ingest: Option<JoinHandle<()>> = None;
         let mut v_ingest: Option<JoinHandle<()>> = None;
+        // Camera egress has its own stop flag (independent of the mic) so the local user can turn the
+        // camera off mid-call without muting audio.
+        let camera_stop = Arc::new(AtomicBool::new(false));
+        let mut is_video = false;
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 MediaCmd::Start(media) => {
                     let Some(tp) = transport.lock().await.clone() else {
                         continue;
                     };
+                    is_video = media.has_video();
                     // Audio ingress: peer mic → webview (always).
                     if a_ingest.is_none() {
                         if let Ok(mut src) = tp.audio_source().await {
@@ -269,11 +276,27 @@ fn spawn_media_supervisor(
                                 }));
                             }
                         }
-                        start_camera_egress(&app, &tp, Arc::clone(&mic_stop)).await;
+                        start_camera_egress(&app, &tp, Arc::clone(&camera_stop)).await;
+                    }
+                }
+                MediaCmd::Camera(on) => {
+                    if on {
+                        // Turn the camera back on (only meaningful on a video call).
+                        if is_video {
+                            if let Some(tp) = transport.lock().await.clone() {
+                                start_camera_egress(&app, &tp, Arc::clone(&camera_stop)).await;
+                            }
+                        }
+                    } else {
+                        // Stop capturing + clear our self-view. The peer's mute signal (sent separately)
+                        // tells their UI the camera is off; here we actually release the camera.
+                        camera_stop.store(true, Ordering::SeqCst);
+                        let _ = app.emit("call-selfvideo-off", ());
                     }
                 }
                 MediaCmd::Stop => {
                     mic_stop.store(true, Ordering::SeqCst);
+                    camera_stop.store(true, Ordering::SeqCst);
                     if let Some(h) = a_ingest.take() {
                         h.abort();
                     }
@@ -566,6 +589,20 @@ pub async fn call_set_mute(
 ) -> Result<(), String> {
     if let Some(driver) = current_driver(&state) {
         driver.lock().await.set_local_mute(audio_muted, video_muted);
+    }
+    Ok(())
+}
+
+/// Actually start/stop the local camera capture + self-view mid-call (the peer-facing mute signal is
+/// sent separately via `call_set_mute`). `on = true` re-opens the camera; `false` releases it.
+#[tauri::command]
+pub async fn call_set_camera(state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    let media = {
+        let guard = state.call.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|c| c.media.clone())
+    };
+    if let Some(media) = media {
+        let _ = media.send(MediaCmd::Camera(on));
     }
     Ok(())
 }
