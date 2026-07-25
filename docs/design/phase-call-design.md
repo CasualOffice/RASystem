@@ -28,8 +28,8 @@ Each layer is a separate, reviewable PR; each is testable before the next exists
 |---|-------|----------|------------------------|--------|
 | L0 | **Capabilities** — `audio.mic.capture`, `video.camera.capture` (recognized-but-withheld, deny-by-default) | `ras-policy` | ✅ unit | **landed** |
 | L1 | **Pure call FSM** — `CallState`/`CallEvent`/`transition`, total, fail-closed, terminal-once, clock-injected | `ras-call` (new) | ✅ unit | **landed** |
-| L2 | **Signal wire (ring)** — `SignalPayload::CallInvite`/`CallCancel` (out-of-session, signed, contacts-only, replay-guarded) | `ras-signal` | ✅ unit/fuzz | pending |
-| L3 | **In-session control wire** — `ControlMsg::CallAccept`/`CallReject`/`CallBusy`/`CallHangup`/`CallMuteState` (bounded fail-closed codec) + `CallMediaKind` canonical type | `ras-protocol` | ✅ unit/fuzz | pending |
+| L2 | **Signal wire (ring)** — `SignalPayload::CallInvite`/`CallCancel` (out-of-session, signed, contacts-only, replay-guarded) + the canonical `CallMediaKind` (in `ras-protocol`, shared with L3) | `ras-signal`, `ras-protocol` | ✅ unit/fuzz | **landed** |
+| L3 | **In-session control wire** — `ControlMsg::CallAccept`/`CallReject`/`CallBusy`/`CallHangup`/`CallMuteState` (bounded fail-closed codec) reusing L2's `CallMediaKind` | `ras-protocol` | ✅ unit/fuzz | pending |
 | L4 | **Orchestration** — call manager in `ras-core`: drive the FSM from signals/control, one-active-call, per-message mic/camera gate, emergency-stop tear-down, content-free lifecycle/audit events | `ras-core` | ✅ loopback | pending |
 | L5 | **Media backends** — `AudioCaptureBackend` mic impls + new `CameraCaptureBackend`; reuse Opus (audio) + `VideoEncoderBackend`/`PerFrameStream` (camera) verbatim | `ras-mic-{macos,windows,linux}`, `ras-camera-{…}` | ⚠️ on-device | pending |
 | L6 | **App/shell** — real ring signal, incoming-call window, in-call stage, PiP, mute/camera toggles, ringtone; replace the current designed previews | `app/` | ⚠️ on-device | pending |
