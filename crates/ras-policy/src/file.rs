@@ -98,7 +98,7 @@ pub enum FilePushError {
     /// The `file.push.<target>` capability is not granted (Inv 15).
     CapabilityDenied,
     /// The filename is empty, over-long, or contains a path separator / `..` / drive letter / control
-    /// char / other unsafe construct — i.e. it is not a safe leaf name.
+    /// char / bidi-format char / other unsafe construct — i.e. it is not a safe leaf name.
     UnsafeFilename,
     /// The file exceeds the target's `max_bytes`.
     TooLarge,
@@ -112,6 +112,11 @@ pub enum FilePushError {
 /// - any path separator (`/` or `\`) — a filename may not name a directory;
 /// - `.` or `..` (traversal);
 /// - a NUL or any control character;
+/// - a Unicode bidi/format (category Cf) control point (`U+200B..U+200F`, `U+202A..U+202E`,
+///   `U+2066..U+2069`, `U+FEFF`) — `char::is_control` does **not** catch these, and left in, a name like
+///   `evil<U+202E>gnp.exe` **renders** as `evilexe.png` in the file-transfer consent dialog the local user
+///   relies on to approve or refuse the push, letting an attacker disguise an executable as an image in
+///   the exact prompt that gates consent (Inv 7);
 /// - a `:` (Windows drive / alternate-data-stream separator) — blocks `C:evil` and `name:stream`;
 /// - leading/trailing ASCII whitespace, or a trailing `.` (Windows silently strips these → the file the
 ///   host thinks it wrote differs from what landed);
@@ -136,6 +141,11 @@ pub fn validate_filename(filename: &str) -> Result<&str, FilePushError> {
     if filename.chars().any(char::is_control) {
         return Err(FilePushError::UnsafeFilename);
     }
+    // `char::is_control` only catches Unicode category Cc, not Cf (format/bidi-control) — reject the
+    // known-dangerous Cf points explicitly so a bidi override can't spoof the consent dialog (see above).
+    if filename.chars().any(is_dangerous_format_char) {
+        return Err(FilePushError::UnsafeFilename);
+    }
     // Windows strips leading/trailing spaces and trailing dots — reject so the stored name is exact.
     if filename != filename.trim() || filename.ends_with('.') {
         return Err(FilePushError::UnsafeFilename);
@@ -146,6 +156,19 @@ pub fn validate_filename(filename: &str) -> Result<&str, FilePushError> {
         return Err(FilePushError::UnsafeFilename);
     }
     Ok(filename)
+}
+
+/// Unicode category-Cf (format/bidi-control) code points dangerous in a displayed filename — a
+/// consent-dialog spoofing vector (see [`validate_filename`]). Std has no `char::is_format`, so this is
+/// a deliberate, minimal, dependency-free denylist rather than pulling in a unicode-category crate.
+fn is_dangerous_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}' // zero-width space/non-joiner/joiner, LTR/RTL marks
+        | '\u{202A}'..='\u{202E}' // bidi embedding/override block (incl. RIGHT-TO-LEFT OVERRIDE)
+        | '\u{2066}'..='\u{2069}' // bidi isolate block
+        | '\u{FEFF}' // zero-width no-break space / BOM
+    )
 }
 
 fn is_reserved_windows_name(stem: &str) -> bool {
@@ -304,6 +327,26 @@ mod tests {
             "COMET.txt",
         ] {
             assert_eq!(validate_filename(ok), Ok(ok));
+        }
+    }
+
+    #[test]
+    fn validate_filename_rejects_bidi_override_consent_dialog_spoofing() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE: "evil\u{202E}gnp.exe" *renders* as "evilexe.png" — if accepted,
+        // an attacker could disguise an executable as an image in the file-transfer consent dialog.
+        // `char::is_control` does not catch this (it's Unicode category Cf, not Cc).
+        for bad in [
+            "evil\u{202E}gnp.exe",
+            "\u{200B}hidden.txt",  // zero-width space
+            "name\u{200D}.txt",    // zero-width joiner
+            "\u{FEFF}bom.txt",     // BOM
+            "click\u{2066}me.exe", // bidi isolate
+        ] {
+            assert_eq!(
+                validate_filename(bad),
+                Err(FilePushError::UnsafeFilename),
+                "must reject bidi/format-spoofed name {bad:?}"
+            );
         }
     }
 
