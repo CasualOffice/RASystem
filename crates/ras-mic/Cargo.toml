@@ -1,0 +1,33 @@
+[package]
+name = "ras-mic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Cross-platform microphone capture behind `ras_media::AudioCaptureBackend`, for 1:1 calls (ADR-103,
+# L5). Wraps the permissive `cpal` crate (CoreAudio on macOS, WASAPI on Windows, ALSA on Linux). The
+# cpal `Stream` is not `Send`, so it is owned on a dedicated thread and bridged to the pull-based trait
+# via a bounded shared ring (latency over backlog — drop oldest). The framing/conversion core is pure
+# and unit-tested off-device; the live device path needs real hardware + a mic-permission grant.
+
+[dependencies]
+ras-media = { path = "../ras-media" }
+ras-protocol = { path = "../ras-protocol" }
+log = "0.4"
+
+# cpal covers macos/windows/linux; on any other target this crate is empty (keeps builds green).
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+cpal = "0.15"
+
+# FFI-adjacent through cpal's device callbacks; keep the crate itself unsafe-free (the framing core is
+# pure) but relax the workspace deny in case a future glue line needs it, matching the backend crates.
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
