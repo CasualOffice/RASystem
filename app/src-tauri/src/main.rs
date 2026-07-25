@@ -3486,6 +3486,7 @@ fn main() {
             call::call_decline,
             call::call_hangup,
             call::call_set_mute,
+            call::call_set_camera,
             my_identity,
             list_contacts,
             add_contact,
