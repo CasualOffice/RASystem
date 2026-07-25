@@ -180,6 +180,13 @@ pub struct VerifiedSignal {
     pub sender: ContactId,
     /// The signal content.
     pub payload: SignalPayload,
+    /// A per-message replay tag: the message's Ed25519 signature. Unique to this exact signed
+    /// message (a verbatim replay carries the identical signature; any legitimately-distinct message
+    /// — different content or a fresh ms-stamped `issued_at` — has a different one). A receiver can
+    /// feed this to a [`SignalReplayGuard`] to drop a captured-and-replayed signal within the
+    /// freshness window (the consent-fatigue surface a replayed `AccessRequestIntent` opens). Carried
+    /// out here rather than dedup'd inside `verify_signed` so this module stays pure/stateless.
+    pub replay_tag: [u8; SIGNATURE_LEN],
 }
 
 /// Sign `payload` with the local identity and produce the wire bytes to broadcast/send. Layout:
@@ -251,7 +258,51 @@ pub fn verify_signed(
     Ok(VerifiedSignal {
         sender: sender_id,
         payload,
+        replay_tag: sig,
     })
+}
+
+/// A bounded, TTL-swept dedup of recently-seen signal [`replay_tag`](VerifiedSignal::replay_tag)s, so a
+/// receiver can drop a **verbatim replay** of a signed signal within the freshness window. Mirrors
+/// [`ras_bootstrap::NonceCache`] in shape (stateful `&mut self`, clock-free — the caller supplies
+/// `now`), keyed by the 64-byte signature.
+///
+/// Retention only needs to cover the freshness window: a replay older than `max_age_ms` is already
+/// rejected by [`verify_signed`]'s freshness check, so an entry can be swept once it's that stale.
+/// Bounded by `max_entries` — at the ceiling a *new* tag is refused (returns "replay") rather than
+/// evicting a still-live entry, so the cache can never be flooded into forgetting a real recent signal
+/// (fail-closed under pressure, exactly like the bootstrap nonce cache).
+pub struct SignalReplayGuard {
+    /// tag → expiry (ms). An entry is live until `now > expiry`.
+    seen: std::collections::HashMap<[u8; SIGNATURE_LEN], u64>,
+    max_entries: usize,
+}
+
+impl SignalReplayGuard {
+    /// `max_entries` bounds memory (a DoS ceiling). `1024` is ample: legitimate out-of-session signals
+    /// (calls / messages) are rare and user-driven.
+    #[must_use]
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            seen: std::collections::HashMap::new(),
+            max_entries,
+        }
+    }
+
+    /// Returns `true` if `tag` is **fresh** (first seen) and records it until `now + ttl_ms`; returns
+    /// `false` if it's a replay (already recorded) **or** the cache is full (fail-closed). Sweeps
+    /// expired entries first so a long-lived process doesn't grow unbounded.
+    pub fn check_and_remember(&mut self, tag: [u8; SIGNATURE_LEN], now: u64, ttl_ms: u64) -> bool {
+        self.seen.retain(|_, expiry| now <= *expiry);
+        if self.seen.contains_key(&tag) {
+            return false; // replay
+        }
+        if self.seen.len() >= self.max_entries {
+            return false; // full → refuse (never evict a live entry to admit a new one)
+        }
+        self.seen.insert(tag, now.saturating_add(ttl_ms));
+        true
+    }
 }
 
 #[cfg(test)]
@@ -310,6 +361,72 @@ mod tests {
             v.payload,
             SignalPayload::AccessRequestIntent { .. }
         ));
+    }
+
+    #[test]
+    fn replay_guard_rejects_a_verbatim_replay_but_admits_distinct_signals() {
+        let ks = SoftwareKeyStore::generate().unwrap();
+        let book = book_with(&ks, false);
+
+        // One signed intent, verified twice (a passive observer capturing + re-injecting the exact
+        // signed bytes → the same `replay_tag`).
+        let wire = encode_signed(
+            &ks,
+            &SignalPayload::AccessRequestIntent {
+                issued_at: 500,
+                reason: "support".into(),
+            },
+        )
+        .unwrap();
+        let a = verify_signed(&wire, &book, 500, MAX_AGE).unwrap();
+        let b = verify_signed(&wire, &book, 501, MAX_AGE).unwrap();
+        assert_eq!(
+            a.replay_tag, b.replay_tag,
+            "a verbatim replay reuses the tag"
+        );
+
+        let mut guard = SignalReplayGuard::new(16);
+        assert!(
+            guard.check_and_remember(a.replay_tag, 500, MAX_AGE),
+            "first sighting is fresh"
+        );
+        assert!(
+            !guard.check_and_remember(b.replay_tag, 501, MAX_AGE),
+            "the verbatim replay is rejected"
+        );
+
+        // A legitimately-distinct signal (different reason ⇒ different signature) is still admitted.
+        let other = encode_signed(
+            &ks,
+            &SignalPayload::AccessRequestIntent {
+                issued_at: 500,
+                reason: "different".into(),
+            },
+        )
+        .unwrap();
+        let c = verify_signed(&other, &book, 502, MAX_AGE).unwrap();
+        assert_ne!(a.replay_tag, c.replay_tag);
+        assert!(
+            guard.check_and_remember(c.replay_tag, 502, MAX_AGE),
+            "a distinct signal is not a replay"
+        );
+    }
+
+    #[test]
+    fn replay_guard_forgets_stale_entries_and_is_bounded() {
+        let mut guard = SignalReplayGuard::new(2);
+        // Insert at t=0 with a 100ms ttl.
+        assert!(guard.check_and_remember([1u8; SIGNATURE_LEN], 0, 100));
+        // Well past expiry: the same tag is admitted again (a replay outside the freshness window is
+        // already rejected by `verify_signed`'s freshness check, so the guard needn't remember it).
+        assert!(guard.check_and_remember([1u8; SIGNATURE_LEN], 1000, 100));
+        // Bound: fill to capacity within one window, then a NEW tag is refused (fail-closed, never
+        // evicts a live entry to admit a new one).
+        assert!(guard.check_and_remember([2u8; SIGNATURE_LEN], 1000, 100));
+        assert!(
+            !guard.check_and_remember([3u8; SIGNATURE_LEN], 1000, 100),
+            "at capacity a new tag is refused, not admitted by evicting a live one"
+        );
     }
 
     #[test]

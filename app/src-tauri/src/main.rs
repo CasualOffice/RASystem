@@ -86,6 +86,11 @@ struct AppState {
             >,
         >,
     >,
+    /// Dedup of recently-seen inbound signal signatures, so a captured-and-replayed signed signal
+    /// (`AccessRequestIntent`/`DirectMessage`) is dropped instead of re-raising its consent notice /
+    /// re-delivering its message within the freshness window (ADR-095 hardening). Shared across the
+    /// per-signal handler tasks. Pure/clock-free — `handle_signal` passes `now`.
+    signal_replay: Arc<Mutex<ras_signal::SignalReplayGuard>>,
 }
 
 /// A connected viewer session: the controller + the iroh endpoint that must outlive it.
@@ -2697,51 +2702,68 @@ async fn handle_signal(
     )
     .await
     {
-        Ok(verified) => match verified.payload {
-            SignalPayload::DirectMessage { text, .. } => {
-                // `.reveal()` here is the sole display boundary for the body — emitted only to our own
-                // webview over local IPC, never to a log/trace (Inv 8).
-                let _ = app.emit(
-                    "message",
-                    MessagePayload {
-                        contact_id: hex_id(verified.sender.as_bytes()),
-                        text: text.reveal().to_string(),
-                        at: now_ms(),
-                    },
-                );
-                // Gentle attention + a content-free notification — never the message text (Inv 8),
-                // matching the in-session chat pattern.
-                alert_user(
-                    app,
-                    false,
-                    "Casual RAS — new message",
-                    "You have a new message.",
-                );
+        Ok(verified) => {
+            // Replay dedup (ADR-095 hardening): a signed signal's `replay_tag` (its signature) is
+            // unique to that exact message, so a verbatim replay — a passive observer capturing and
+            // re-injecting the bytes — reuses the tag. Drop it, so a captured `AccessRequestIntent` /
+            // `DirectMessage` can't re-raise its consent notice / re-deliver within the freshness
+            // window. Content-free (Inv 8): no sender key / body detail. The guard fails CLOSED under
+            // its own bound but this drop is advisory (consent still gates everything — Inv 1), so a
+            // rare false drop of a legit signal is harmless.
+            {
+                let state = app.state::<AppState>();
+                let mut guard = lock(&state.signal_replay);
+                if !guard.check_and_remember(verified.replay_tag, now_ms(), MAX_SIGNAL_AGE_MS) {
+                    log::warn!("signal: dropped a replayed signal from a contact");
+                    return;
+                }
             }
-            // "Call a contact" (ADR-095): a verified contact is asking us to start sharing our screen
-            // with them. Intent only, NEVER authorization (Inv 9) — this raises a local, dismissible
-            // notice; it starts nothing, shares nothing, connects nothing on its own. If the local
-            // user acts on it, they navigate to Share themselves and go through the SAME manual
-            // start-sharing + per-viewer Allow/Deny flow as always (Inv 1 is never bypassed by a call).
-            SignalPayload::AccessRequestIntent { reason, .. } => {
-                let _ = app.emit(
-                    "call-request",
-                    CallRequestPayload {
-                        contact_id: hex_id(verified.sender.as_bytes()),
-                        reason,
-                        at: now_ms(),
-                    },
-                );
-                alert_user(
-                    app,
-                    true,
-                    "Casual RAS — a contact wants to view your screen",
-                    "Open Casual RAS to share your screen with them, or dismiss.",
-                );
+            match verified.payload {
+                SignalPayload::DirectMessage { text, .. } => {
+                    // `.reveal()` here is the sole display boundary for the body — emitted only to our own
+                    // webview over local IPC, never to a log/trace (Inv 8).
+                    let _ = app.emit(
+                        "message",
+                        MessagePayload {
+                            contact_id: hex_id(verified.sender.as_bytes()),
+                            text: text.reveal().to_string(),
+                            at: now_ms(),
+                        },
+                    );
+                    // Gentle attention + a content-free notification — never the message text (Inv 8),
+                    // matching the in-session chat pattern.
+                    alert_user(
+                        app,
+                        false,
+                        "Casual RAS — new message",
+                        "You have a new message.",
+                    );
+                }
+                // "Call a contact" (ADR-095): a verified contact is asking us to start sharing our screen
+                // with them. Intent only, NEVER authorization (Inv 9) — this raises a local, dismissible
+                // notice; it starts nothing, shares nothing, connects nothing on its own. If the local
+                // user acts on it, they navigate to Share themselves and go through the SAME manual
+                // start-sharing + per-viewer Allow/Deny flow as always (Inv 1 is never bypassed by a call).
+                SignalPayload::AccessRequestIntent { reason, .. } => {
+                    let _ = app.emit(
+                        "call-request",
+                        CallRequestPayload {
+                            contact_id: hex_id(verified.sender.as_bytes()),
+                            reason,
+                            at: now_ms(),
+                        },
+                    );
+                    alert_user(
+                        app,
+                        true,
+                        "Casual RAS — a contact wants to view your screen",
+                        "Open Casual RAS to share your screen with them, or dismiss.",
+                    );
+                }
+                // Presence beacons arrive via gossip, not this ALPN — nothing to do here.
+                SignalPayload::PresenceBeacon { .. } => {}
             }
-            // Presence beacons arrive via gossip, not this ALPN — nothing to do here.
-            SignalPayload::PresenceBeacon { .. } => {}
-        },
+        }
         // Bad signature / non-contact / stale: content-free warning only (never the sender key detail
         // beyond a short id, never the body). `recv_signal` already withheld the ACK.
         Err(_) => {
@@ -3568,6 +3590,7 @@ fn main() {
                 presence_ks,
                 presence: presence.clone(),
                 presence_handles,
+                signal_replay: Arc::new(Mutex::new(ras_signal::SignalReplayGuard::new(1024))),
             });
 
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]

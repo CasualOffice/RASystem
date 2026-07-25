@@ -1426,6 +1426,35 @@
     Linux + brew libvpx on macOS; the vpx crate is exercised per-manifest on both. **On-device-pending:** the
     real Linux-viewer-of-macOS-host VP9 round-trip (the reason this exists) + the software-VP9 latency delta.
 
+- **ADR-102 · Signal replay dedup via the on-wire signature (no wire change) · Accepted.**
+  - **Context.** The 2026-07-25 production-readiness audit found the out-of-session signaling path
+    (`ras-signal`, ADR-094/095) had **no replay protection**: a passive observer who captures a contact's
+    signed `AccessRequestIntent` ("call me") or `DirectMessage` can re-inject the exact signed bytes within
+    the freshness window (`MAX_SIGNAL_AGE_MS`, 5 min) to **re-raise the local consent notice / re-deliver the
+    message**. Bounded by consent (Inv 1 holds — nothing is authorized) and by the freshness window, so it is
+    a **consent-fatigue / annoyance** surface, not an access one — but worth closing.
+  - **Decision.** Dedup on the **message's Ed25519 signature**, which is already on the wire — **no new wire
+    field, no nonce, no new randomness.** A signature is unique to one exact signed message: a verbatim
+    replay reuses it; any legitimately-distinct signal (different content, or a fresh ms-stamped `issued_at`)
+    has a different one. `verify_signed` now returns the 64-byte signature as `VerifiedSignal.replay_tag`
+    (the module stays pure/stateless — no dedup inside it); a new bounded, TTL-swept **`SignalReplayGuard`**
+    (mirrors `ras-bootstrap::NonceCache`: `&mut self`, clock-free, fail-closed at its `max_entries` bound,
+    retention = the freshness window since an older replay is already rejected by freshness) does the dedup.
+    The app owns one behind `Arc<Mutex<…>>` and `handle_signal` drops a replay before acting.
+  - **Why no ADR-heavy wire change / why an ADR at all.** No wire-format change (the signature was always
+    on the wire), no new capability, no invariant change — it *strengthens* replay resistance. Logged as an
+    ADR only for traceability of a security-posture decision on the signaling path. Considered + rejected: an
+    explicit per-message nonce field (a real wire change + send-time randomness) — strictly more surface for
+    no benefit over the existing signature; and a per-sender monotonic-`issued_at` check (no wire change but
+    a real false-positive risk under sender clock adjustment).
+  - **Scope.** Covers the `SIGNAL_ALPN` point-to-point path (the finding's actual surface). Presence
+    **beacons** (gossip path) are deliberately **not** deduped: they are periodic + freshness-idempotent
+    (each real beacon has a fresh `issued_at` ⇒ a distinct signature), so a replayed beacon only keeps a
+    contact "online" for the remainder of the window the next real beacon covers anyway.
+  - **Status.** Implemented + gated (ras-signal 19 tests incl. verbatim-replay-rejected /
+    distinct-admitted / stale-forgotten / bounded; workspace test/clippy/fmt, app check/clippy/fmt/deny —
+    green). Content-free drop log (Inv 8). On-device-pending: nothing specific — it's loopback-complete.
+
 ## Licensing
 
 - **ADR-051 · Apache-2.0 for the whole repository; reject AGPL/SSPL · Accepted (add full LICENSE +
