@@ -19,13 +19,14 @@ jobs:
           components: rustfmt, clippy
       # nasm builds OpenH264's x86 assembly (ras-media-openh264) on x86 runners; a no-op on arm macOS.
       - uses: ilammy/setup-nasm@v1
-      # Linux system deps: ras-media-scap PipeWire capture (pipewire + dbus + libclang) and
-      # ras-audio-linux system-audio capture (libpulse — PulseAudio/PipeWire-pulse monitor source).
+      # Linux system deps: ras-media-scap PipeWire capture (pipewire + dbus + libclang),
+      # ras-audio-linux system-audio capture (libpulse — PulseAudio/PipeWire-pulse monitor source),
+      # and ras-mic microphone capture (libasound2-dev — cpal's ALSA backend on Linux).
       - name: Linux capture deps
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libdbus-1-dev libclang-dev pkg-config libvpx-dev
+          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libdbus-1-dev libclang-dev pkg-config libvpx-dev libasound2-dev
       # macOS libvpx: the unified app now links ras-media-vpx on macOS too (codec negotiation — a macOS
       # host can encode VP9 for WebKitGTK viewers that can't decode our H.264). The app builds in
       # release.yml, but install libvpx here as well so the ras-media-vpx build/test step below is

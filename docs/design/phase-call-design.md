@@ -32,7 +32,9 @@ Each layer is a separate, reviewable PR; each is testable before the next exists
 | L3 | **In-session control wire** — `ControlMsg::CallAccept`/`CallReject`/`CallBusy`/`CallHangup`/`CallMuteState` (bounded fail-closed codec) reusing L2's `CallMediaKind` | `ras-protocol` | ✅ unit/fuzz | **landed** |
 | L4a | **Pure call manager** — `CallManager` over the FSM: one-active-call, media downgrade, mute tracking, emergency-stop-overrides. Pure/stateful (no async/media) — the "brain" L4b + L6 drive | `ras-call` | ✅ unit | **landed** |
 | L4b | **Runtime wiring** — drive `CallManager` from real signals/control in `ras-core`; content-free lifecycle/audit events; per-message mic/camera gate at the media boundary (lands with L5) | `ras-core` | ✅ loopback | pending |
-| L5 | **Media backends** — `AudioCaptureBackend` mic impls + new `CameraCaptureBackend`; reuse Opus (audio) + `VideoEncoderBackend`/`PerFrameStream` (camera) verbatim | `ras-mic-{macos,windows,linux}`, `ras-camera-{…}` | ⚠️ on-device | pending |
+| L5a | **Camera seam** — `CameraCaptureBackend` trait + synthetic double (a camera frame reuses the shared encoder/transport verbatim) | `ras-media` | ✅ unit | **landed** |
+| L5b | **Microphone capture** — cross-platform `AudioCaptureBackend` impl via `cpal` (CoreAudio/WASAPI/ALSA); pure framing/conversion core unit-tested, cpal glue compile-gated | `ras-mic` | ◐ core-unit / device on-device | **landed (core-verified)** |
+| L5c | **Camera + reuse** — per-OS `CameraCaptureBackend` impls (AVFoundation / Media Foundation / PipeWire); reuse Opus (audio) + `VideoEncoderBackend`/`PerFrameStream` (camera) verbatim | `ras-camera-{macos,windows,linux}` | ⚠️ on-device | pending |
 | L6 | **App/shell** — real ring signal, incoming-call window, in-call stage, PiP, mute/camera toggles, ringtone; replace the current designed previews | `app/` | ⚠️ on-device | pending |
 
 L0–L4 are fully verifiable off-device (the project's established bar); L5–L6 need real hardware (mic,
