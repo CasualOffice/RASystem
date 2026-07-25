@@ -228,6 +228,29 @@ button{font-family:inherit}
 .sc-form .send:hover{background:var(--accent-hover)}
 .sb .sc-unread{position:absolute;top:-4px;right:-4px;min-width:15px;height:15px;padding:0 4px;border-radius:var(--r-pill);background:var(--accent);color:var(--accent-ink);font-size:10px;font-weight:600;display:grid;place-items:center}
 .sesstoolbar .sb{position:relative}
+/* sender file-transfer progress card */
+.filesend{position:absolute;left:14px;bottom:52px;width:300px;padding:12px 14px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);z-index:8;display:flex;flex-direction:column;gap:8px}
+.filesend[hidden]{display:none}
+.fs-top,.fs-bot{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.fs-name{font-size:13px;font-weight:500;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fs-pct{font-size:12px;color:var(--ink-dim)}
+.fs-track{height:5px;border-radius:var(--r-pill);background:var(--surface-4);overflow:hidden}
+.fs-fill{height:100%;width:0;background:var(--accent);border-radius:var(--r-pill);transition:width var(--t-fast) linear}
+.fs-fill.ok{background:var(--online)}.fs-fill.err{background:var(--danger)}
+.fs-state{font-size:12px;color:var(--ink-dim)}
+.fs-state.ok{color:var(--online)}.fs-state.err{color:var(--danger)}.fs-state.receiving{color:var(--accent)}
+.fs-cancel{font-size:12px;color:var(--ink-dim);background:transparent;border:0;cursor:pointer;padding:2px 4px}
+.fs-cancel:hover{color:var(--ink)}
+/* receiver incoming-file offer (styled like the consent card) */
+.fileoffer{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:380px;max-width:calc(100vw - 32px);padding:18px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);z-index:70;display:flex;flex-direction:column;gap:12px}
+.fileoffer[hidden]{display:none}
+.fo-body{display:flex;align-items:center;gap:12px}
+.fo-ic{width:40px;height:40px;flex:none;display:grid;place-items:center;border-radius:var(--r-md);background:var(--surface-4);color:var(--ink-dim)}
+.fo-meta{display:flex;flex-direction:column;min-width:0}
+.fo-name{font-size:14px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fo-size{font-size:12px}
+.fo-timeout{font-size:12px}
+.fo-ft{display:flex;justify-content:flex-end;gap:8px}
 /* owner "you are being controlled" bar (fixed, un-hideable) */
 .ownerbar{position:fixed;left:0;right:0;bottom:0;height:52px;display:none;align-items:center;gap:14px;padding:0 18px;background:var(--session-soft);border-top:2px solid var(--session-line);z-index:70;backdrop-filter:blur(8px)}
 .ownerbar.show{display:flex}
