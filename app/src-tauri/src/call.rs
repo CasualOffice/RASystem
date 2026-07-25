@@ -327,7 +327,8 @@ async fn start_camera_egress(app: &AppHandle, tp: &Arc<IrohCallTransport>, stop:
     if let Ok(sink) = tp.video_sink().await {
         stop.store(false, Ordering::SeqCst);
         let app = app.clone();
-        std::thread::spawn(move || camera_pump(app, sink, stop));
+        let tp = Arc::clone(tp);
+        std::thread::spawn(move || camera_pump(app, tp, sink, stop));
     }
 }
 #[cfg(not(target_os = "macos"))]
@@ -342,7 +343,13 @@ async fn start_camera_egress(
 /// two places: to the peer (`sink`) and to our own webview as a `call-selfvideo` self-view (reusing the
 /// same encoded bytes — the camera is opened once, never twice). Never logs a pixel (Inv 8).
 #[cfg(target_os = "macos")]
-fn camera_pump(app: AppHandle, sink: Box<dyn ras_core::deps::VideoSinkDyn>, stop: Arc<AtomicBool>) {
+fn camera_pump(
+    app: AppHandle,
+    tp: Arc<IrohCallTransport>,
+    sink: Box<dyn ras_core::deps::VideoSinkDyn>,
+    stop: Arc<AtomicBool>,
+) {
+    use ras_core::{AdaptiveBitrateController, LatencyFirstAbr};
     use ras_media::{CameraCaptureBackend, CameraOptions, VideoCodec, VideoEncoderBackend};
     let mut cam = ras_camera::NokhwaCameraCapture::new();
     // Declare VP9 so the negotiated StreamConfig (and thus the RCFG the webview reads) matches the VP9
@@ -363,6 +370,14 @@ fn camera_pump(app: AppHandle, sink: Box<dyn ras_core::deps::VideoSinkDyn>, stop
     if enc.configure(&cfg).is_err() {
         return;
     }
+    // Latency-first ABR for the camera: adapt VP9 bitrate to the live call link (additive-increase /
+    // multiplicative-decrease on loss, keyframe-free — never an IDR on a routine loss response, which
+    // would spike bitrate and hurt latency). Camera 640×480@24 → a modest floor/ceiling. Ticked ~every
+    // 500 ms (≈12 frames at 24 fps) off the transport's windowed health snapshot.
+    let mut abr = LatencyFirstAbr::new(150_000, 2_500_000, 800_000);
+    let tick_every = (cfg.fps.max(1) / 2).max(1); // ~500 ms of frames
+    let _ = enc.set_bitrate(abr.current_bps());
+    let mut since_tick = 0u32;
     let mut self_configured = false;
     while !stop.load(Ordering::SeqCst) {
         match cam.next_frame(std::time::Duration::from_millis(100)) {
@@ -371,6 +386,13 @@ fn camera_pump(app: AppHandle, sink: Box<dyn ras_core::deps::VideoSinkDyn>, stop
                     // Self-view first (borrows), then hand the frame to the peer sink (moves).
                     emit_video_frame(&app, "call-selfvideo", &pkt, &mut self_configured);
                     sink.send_frame(pkt);
+                    // ABR tick roughly twice a second: retarget the VP9 bitrate to the live link.
+                    since_tick += 1;
+                    if since_tick >= tick_every {
+                        since_tick = 0;
+                        let decision = abr.on_tick(&tp.health_snapshot(), None);
+                        let _ = enc.set_bitrate(decision.target_bitrate_bps);
+                    }
                 }
             }
             Ok(None) => {}
