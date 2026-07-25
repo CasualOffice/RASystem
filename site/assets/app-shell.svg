@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 933" role="img" aria-label="The Casual RAS contacts-first desktop app: a navigation rail, a contact list with presence, and an open conversation with a call and share-screen action.">
+  <defs>
+    <style>
+      text { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, system-ui, sans-serif; }
+      .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    </style>
+    <clipPath id="round"><rect x="0" y="0" width="1400" height="933" rx="16"/></clipPath>
+  </defs>
+  <g clip-path="url(#round)">
+    <!-- ground -->
+    <rect width="1400" height="933" fill="#0A0B0F"/>
+
+    <!-- rail (72) -->
+    <rect x="0" y="0" width="96" height="933" fill="#0F1117"/>
+    <rect x="29" y="26" width="38" height="38" rx="11" fill="#6E79D6"/>
+    <text x="48" y="51" text-anchor="middle" font-size="18" font-weight="700" fill="#fff">C</text>
+    <!-- rail items -->
+    <rect x="26" y="92" width="44" height="44" rx="12" fill="#191C24"/>
+    <rect x="12" y="103" width="3" height="22" rx="2" fill="#6E79D6"/>
+    <g fill="none" stroke="#E7E9ED" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M40 128v-2a4 4 0 0 0-4-4h-4a4 4 0 0 0-4 4v2"/><circle cx="34" cy="112" r="4"/><path d="M60 128v-2a4 4 0 0 0-3-3.9"/>
+    </g>
+    <g fill="none" stroke="#9BA1AD" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="48" cy="170" r="9"/><path d="M48 165v5l3 2"/>
+      <path d="M29 222h4l2 5-3 2a12 12 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 27 224a2 2 0 0 1 2-2z"/>
+      <path d="M27 278h4l2 7 4-14 2 7h4"/>
+    </g>
+    <circle cx="48" cy="878" r="18" fill="#4a5578"/>
+    <text x="48" y="884" text-anchor="middle" font-size="13" font-weight="600" fill="#fff">YM</text>
+    <circle cx="60" cy="890" r="6" fill="#0A0B0F"/><circle cx="60" cy="890" r="3.5" fill="#3FB950"/>
+
+    <!-- list column (320) -->
+    <rect x="96" y="0" width="320" height="933" fill="#14161D"/>
+    <text x="120" y="52" font-size="19" font-weight="600" fill="#E7E9ED">Messages</text>
+    <g fill="none" stroke="#9BA1AD" stroke-width="1.7" stroke-linecap="round"><path d="M388 40v10M383 45h10"/></g>
+    <rect x="120" y="70" width="272" height="34" rx="8" fill="#191C24" stroke="#262A34"/>
+    <text x="142" y="92" font-size="13" fill="#6B717E">Search contacts</text>
+
+    <!-- contact rows -->
+    <!-- active: Priya -->
+    <rect x="104" y="120" width="304" height="62" rx="8" fill="#191C24"/>
+    <circle cx="141" cy="151" r="23" fill="#3f5b8a"/><text x="141" y="157" text-anchor="middle" font-size="16" font-weight="600" fill="#fff">PN</text>
+    <circle cx="157" cy="167" r="7" fill="#14161D"/><circle cx="157" cy="167" r="4" fill="#3FB950"/>
+    <text x="178" y="146" font-size="14.5" font-weight="600" fill="#E7E9ED">Priya Nair</text>
+    <text x="380" y="145" text-anchor="end" class="mono" font-size="11.5" fill="#6B717E">2:41</text>
+    <text x="178" y="166" font-size="13" fill="#9BA1AD">Sounds good — calling you now.</text>
+
+    <!-- Alex (in session) -->
+    <circle cx="141" cy="219" r="23" fill="#7a5c3a"/><text x="141" y="225" text-anchor="middle" font-size="16" font-weight="600" fill="#fff">AR</text>
+    <rect x="150" y="228" width="12" height="10" rx="2" fill="#FF6B35"/><rect x="150" y="228" width="12" height="10" rx="2" fill="none" stroke="#14161D" stroke-width="2"/>
+    <text x="178" y="214" font-size="14.5" font-weight="500" fill="#E7E9ED">Alex Rivera</text>
+    <text x="380" y="213" text-anchor="end" class="mono" font-size="11.5" fill="#6B717E">2:33</text>
+    <text x="178" y="234" font-size="13" font-weight="500" fill="#FF6B35">Screen shared with you</text>
+
+    <!-- Devon (away, unread) -->
+    <circle cx="141" cy="287" r="23" fill="#4a6b57"/><text x="141" y="293" text-anchor="middle" font-size="16" font-weight="600" fill="#fff">DC</text>
+    <circle cx="157" cy="303" r="7" fill="#14161D"/><circle cx="157" cy="303" r="4.5" fill="none" stroke="#C9CDD6" stroke-width="2"/>
+    <text x="178" y="282" font-size="14.5" font-weight="500" fill="#E7E9ED">Devon Cole</text>
+    <text x="380" y="281" text-anchor="end" class="mono" font-size="11.5" fill="#6B717E">1:12</text>
+    <text x="178" y="302" font-size="13" fill="#9BA1AD">Let's sync after lunch?</text>
+    <circle cx="386" cy="298" r="9.5" fill="#6E79D6"/><text x="386" y="302" text-anchor="middle" font-size="11" font-weight="600" fill="#eef0fc">2</text>
+
+    <!-- Marcus (dnd) -->
+    <circle cx="141" cy="355" r="23" fill="#6b4a63"/><text x="141" y="361" text-anchor="middle" font-size="16" font-weight="600" fill="#fff">MB</text>
+    <circle cx="157" cy="371" r="7" fill="#14161D"/><circle cx="157" cy="371" r="4.5" fill="#E5484D"/><rect x="154.5" y="369.5" width="5" height="3" rx="1" fill="#14161D"/>
+    <text x="178" y="350" font-size="14.5" font-weight="500" fill="#E7E9ED">Marcus Bell</text>
+    <text x="178" y="370" font-size="13" fill="#9BA1AD">You: shipped the token pass</text>
+
+    <!-- main pane -->
+    <rect x="416" y="0" width="984" height="933" fill="#0A0B0F"/>
+    <!-- top bar -->
+    <line x1="416" y1="72" x2="1400" y2="72" stroke="#1C2029"/>
+    <circle cx="452" cy="36" r="16" fill="#3f5b8a"/><text x="452" y="41" text-anchor="middle" font-size="12" font-weight="600" fill="#fff">PN</text>
+    <circle cx="464" cy="47" r="5.5" fill="#0A0B0F"/><circle cx="464" cy="47" r="3" fill="#3FB950"/>
+    <text x="480" y="33" font-size="15" font-weight="600" fill="#E7E9ED">Priya Nair</text>
+    <text x="480" y="50" font-size="12" fill="#3FB950">Active now</text>
+    <!-- actions: call, video, screen, info -->
+    <g fill="none" stroke="#9BA1AD" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M1230 28h4l2 5-3 2a12 12 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 1228 30a2 2 0 0 1 2-2z"/>
+      <path d="M1297 29l-7 5 7 5V29z"/><rect x="1275" y="27" width="15" height="14" rx="2"/>
+      <rect x="1322" y="28" width="20" height="13" rx="2"/><path d="M1328 45h8M1332 41v4"/>
+    </g>
+    <circle cx="1287" cy="34" r="21" fill="#6E79D6" opacity="0.14"/>
+
+    <!-- conversation thread -->
+    <text x="700" y="120" text-anchor="middle" font-size="11" fill="#6B717E">Today</text>
+    <line x1="480" y1="116" x2="672" y2="116" stroke="#1C2029"/><line x1="728" y1="116" x2="1336" y2="116" stroke="#1C2029"/>
+
+    <!-- them bubble -->
+    <circle cx="500" cy="170" r="20" fill="#3f5b8a"/><text x="500" y="175" text-anchor="middle" font-size="14" font-weight="600" fill="#fff">PN</text>
+    <text x="532" y="158" font-size="13" font-weight="600" fill="#E7E9ED">Priya Nair<tspan dx="8" font-weight="400" fill="#6B717E">2:38 PM</tspan></text>
+    <rect x="532" y="168" width="440" height="40" rx="10" fill="#191C24"/>
+    <text x="548" y="193" font-size="14" fill="#E7E9ED">Did the reconnect fix land? I want to test the WiFi-blip resume.</text>
+
+    <!-- me bubble -->
+    <rect x="720" y="230" width="616" height="60" rx="10" fill="#20242E"/>
+    <text x="736" y="255" font-size="14" fill="#E7E9ED">Yep, merged this morning. Sharing now — you should</text>
+    <text x="736" y="276" font-size="14" fill="#E7E9ED">see the reconnect fire in about ten seconds.</text>
+
+    <!-- them bubble w/ reaction -->
+    <circle cx="500" cy="330" r="20" fill="#3f5b8a"/><text x="500" y="335" text-anchor="middle" font-size="14" font-weight="600" fill="#fff">PN</text>
+    <rect x="532" y="318" width="300" height="40" rx="10" fill="#191C24"/>
+    <text x="548" y="343" font-size="14" fill="#E7E9ED">Perfect. Sounds good — calling you now.</text>
+    <rect x="532" y="366" width="52" height="24" rx="12" fill="#6E79D6" opacity="0.16"/><rect x="532" y="366" width="52" height="24" rx="12" fill="none" stroke="#6E79D6"/>
+    <text x="558" y="382" text-anchor="middle" font-size="12" fill="#8f97e0">👍 3</text>
+
+    <!-- composer -->
+    <rect x="480" y="853" width="856" height="46" rx="12" fill="#14161D" stroke="#262A34"/>
+    <text x="516" y="881" font-size="14" fill="#6B717E">Message Priya…</text>
+    <circle cx="1302" cy="876" r="17" fill="#6E79D6"/>
+    <g fill="none" stroke="#eef0fc" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M1308 870l-7 8"/><path d="M1308 870l-4 13-3-6-6-2z"/></g>
+
+    <!-- incoming call chip (floating, top-right) -->
+    <rect x="1140" y="120" width="230" height="92" rx="14" fill="#14161D" stroke="#262A34"/>
+    <circle cx="1180" cy="158" r="22" fill="#3f5b8a"/><text x="1180" y="164" text-anchor="middle" font-size="15" font-weight="600" fill="#fff">PN</text>
+    <text x="1214" y="150" font-size="14" font-weight="600" fill="#E7E9ED">Priya Nair</text>
+    <text x="1214" y="169" font-size="11.5" fill="#9BA1AD">Incoming video call…</text>
+    <circle cx="1214" cy="190" r="15" fill="#3FB950"/>
+    <g fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1209 185h2l1 2.5-1.5 1a6 6 0 0 0 2.5 2.5l1-1.5 2.5 1v2a1 1 0 0 1-1 1 8 8 0 0 1-7-7 1 1 0 0 1 1-1z"/></g>
+    <circle cx="1256" cy="190" r="15" fill="#6E79D6"/>
+    <g fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1262 186l-4 3 4 3v-6z"/><rect x="1249" y="185" width="9" height="8" rx="1.5"/></g>
+    <circle cx="1298" cy="190" r="15" fill="#E5484D"/>
+    <g stroke="#fff" stroke-width="1.9" stroke-linecap="round"><path d="M1293 185l10 10M1303 185l-10 10"/></g>
+  </g>
+</svg>

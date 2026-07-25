@@ -4,10 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Casual RAS — Embeddable remote support inside your own product</title>
+    <title>Casual RAS — Contacts, calls, and secure remote access in one app</title>
     <meta
       name="description"
-      content="Casual RAS is an embeddable remote-access engine: consent-based screen viewing and collaborative remote pointers, under your own brand, workflow and authorization model. Peer-to-peer over Iroh/QUIC. Rust + Tauri. Apache-2.0, open source."
+      content="Casual RAS is a contacts-first collaboration app with secure remote access built in: keep contacts, see presence, message, call (voice/video), and view or control each other's screen — peer-to-peer, consent-first. The same core is white-label and embeddable. Rust + Tauri, Iroh/QUIC. Apache-2.0, open source."
     />
     <meta name="keywords" content="embeddable remote access, white-label remote desktop SDK, in-app remote support, screen sharing, peer-to-peer, Iroh, QUIC, Rust, Tauri, WebCodecs" />
     <meta name="author" content="Casual RAS" />
@@ -21,16 +21,16 @@
 
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Casual RAS" />
-    <meta property="og:title" content="Casual RAS — Embeddable remote support inside your own product" />
-    <meta property="og:description" content="Add consent-based screen viewing and collaborative remote pointers to your app — under your own brand and workflow. Peer-to-peer over Iroh/QUIC. Rust + Tauri. Apache-2.0." />
+    <meta property="og:title" content="Casual RAS — Contacts, calls, and secure remote access in one app" />
+    <meta property="og:description" content="A contacts-first collaboration app: presence, messaging, voice/video calls, and consent-based screen share and control — peer-to-peer over Iroh/QUIC. Also white-label and embeddable. Rust + Tauri. Apache-2.0." />
     <meta property="og:url" content="https://ras.casualoffice.org/" />
     <meta property="og:image" content="https://ras.casualoffice.org/assets/og-cover.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
 
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Casual RAS — Embeddable remote support inside your product" />
-    <meta name="twitter:description" content="Consent-based remote screen viewing you embed in your own app. Peer-to-peer over Iroh/QUIC. Rust + Tauri. Apache-2.0." />
+    <meta name="twitter:title" content="Casual RAS — Contacts, calls, and secure remote access in one app" />
+    <meta name="twitter:description" content="Contacts-first: presence, messaging, voice/video calls, and consent-based screen share and control. Peer-to-peer over Iroh/QUIC. Rust + Tauri. Apache-2.0." />
     <meta name="twitter:image" content="https://ras.casualoffice.org/assets/og-cover.png" />
 
     <link rel="stylesheet" href="styles.css" />
@@ -41,9 +41,10 @@
         "@graph": [
           { "@type": "Organization", "@id": "https://ras.casualoffice.org/#org", "name": "Casual RAS", "url": "https://ras.casualoffice.org/", "logo": "https://ras.casualoffice.org/assets/icon-1024.png", "sameAs": ["https://github.com/CasualOffice/RASystem"] },
           { "@type": "WebSite", "@id": "https://ras.casualoffice.org/#site", "url": "https://ras.casualoffice.org/", "name": "Casual RAS", "publisher": { "@id": "https://ras.casualoffice.org/#org" } },
-          { "@type": "SoftwareApplication", "name": "Casual RAS", "applicationCategory": "DeveloperApplication", "operatingSystem": "macOS, Linux, Windows", "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }, "license": "https://www.apache.org/licenses/LICENSE-2.0", "softwareVersion": "alpha", "description": "An embeddable remote-access engine for consent-based screen viewing and collaborative remote pointers, peer-to-peer over Iroh/QUIC, with a Rust core and Tauri apps.", "url": "https://github.com/CasualOffice/RASystem" },
+          { "@type": "SoftwareApplication", "name": "Casual RAS", "applicationCategory": "CommunicationApplication", "operatingSystem": "macOS, Linux, Windows", "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }, "license": "https://www.apache.org/licenses/LICENSE-2.0", "softwareVersion": "alpha", "description": "A contacts-first collaboration app with secure remote access built in: contacts, presence, messaging, voice/video calls, and consent-based screen viewing and control, peer-to-peer over Iroh/QUIC, with a Rust core and Tauri apps. The same core is white-label and embeddable.", "url": "https://github.com/CasualOffice/RASystem" },
           { "@type": "FAQPage", "mainEntity": [
-            { "@type": "Question", "name": "What is Casual RAS?", "acceptedAnswer": { "@type": "Answer", "text": "Casual RAS is an embeddable remote-access engine. Software vendors embed it into their own apps to add consent-based screen viewing and collaborative remote pointers under their own brand, workflow and authorization model, without sending users to a separate remote-desktop product. Transport is peer-to-peer over Iroh/QUIC." } },
+            { "@type": "Question", "name": "What is Casual RAS?", "acceptedAnswer": { "@type": "Answer", "text": "Casual RAS is a contacts-first collaboration app with secure remote access at its core: you keep a contact list with presence, message people, call them (voice/video), and view or control each other's screen with the local user always the final authority. Transport is peer-to-peer over Iroh/QUIC. The same proven core is white-label and embeddable into other products." } },
+            { "@type": "Question", "name": "Does it do voice and video calls?", "acceptedAnswer": { "@type": "Answer", "text": "Calling is being built bottom-up. The security foundation has landed and is fully tested off-device — the pure call state machine, the deny-by-default microphone and camera capabilities, the signed out-of-session ring signal, and the in-session call control messages. What remains is OS microphone/camera capture and the call UI, so there is no on-device calling yet. Calls are consent-gated and, like all media, live-only and never recorded." } },
             { "@type": "Question", "name": "Does it need a server?", "acceptedAnswer": { "@type": "Answer", "text": "No application backend is required for the MVP. Direct peer-to-peer connections are preferred; when direct connectivity is unavailable, an encrypted relay fallback carries the traffic. There is no central application server in the middle." } },
             { "@type": "Question", "name": "How does consent work?", "acceptedAnswer": { "@type": "Answer", "text": "The local user is the final owner of the machine. A connecting viewer is held in the handshake — no pixels are sent — until the local user clicks Allow. Deny, or 90 seconds of silence, refuses the session fail-closed. A viewer requests access; it never self-authorizes." } },
             { "@type": "Question", "name": "Can a viewer control my keyboard and mouse?", "acceptedAnswer": { "@type": "Answer", "text": "Yes — full remote keyboard and mouse control is implemented on macOS, Linux and Windows, always behind explicit local consent and a per-message capability check the host enforces (the controller never self-authorizes). It is in on-device verification. The independently verified path today is view-only plus a visual remote pointer." } },
@@ -116,10 +117,11 @@
         <div class="wrap hero-grid">
           <div class="hero-copy">
             <p class="eyebrow">Alpha · Open source · Apache-2.0</p>
-            <h1 id="hero-title">Add secure remote support directly inside your product.</h1>
+            <h1 id="hero-title">Your contacts, your calls, their screen — one secure app.</h1>
             <p class="lead">
-              Casual RAS is an embeddable remote-access engine for consent-based screen viewing and
-              collaborative remote pointers — under your own brand, workflow and authorization model.
+              Casual RAS keeps a real contact list with presence and messaging, lets you call people
+              (voice/video), and — when they ask or you offer — view or control each other's screen.
+              Peer-to-peer, consent-first. The same core is white-label and embeddable in your own product.
             </p>
             <div class="hero-cta">
               <a class="btn btn-primary" href="https://github.com/CasualOffice/RASystem" rel="noopener">
@@ -127,12 +129,12 @@
               </a>
               <a class="btn btn-ghost" href="#get">Build the alpha</a>
             </div>
-            <p class="hero-meta">macOS sharing · Cross-platform viewing · Rust · Tauri · Iroh/QUIC</p>
+            <p class="hero-meta">Contacts · Presence · Messaging · Calls · Screen share &amp; control · Rust · Tauri · Iroh/QUIC</p>
           </div>
           <div class="hero-visual">
             <figure class="shot">
-              <img src="assets/app-home.png" width="1400" height="933" alt="The Casual RAS app home screen with two choices: Share this screen, and Connect to a screen." loading="eager" />
-              <figcaption>The app — one window to share or to view.</figcaption>
+              <img src="assets/app-shell.svg" width="1400" height="933" alt="The Casual RAS contacts-first desktop app: a navigation rail, a contact list with presence dots, an open conversation with a call and share-screen action in the top bar, and an incoming video call." loading="eager" />
+              <figcaption>One app — contacts, presence, messages, calls, and screen share.</figcaption>
             </figure>
           </div>
         </div>
@@ -401,6 +403,18 @@ cargo run</code></pre>
           <details>
             <summary>Dependency &amp; license policy</summary>
             <div>Apache-2.0 across the whole repository, including a patent grant, so it is safe to embed in proprietary applications. Copyleft licenses (GPL/LGPL/AGPL/SSPL) are rejected and blocked at build time by an automated license gate; permissive licenses (MIT/Apache/BSD/ISC/Zlib/MPL-2.0) are allowed.</div>
+          </details>
+          <details>
+            <summary>Is it a contacts app or an embeddable SDK?</summary>
+            <div>Both, from one core. The app is contacts-first: a real contact list with presence, messaging, calls, and screen share/control — so a "can you see my screen?" moment doesn't mean launching a second product. The same proven Rust core is white-label and embeddable, so a vendor can drop the remote-access engine into their own app under their own brand. App-first, SDK-extracted-later.</div>
+          </details>
+          <details>
+            <summary>Does it do voice/video calls?</summary>
+            <div>It's being built. The security foundation has landed and is fully tested off-device: the pure call state machine, the two deny-by-default microphone/camera capabilities, the signed out-of-session "ring" signal, and the in-session call control messages. What's left is the OS microphone/camera capture and the call UI — no on-device calling yet. Calls are consent-gated and, like all media here, live-only and never recorded.</div>
+          </details>
+          <details>
+            <summary>How do contacts and presence work?</summary>
+            <div>You add a contact by their invite code, then see when they're online and message them — signed and contacts-only, so a stranger or blocked peer is dropped before anything is read. A contact asking to view your screen is a request that raises the same local consent card; it never self-authorizes. This is wired to the live backend; two-machine on-device verification is pending.</div>
           </details>
           <details>
             <summary>Does it need a server?</summary>

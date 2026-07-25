@@ -1,13 +1,15 @@
 # Casual RAS
 
-**Casual RAS** is a white-label, embeddable remote-access platform. Software vendors embed it into
-their own applications to add secure **screen viewing, a remote pointer, multi-user collaboration,
-and — later — approved support actions**, natively and under their own brand, without sending users
-to a separate remote-desktop product.
+**Casual RAS** is a **contacts-first collaboration app** with **secure remote access** at its core —
+you keep a list of people, see who's online, message them, **call** them (voice/video), and, when they
+ask or you offer, **view or control each other's screen** — all peer-to-peer, with the local user
+always the final authority. The same proven core is **white-label and embeddable**: software vendors
+drop it into their own product to add consent-based screen sharing and remote support under their own
+brand, without sending users to a separate remote-desktop tool.
 
-It is not a standalone remote-desktop app. The deliverables are a shared **Rust core**, a unified
-desktop **application** that plays both roles (share and connect), and — later — **SDKs** extracted
-from the proven core.
+The deliverables are a shared **Rust core**, a unified desktop **application** (the contacts-first
+shell — contacts, messaging, presence, calls, share/connect), and — later — **SDKs** extracted from the
+proven core.
 
 <p>
   <a href="https://github.com/CasualOffice/RASystem/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/CasualOffice/RASystem/actions/workflows/ci.yml/badge.svg"></a>
@@ -28,13 +30,18 @@ from the proven core.
 The **security core and the full remote-access feature set are implemented at the code level**
 (CI-green; unit-, property-, fuzz-, and loopback-tested) — signed authorization, per-message
 capability enforcement, remote keyboard/mouse control on all three OSes, clipboard, file transfer,
-audio, chat, cursor, and multi-monitor. The current focus is **production maturity**: on-device
-verification on Linux/Windows, session reconnection, and signed distribution. We grade candidly on
-*production behavior*, not "compiles + loopback-green" — the honest gap list is the
+audio, chat, cursor, and multi-monitor. On top of that, the **contacts-first shell** (contacts,
+presence, out-of-session messaging) is wired to the live backend, and **1:1 calling** is being built
+bottom-up (the pure state machine + capabilities + wire have landed; OS mic/camera capture is next).
+The current focus is **production maturity**: on-device verification on Linux/Windows, session
+reconnection, and signed distribution. We grade candidly on *production behavior*, not "compiles +
+loopback-green" — the honest gap list is the
 [production-readiness backlog](docs/21_PRODUCTION_READINESS_BACKLOG.md).
 
 | Capability | State |
 |---|---|
+| Contacts · presence · out-of-session messaging | **Wired to the live backend** — signed, contacts-only signaling (`ras-signal`) + a durable contact book; add/remove/block, online presence, and text messages that deliver when a contact is online. On-device two-machine verification pending |
+| 1:1 voice/video calling | **Being built bottom-up** — the pure call state machine (`ras-call`), the two deny-by-default mic/camera capabilities, the signed ring signal, and the in-session call control messages have landed (unit/fuzz-green). OS mic/camera capture + the call UI are next; no on-device calling yet |
 | Connect / view another machine | macOS · Linux · Windows (decode-only, ships everywhere) |
 | Share this screen — macOS | Hardware (ScreenCaptureKit + VideoToolbox) — **on-device verified** |
 | Share this screen — Linux · Windows | Implemented (PipeWire / Windows.Graphics.Capture → OpenH264); **on-device runtime verification pending** (Windows needs hardware the team lacks) |
@@ -59,8 +66,15 @@ decision rule enforced throughout the design, not a slogan ([`CLAUDE.md §2`](CL
 
 ## What makes it different
 
-- **Embeddable and white-label** — a small core to embed, not a separate product your users are sent
-  to. Your UI, your flow, your support workflow.
+- **Contacts-first, not ticket-first** — most remote tools start with a 9-digit code you read aloud.
+  Casual RAS starts with **people**: a contact list with real presence, messaging, and calls, where
+  "view my screen" is one action next to "call" — the ticket/link flow still exists for one-off
+  support, but the everyday path is a saved contact. Screen access from a contact is a *request* that
+  raises the same local consent card; it never self-authorizes ([`docs/25`](docs/25_UI_DESIGN_DIRECTION.md)).
+- **One app for talk + screen** — presence, chat, voice/video calls, and remote view/control live in a
+  single desktop shell, so a "can you see my screen?" moment doesn't mean launching a second product.
+- **Embeddable and white-label** — the same core embeds into your own product, not a separate tool your
+  users are sent to. Your UI, your flow, your support workflow.
 - **Peer-to-peer over iroh/QUIC** — encrypted, NAT-traversing, with an encrypted relay fallback. No
   application backend is required for the MVP; a connection ticket carries the host's identity and
   addresses so the viewer dials directly.
@@ -95,7 +109,7 @@ Download an installer from [Releases](https://github.com/CasualOffice/RASystem/r
 
 ```bash
 cd app/src-tauri
-cargo run          # opens the unified app: "Share this screen" or "Connect to a screen"
+cargo run          # opens the contacts-first shell — add contacts, message, and share/connect a screen
 ```
 
 **Two-machine flow.** On the sharing machine choose **Share this screen**, copy the `CASUALRAS1:…`
@@ -143,7 +157,9 @@ crates/                 # shared Rust core (the future SDK internals)
   ras-transport-iroh/   # concrete iroh endpoint: control + per-frame video + audio + health planes
   ras-core/             # session state machine + orchestrators + ABR + frame codec + iroh adapter
   ras-host/             # headless host CLI (no-GUI share)
-  ras-identity/         # Ed25519 identities · KeyStore seam · paired-controller registry
+  ras-identity/         # Ed25519 identities · KeyStore seam · contact book · paired-controller registry
+  ras-signal/           # signed, contacts-only signaling (presence · messages · access/call intents)
+  ras-call/             # pure 1:1 call state machine + manager (ADR-103/104) — spine of calling
   ras-bootstrap/        # rotating single-use connection tickets + replay/nonce cache
   ras-grant/            # signed access requests · PASETO v4.public grants · unattended-access model
   ras-policy/           # capability intersection · signed-catalogue file push
