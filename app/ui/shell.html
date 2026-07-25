@@ -79,10 +79,17 @@
     <!-- live remote session overlay (controller pov, inside main) -->
     <div class="session" id="session">
       <div class="desk">
-        <div class="menubar"><b style="font-weight:600">Finder</b><span>File</span><span>Edit</span><span>View</span><span style="margin-left:auto" class="mono">2:14 PM</span></div>
-        <div class="win" style="left:60px;top:70px;width:340px;height:200px"><div class="wt"><i></i><i></i><i></i><span style="color:#aeb4c0;font-size:11px;margin-left:6px">app.rs — ras-core</span></div></div>
-        <div class="win" style="right:70px;top:120px;width:300px;height:170px"><div class="wt"><i></i><i></i><i></i><span style="color:#aeb4c0;font-size:11px;margin-left:6px">Terminal</span></div></div>
-        <svg class="osc" style="left:300px;top:200px" viewBox="0 0 16 22" fill="#f4f5f8" stroke="#0b0d13" stroke-width="1"><path d="M1 1l13 9-5.5 1.2L11 18l-2.5 1-2.6-6L1 15z"/></svg>
+        <!-- real remote screen (WebCodecs → canvas); shown when a live viewer session is up -->
+        <canvas class="viewcanvas" id="viewCanvas" hidden></canvas>
+        <div class="sesshud mono" id="sessHud" hidden></div>
+        <div class="sessfatal" id="sessFatal" hidden></div>
+        <!-- demo desktop (design preview only; hidden in a live session) -->
+        <div class="deskdemo" id="deskdemo">
+          <div class="menubar"><b style="font-weight:600">Finder</b><span>File</span><span>Edit</span><span>View</span><span style="margin-left:auto" class="mono">2:14 PM</span></div>
+          <div class="win" style="left:60px;top:70px;width:340px;height:200px"><div class="wt"><i></i><i></i><i></i><span style="color:#aeb4c0;font-size:11px;margin-left:6px">app.rs — ras-core</span></div></div>
+          <div class="win" style="right:70px;top:120px;width:300px;height:170px"><div class="wt"><i></i><i></i><i></i><span style="color:#aeb4c0;font-size:11px;margin-left:6px">Terminal</span></div></div>
+          <svg class="osc" style="left:300px;top:200px" viewBox="0 0 16 22" fill="#f4f5f8" stroke="#0b0d13" stroke-width="1"><path d="M1 1l13 9-5.5 1.2L11 18l-2.5 1-2.6-6L1 15z"/></svg>
+        </div>
         <div class="sesstoolbar">
           <button class="sb" title="Switch display"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/></svg>Display 1</button>
           <span class="sep"></span>
@@ -182,6 +189,7 @@
 <div class="scrim" id="scrim"></div>
 <div class="toast" id="toast"><span class="td"></span><span id="toasttx">Ready</span></div>
 <div class="hint">Click a <b>contact</b> · the <b>call</b> / <b>screen</b> icons in the top bar drive the real flows · <b>Esc</b> closes overlays</div>
+<script src="viewer.js"></script>
 <script src="shell.js"></script>
 </body>
 </html>

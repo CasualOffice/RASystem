@@ -13,9 +13,11 @@
       {
         "label": "main",
         "title": "Casual RAS",
-        "url": "index.html",
+        "url": "shell.html",
         "width": 1280,
         "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
         "resizable": true
       },
       {
