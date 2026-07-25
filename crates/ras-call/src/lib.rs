@@ -23,6 +23,10 @@
 
 #![forbid(unsafe_code)]
 
+/// The stateful call manager over the pure FSM (one-active-call, media downgrade, mute, emergency stop).
+pub mod manager;
+pub use manager::{CallError, CallManager, InviteResponse, MuteState};
+
 use ras_protocol::ErrorCode;
 
 /// The media a call carries. Re-exported from `ras-protocol` as the single canonical media-kind type

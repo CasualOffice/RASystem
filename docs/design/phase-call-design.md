@@ -30,7 +30,8 @@ Each layer is a separate, reviewable PR; each is testable before the next exists
 | L1 | **Pure call FSM** — `CallState`/`CallEvent`/`transition`, total, fail-closed, terminal-once, clock-injected | `ras-call` (new) | ✅ unit | **landed** |
 | L2 | **Signal wire (ring)** — `SignalPayload::CallInvite`/`CallCancel` (out-of-session, signed, contacts-only, replay-guarded) + the canonical `CallMediaKind` (in `ras-protocol`, shared with L3) | `ras-signal`, `ras-protocol` | ✅ unit/fuzz | **landed** |
 | L3 | **In-session control wire** — `ControlMsg::CallAccept`/`CallReject`/`CallBusy`/`CallHangup`/`CallMuteState` (bounded fail-closed codec) reusing L2's `CallMediaKind` | `ras-protocol` | ✅ unit/fuzz | **landed** |
-| L4 | **Orchestration** — call manager in `ras-core`: drive the FSM from signals/control, one-active-call, per-message mic/camera gate, emergency-stop tear-down, content-free lifecycle/audit events | `ras-core` | ✅ loopback | pending |
+| L4a | **Pure call manager** — `CallManager` over the FSM: one-active-call, media downgrade, mute tracking, emergency-stop-overrides. Pure/stateful (no async/media) — the "brain" L4b + L6 drive | `ras-call` | ✅ unit | **landed** |
+| L4b | **Runtime wiring** — drive `CallManager` from real signals/control in `ras-core`; content-free lifecycle/audit events; per-message mic/camera gate at the media boundary (lands with L5) | `ras-core` | ✅ loopback | pending |
 | L5 | **Media backends** — `AudioCaptureBackend` mic impls + new `CameraCaptureBackend`; reuse Opus (audio) + `VideoEncoderBackend`/`PerFrameStream` (camera) verbatim | `ras-mic-{macos,windows,linux}`, `ras-camera-{…}` | ⚠️ on-device | pending |
 | L6 | **App/shell** — real ring signal, incoming-call window, in-call stage, PiP, mute/camera toggles, ringtone; replace the current designed previews | `app/` | ⚠️ on-device | pending |
 
