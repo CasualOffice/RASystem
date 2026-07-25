@@ -169,6 +169,45 @@ impl core::fmt::Display for ErrorCode {
     }
 }
 
+/// Which media a 1:1 call carries (ADR-103/104). The single canonical media-kind type shared by both
+/// call planes — the out-of-session ring signal (`ras-signal` `CallInvite`) and the in-session control
+/// messages (`ControlMsg::Call*`) — so they never drift. Content-free (a tag, never a sample/pixel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CallMediaKind {
+    /// Microphone audio only (`audio.mic.capture`).
+    Voice,
+    /// Microphone audio + camera video (`audio.mic.capture` + `video.camera.capture`).
+    Video,
+}
+
+impl CallMediaKind {
+    /// Whether this call carries camera video.
+    #[must_use]
+    pub const fn has_video(self) -> bool {
+        matches!(self, CallMediaKind::Video)
+    }
+
+    /// Stable wire byte (canonical signal encoding + protobuf enum mapping). Never renumber.
+    #[must_use]
+    pub const fn to_u8(self) -> u8 {
+        match self {
+            CallMediaKind::Voice => 1,
+            CallMediaKind::Video => 2,
+        }
+    }
+
+    /// Parse a wire byte; unknown values fail closed (`None`), so a malformed/future kind is dropped.
+    #[must_use]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            1 => Some(CallMediaKind::Voice),
+            2 => Some(CallMediaKind::Video),
+            _ => None,
+        }
+    }
+}
+
 /// The one canonical error struct; every crate aliases it (`MediaError`, `TransportError`,
 /// `CoreError`, `SessionError`) so `?` needs no `From` impls.
 ///

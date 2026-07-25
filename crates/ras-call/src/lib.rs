@@ -25,24 +25,10 @@
 
 use ras_protocol::ErrorCode;
 
-/// Which media a call carries. Voice is mic-only; Video adds the camera. Metadata for the consent
-/// prompt and the capability set the caller requests — the lifecycle FSM does not branch on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CallMedia {
-    /// Microphone audio only (`audio.mic.capture`).
-    Voice,
-    /// Microphone audio + camera video (`audio.mic.capture` + `video.camera.capture`).
-    Video,
-}
-
-impl CallMedia {
-    /// Whether this call carries camera video.
-    #[must_use]
-    pub const fn has_video(self) -> bool {
-        matches!(self, CallMedia::Video)
-    }
-}
+/// The media a call carries. Re-exported from `ras-protocol` as the single canonical media-kind type
+/// shared by both call planes (the ring signal and the in-session control messages), so the FSM, the
+/// wire, and the consent prompt never drift. The lifecycle FSM does not branch on it.
+pub use ras_protocol::CallMediaKind as CallMedia;
 
 /// The lifecycle of a single 1:1 call. Direction is implicit in the entry state: an outbound call we
 /// place enters [`CallState::Dialing`]; an inbound invite we receive enters [`CallState::Ringing`].

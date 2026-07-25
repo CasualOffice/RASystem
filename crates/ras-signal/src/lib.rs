@@ -18,7 +18,7 @@
 //! can never leak typed text to a log/trace.
 
 use ras_identity::{ContactBook, ContactId, KeyStore, PUBLIC_KEY_LEN, SIGNATURE_LEN};
-use ras_protocol::{ErrorCode, RasError, Redacted};
+use ras_protocol::{CallMediaKind, ErrorCode, RasError, Redacted};
 
 pub mod net;
 pub mod presence;
@@ -38,6 +38,8 @@ pub const MAX_SIGNAL_REASON: usize = 256;
 const TAG_BEACON: u8 = 1;
 const TAG_MESSAGE: u8 = 2;
 const TAG_INTENT: u8 = 3;
+const TAG_CALL_INVITE: u8 = 4;
+const TAG_CALL_CANCEL: u8 = 5;
 
 fn invalid() -> SignalError {
     RasError::fatal(ErrorCode::InvalidMessage, "malformed signal")
@@ -57,6 +59,18 @@ pub enum SignalPayload {
     /// receipt it raises a local consent prompt (Inv 1) and grants nothing. `reason` is a short human
     /// string shown in that prompt.
     AccessRequestIntent { issued_at: u64, reason: String },
+    /// Ring a contact for a 1:1 call (ADR-104). **Intent only, authorizes nothing** (Inv 9) — like
+    /// `AccessRequestIntent`, it raises a local incoming-call surface (Inv 1) and the callee's explicit
+    /// accept is what starts the media session. `media` says whether the caller is offering voice or
+    /// video; mic/camera are still separately capability-gated per-message host-side (ADR-103, Inv 15).
+    CallInvite {
+        issued_at: u64,
+        /// Voice or video (canonical `CallMediaKind`, shared with the in-session control plane).
+        media: CallMediaKind,
+    },
+    /// Withdraw a still-ringing call the caller placed (they hung up before the callee answered, when
+    /// there is no session channel yet to carry a `CallHangup`). Content-free.
+    CallCancel { issued_at: u64 },
 }
 
 impl core::fmt::Debug for SignalPayload {
@@ -77,6 +91,15 @@ impl core::fmt::Debug for SignalPayload {
                 .field("issued_at", issued_at)
                 .field("reason", reason)
                 .finish(),
+            Self::CallInvite { issued_at, media } => f
+                .debug_struct("CallInvite")
+                .field("issued_at", issued_at)
+                .field("media", media)
+                .finish(),
+            Self::CallCancel { issued_at } => f
+                .debug_struct("CallCancel")
+                .field("issued_at", issued_at)
+                .finish(),
         }
     }
 }
@@ -86,7 +109,9 @@ impl SignalPayload {
         match self {
             Self::PresenceBeacon { issued_at }
             | Self::DirectMessage { issued_at, .. }
-            | Self::AccessRequestIntent { issued_at, .. } => *issued_at,
+            | Self::AccessRequestIntent { issued_at, .. }
+            | Self::CallInvite { issued_at, .. }
+            | Self::CallCancel { issued_at } => *issued_at,
         }
     }
 
@@ -127,6 +152,15 @@ impl SignalPayload {
                 out.extend_from_slice(&issued_at.to_le_bytes());
                 put_str(&mut out, reason.as_bytes());
             }
+            Self::CallInvite { issued_at, media } => {
+                out.push(TAG_CALL_INVITE);
+                out.extend_from_slice(&issued_at.to_le_bytes());
+                out.push(media.to_u8());
+            }
+            Self::CallCancel { issued_at } => {
+                out.push(TAG_CALL_CANCEL);
+                out.extend_from_slice(&issued_at.to_le_bytes());
+            }
         }
         out
     }
@@ -162,6 +196,12 @@ impl SignalPayload {
                 issued_at,
                 reason: take_str(&mut p, MAX_SIGNAL_REASON)?,
             },
+            TAG_CALL_INVITE => Self::CallInvite {
+                issued_at,
+                // Fail-closed: an unknown media byte is a malformed signal, not a default kind.
+                media: CallMediaKind::from_u8(take(&mut p, 1)?[0]).ok_or_else(invalid)?,
+            },
+            TAG_CALL_CANCEL => Self::CallCancel { issued_at },
             _ => return Err(invalid()),
         };
         if p != bytes.len() {
@@ -361,6 +401,40 @@ mod tests {
             v.payload,
             SignalPayload::AccessRequestIntent { .. }
         ));
+    }
+
+    #[test]
+    fn call_signals_round_trip_signed_and_contacts_only() {
+        let ks = SoftwareKeyStore::generate().unwrap();
+        let book = book_with(&ks, false);
+        for media in [CallMediaKind::Voice, CallMediaKind::Video] {
+            let invite = SignalPayload::CallInvite {
+                issued_at: 500,
+                media,
+            };
+            let v =
+                verify_signed(&encode_signed(&ks, &invite).unwrap(), &book, 500, MAX_AGE).unwrap();
+            match v.payload {
+                SignalPayload::CallInvite { media: m, .. } => assert_eq!(m, media),
+                _ => panic!("wrong variant"),
+            }
+        }
+        let cancel = SignalPayload::CallCancel { issued_at: 500 };
+        let v = verify_signed(&encode_signed(&ks, &cancel).unwrap(), &book, 500, MAX_AGE).unwrap();
+        assert!(matches!(v.payload, SignalPayload::CallCancel { .. }));
+    }
+
+    #[test]
+    fn call_invite_with_unknown_media_byte_fails_closed() {
+        // A CallInvite whose media byte is neither 1 (Voice) nor 2 (Video) must be rejected, not
+        // silently defaulted — an unknown/future media kind is a malformed signal.
+        let mut canonical = SignalPayload::CallInvite {
+            issued_at: 7,
+            media: CallMediaKind::Voice,
+        }
+        .encode_canonical();
+        *canonical.last_mut().unwrap() = 9; // corrupt the trailing media byte
+        assert!(SignalPayload::decode_canonical(&canonical).is_err());
     }
 
     #[test]
