@@ -372,6 +372,10 @@ pub struct IrohCallTransport {
     video_source: std::sync::Mutex<Option<VideoSource>>,
     audio_sink: std::sync::Mutex<Option<IrohAudioSinkInner>>,
     audio_source: std::sync::Mutex<Option<IrohAudioSourceInner>>,
+    // One persistent health observer bound to the call connection, so the windowed-loss baseline
+    // survives across the camera ABR ticks. Behind a *sync* mutex so the non-async `health_snapshot`
+    // never blocks on I/O (the latency invariant) — the same posture as `IrohSessionTransport`.
+    health: std::sync::Mutex<HealthObserver>,
 }
 
 impl IrohCallTransport {
@@ -380,6 +384,7 @@ impl IrohCallTransport {
     #[must_use]
     pub fn new(endpoint: Arc<Endpoint>, session: Session) -> Self {
         let (vsink, vsrc, asink, asrc) = session.call_planes();
+        let health = session.health();
         Self {
             _endpoint: endpoint,
             session: tokio::sync::Mutex::new(session),
@@ -387,7 +392,18 @@ impl IrohCallTransport {
             video_source: std::sync::Mutex::new(Some(vsrc)),
             audio_sink: std::sync::Mutex::new(Some(asink)),
             audio_source: std::sync::Mutex::new(Some(asrc)),
+            health: std::sync::Mutex::new(health),
         }
+    }
+
+    /// A non-blocking snapshot of the call connection's health (rtt / estimated bandwidth / windowed
+    /// loss), for the camera ABR loop. Never awaits network I/O; advances the loss window per read.
+    #[must_use]
+    pub fn health_snapshot(&self) -> ConnHealth {
+        self.health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot()
     }
 }
 
