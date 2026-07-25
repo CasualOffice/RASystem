@@ -15,8 +15,10 @@ use ras_transport_iroh::ConnHealth;
 const LOSS_BACKOFF_THRESHOLD: f32 = 0.02;
 /// Multiplicative decrease applied when loss exceeds the threshold (AIMD-style).
 const BACKOFF_FACTOR: f32 = 0.8;
-/// Fraction of the estimated deliverable rate we allow ourselves to fill (headroom for pacing).
-const BANDWIDTH_UTILISATION: f32 = 0.9;
+/// Fraction of the estimated deliverable rate we allow ourselves to fill (headroom for pacing). `f64`
+/// (not `f32`) so the multiply below stays exact — an `f32` constant would bake in its own rounding
+/// (e.g. `0.9f32` is actually `0.899999976...`) before the deliverable-bandwidth multiply even runs.
+const BANDWIDTH_UTILISATION: f64 = 0.9;
 
 /// SVC layer-shedding thresholds, as a fraction of the SESSION ceiling (`self.ceiling_bps`, not the
 /// per-tick bandwidth-constrained one) that the current bandwidth-derived tick ceiling has fallen to.
@@ -76,8 +78,11 @@ impl AdaptiveBitrateController for LatencyFirstAbr {
         feedback: Option<DecoderFeedback>,
     ) -> BitrateDecision {
         // Ceiling for *this* tick: the smaller of the session ceiling and a fraction of what the
-        // path can actually deliver. `as` truncation is fine — bitrates are far below u32::MAX here.
-        let deliverable = (health.estimated_bandwidth_bps as f32 * BANDWIDTH_UTILISATION) as u32;
+        // path can actually deliver. The multiply runs in f64 (not f32) so values above f32's 24-bit
+        // mantissa (~16.7 Mbps) don't silently lose precision before the final truncating cast back to
+        // u32 — bitrates here are far below u32::MAX, so the cast itself is fine.
+        let deliverable =
+            (f64::from(health.estimated_bandwidth_bps) * BANDWIDTH_UTILISATION) as u32;
         let tick_ceiling = self.ceiling_bps.min(deliverable).max(self.floor_bps);
 
         if health.loss_fraction > LOSS_BACKOFF_THRESHOLD {

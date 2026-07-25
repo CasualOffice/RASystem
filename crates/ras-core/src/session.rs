@@ -793,13 +793,20 @@ where
         let ctrl_inner = inner.clone();
         let task = tokio::spawn(async move {
             host_control_loop(&mut control, &ctrl_inner, bye_rx, outbound_rx).await;
-            // Invariant 4 key-state cleanup on EVERY control-loop exit. Whatever ended the loop — a peer
-            // `Bye`, terminal transport loss, a stop, or a failed reconnect — flush any OS keys the
-            // controller left held. `stop()`/`emergency_stop()` cannot guarantee this: the Bye and
-            // transport-loss handlers set `inner.stop` *inside* the loop, so a later `stop()` early-returns
-            // on the `swap(true)` first-caller-wins guard before it reaches `release_input`. Flushing here
-            // covers every exit path by construction; it is idempotent with the flush those paths run.
+            // Invariant 4 key-state cleanup + resource teardown on EVERY control-loop exit. Whatever
+            // ended the loop — a peer `Bye`, terminal transport loss, a stop, or a failed reconnect —
+            // flush any OS keys the controller left held and reclaim the other per-session background
+            // tasks. `stop()`/`emergency_stop()` cannot guarantee any of this: the Bye and transport-loss
+            // handlers set `inner.stop` *inside* the loop, so a later `stop()`/`emergency_stop()`
+            // early-returns on the `swap(true)` first-caller-wins guard before it reaches its own
+            // teardown (release_input/join_audio/abort_cursor/abort_file_transfer). Running the same
+            // idempotent (`.take()`-guarded) teardown here covers every exit path by construction and is
+            // safe to race against `stop`/`emergency_stop` also running it — whichever gets there first
+            // does the work, the other finds the slot already empty.
             flush_input_sink(&ctrl_inner);
+            join_audio(&ctrl_inner);
+            abort_cursor(&ctrl_inner);
+            abort_file_transfer(&ctrl_inner);
         });
         *inner
             .control_task
@@ -1566,6 +1573,17 @@ struct ControlConsentResult {
     consented: CapabilitySet,
 }
 
+/// Result of an off-loop per-transfer file-consent prompt (mirrors [`ControlConsentResult`]),
+/// delivered back to the control loop for the post-consent open-sink-and-arm work. Carries everything
+/// [`host_finish_file_offer`] needs: the already host-resolved destination (never a controller path,
+/// content-free — never logged), the offered size, and whether the local user allowed it. `target`/
+/// `filename` aren't needed post-consent: `file_reject`/the accept path are both content-free.
+struct FileConsentResult {
+    dest: std::path::PathBuf,
+    size: u64,
+    allowed: bool,
+}
+
 async fn host_control_loop<C, E>(
     control: &mut Box<dyn ControlChannelDyn>,
     inner: &HostInner<C, E>,
@@ -1579,6 +1597,14 @@ async fn host_control_loop<C, E>(
     // request while one is pending is refused fail-closed rather than stacking prompts.
     let (consent_tx, mut consent_rx) = mpsc::channel::<ControlConsentResult>(1);
     let mut pending_consent = false;
+    // Off-loop file-consent channel (the same head-of-line fix, applied to `FileOffer`, ADR-086/090): a
+    // `FileOffer` spawns the (up-to-90 s) per-transfer local Allow/Deny prompt onto its own task and
+    // delivers the result here, so Input / KeyframeRequest / Bye / everything else keeps flowing while a
+    // file-consent prompt is pending. Depth 1 + `pending_file_consent` enforces the single-outstanding-
+    // prompt rule, mirroring `pending_consent` above — a second offer while one is pending is refused
+    // fail-closed rather than stacking prompts.
+    let (file_consent_tx, mut file_consent_rx) = mpsc::channel::<FileConsentResult>(1);
+    let mut pending_file_consent = false;
     loop {
         tokio::select! {
             // A local teardown asked us to notify the controller and exit. Emergency revoke uses
@@ -1638,6 +1664,18 @@ async fn host_control_loop<C, E>(
                             emit_lifecycle(inner, LifecycleEvent::ControlLeaseEnded { code });
                         }
                     }
+                }
+            },
+            // An off-loop file-consent prompt resolved (see the `FileOffer` arm). Do the post-consent
+            // open-sink-and-arm work ON the loop and send the wire reply — but only if a stop/teardown
+            // did NOT land while the prompt was pending (Inv 4, re-checked inside `host_finish_file_offer`).
+            // `None` = the consent task's sender dropped (teardown) → nothing to send. Clearing
+            // `pending_file_consent` re-arms the single-prompt slot.
+            res = file_consent_rx.recv() => {
+                pending_file_consent = false;
+                if let Some(result) = res {
+                    let reply = host_finish_file_offer(inner, result);
+                    if control.send(reply).await.is_err() { break; }
                 }
             },
             msg = control.recv() => match msg {
@@ -1735,16 +1773,42 @@ async fn host_control_loop<C, E>(
                 emit_lifecycle(inner, LifecycleEvent::ChatMessage { text });
             }
             // File push to a catalogued drop target (ADR-086, the danger channel). Authorize
-            // (catalogue + `file.push.<target>` cap + safe-leaf filename + size cap) then get per-transfer
-            // local consent (Inv 1); reply FileAccept or FileReject, audited. Never a controller path.
+            // (catalogue + `file.push.<target>` cap + safe-leaf filename + size cap) synchronously, then
+            // spawn the per-transfer local consent prompt (Inv 1) OFF the loop so it never head-of-line-
+            // blocks Input / KeyframeRequest / Bye / etc. (the same bug fix as `ControlRequest` above) —
+            // the result comes back on `file_consent_rx`; only THEN is the destination opened and the
+            // transfer armed. A synchronous pre-check failure (no catalogue, capability withheld, unsafe
+            // filename, oversized, a transfer already active) still replies immediately, exactly as before.
             Ok(ControlMsg::FileOffer {
                 target,
                 filename,
                 size,
             }) => {
-                let reply = host_handle_file_offer(inner, target, filename, size).await;
-                if control.send(reply).await.is_err() {
-                    break;
+                let refuse = if pending_file_consent {
+                    // Single-outstanding-prompt (mirrors Inv 5's one-lease-prompt rule): a second offer
+                    // while one is pending is refused fail-closed — never stack two 90 s prompts.
+                    Some(file_reject(inner, ErrorCode::InvalidMessage))
+                } else {
+                    match host_precheck_file_offer(inner, &target, &filename, size) {
+                        Ok((consent, dest)) => {
+                            let file_consent_tx = file_consent_tx.clone();
+                            tokio::spawn(async move {
+                                let allowed = consent.consent_to_file(&target, &filename, size).await;
+                                // Loop gone (teardown/abort) ⇒ drop the result; nothing is opened/armed.
+                                let _ = file_consent_tx
+                                    .send(FileConsentResult { dest, size, allowed })
+                                    .await;
+                            });
+                            pending_file_consent = true;
+                            None
+                        }
+                        Err(reject) => Some(reject),
+                    }
+                };
+                if let Some(reply) = refuse {
+                    if control.send(reply).await.is_err() {
+                        break;
+                    }
                 }
             }
             // A chunk / completion of an accepted transfer (ADR-090). Written to the host-resolved dest
@@ -1757,7 +1821,13 @@ async fn host_control_loop<C, E>(
             // as an ordinary close, never a privileged action (Invariants 1/15: never trust the
             // controller's claimed scope). Host-side revoke goes through `emergency_stop`.
             Ok(ControlMsg::Bye { .. }) => {
-                inner.stop.store(true, Ordering::SeqCst);
+                // First-caller-wins, same as `stop`/`emergency_stop`: if a local stop (in particular
+                // `emergency_stop`'s Revoke) already claimed `stop`, this arm must not also apply
+                // `PeerClosed` and emit a second, contradictory `SessionEnded` racing/after the real
+                // `SessionEnded{Revoked}`.
+                if inner.stop.swap(true, Ordering::SeqCst) {
+                    break;
+                }
                 apply(&inner.state, SessionEvent::PeerClosed);
                 if let Some(sink) = inner
                     .lifecycle
@@ -2086,24 +2156,26 @@ fn file_reject<C, E>(inner: &HostInner<C, E>, code: ErrorCode) -> ControlMsg {
     ControlMsg::FileReject { code }
 }
 
-/// Handle a controller `FileOffer` (ADR-086/090, the danger channel). Authorizes host-side against the
-/// vendor catalogue + the session grant (`file.push.<target>`, Inv 15 — never the peer's claim) + the
-/// safe-leaf filename validator (defeats the traversal/zip-slip CVE class) + the size cap; then gets
-/// **per-transfer local consent** (Inv 1); then opens the **host-resolved** destination on the write sink
-/// (`O_NOFOLLOW`, the symlink-follow defense) and arms the transfer. Returns the reply (`FileAccept` /
-/// `FileReject`), audited content-free. The filename/path never leave the host. Consent is awaited
-/// **outside** any lock.
-async fn host_handle_file_offer<C, E>(
+/// Pre-consent half of a controller `FileOffer` (ADR-086/090, the danger channel; fixes the
+/// consent-prompt head-of-line block the same way [`host_precheck_control_request`] /
+/// [`host_finish_control_request`] split `ControlRequest`). Synchronous: authorizes host-side against
+/// the vendor catalogue + the session grant (`file.push.<target>`, Inv 15 — never the peer's claim) +
+/// the safe-leaf filename validator (defeats the traversal/zip-slip CVE class) + the size cap, and
+/// checks the one-transfer-at-a-time rule. On success returns the cloned [`FileConsent`] handle and the
+/// host-resolved destination for the caller to await the (possibly up to 90 s) prompt **off the control
+/// loop**; on failure returns the reject reply directly (audited/surfaced here, exactly as before).
+fn host_precheck_file_offer<C, E>(
     inner: &HostInner<C, E>,
-    target: String,
-    filename: String,
+    target: &str,
+    filename: &str,
     size: u64,
-) -> ControlMsg {
+) -> Result<(Arc<dyn FileConsent>, std::path::PathBuf), ControlMsg> {
     // ⓪ a stopping session (emergency or graceful) must never begin a transfer — don't even prompt.
     if inner.stop.load(Ordering::SeqCst) {
-        return file_reject(inner, ErrorCode::SessionRevoked);
+        return Err(file_reject(inner, ErrorCode::SessionRevoked));
     }
-    // ① one transfer at a time. A second offer while one is in flight is an out-of-sequence protocol
+    // ① one transfer at a time. A second offer while one is in flight (or one prompt is already
+    // pending, guarded by the caller's `pending_file_consent`) is an out-of-sequence protocol
     // violation — refuse it fail-closed *before* authorize/consent, so it can neither prompt a wasted
     // consent nor overwrite the active-transfer state and orphan the first partial file on disk.
     if inner
@@ -2112,7 +2184,7 @@ async fn host_handle_file_offer<C, E>(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .is_some()
     {
-        return file_reject(inner, ErrorCode::InvalidMessage);
+        return Err(file_reject(inner, ErrorCode::InvalidMessage));
     }
     // ② authorize → the host-resolved destination path, or a reject code. No catalogue ⇒ no target.
     let resolved = {
@@ -2130,8 +2202,8 @@ async fn host_handle_file_offer<C, E>(
                 catalogue,
                 &granted,
                 &FilePushRequest {
-                    target: target.clone(),
-                    filename: filename.clone(),
+                    target: target.to_string(),
+                    filename: filename.to_string(),
                     size,
                 },
             )
@@ -2141,15 +2213,28 @@ async fn host_handle_file_offer<C, E>(
     };
     let dest = match resolved {
         Ok(d) => d,
-        Err(code) => return file_reject(inner, code),
+        Err(code) => return Err(file_reject(inner, code)),
     };
-    // ③ per-transfer local consent (Inv 1) — awaited outside any lock.
+    // ③ per-transfer local consent (Inv 1) — clone the Arc out of the lock; the caller awaits it off-loop.
     let consent = inner
         .file_consent
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    if !consent.consent_to_file(&target, &filename, size).await {
+    Ok((consent, dest))
+}
+
+/// Post-consent half of a `FileOffer` (mirrors [`host_finish_control_request`]): given the local user's
+/// decision, open the host-resolved destination on the write backend and arm the transfer, or reject.
+/// Runs on the control loop once the off-loop consent prompt resolves — the `stop` re-check below is
+/// the Inv-4 backstop for a stop/teardown that landed *during* the (possibly up to 90 s) prompt.
+fn host_finish_file_offer<C, E>(inner: &HostInner<C, E>, res: FileConsentResult) -> ControlMsg {
+    let FileConsentResult {
+        dest,
+        size,
+        allowed,
+    } = res;
+    if !allowed {
         return file_reject(inner, ErrorCode::ConsentDenied);
     }
     // Re-check after the (possibly long) consent prompt: an emergency stop or teardown that landed
@@ -2262,7 +2347,14 @@ fn host_handle_file_complete<C, E>(inner: &HostInner<C, E>) {
     };
     if t.received == t.declared_size {
         if let Some(s) = &sink {
-            let _ = s.finish();
+            // A `finish()` failure (e.g. fsync surfacing a disk-full only at close) must not be treated
+            // as a clean completion: all bytes may be on-disk but not durably so, or not at all. Abort
+            // (discard the partial/undurable file) and reject exactly like a short transfer, rather than
+            // silently reporting success to the peer.
+            if s.finish().is_err() {
+                s.abort();
+                let _ = file_reject(inner, ErrorCode::InputFailed);
+            }
         }
     } else if let Some(s) = &sink {
         // Short transfer (fewer bytes than offered): discard rather than keep a truncated file.
@@ -2946,12 +3038,30 @@ impl ControllerSession {
         if let Some(sink) = lifecycle {
             sink.emit(LifecycleEvent::SessionEnded { reason });
         }
-        for t in inner
-            .tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-        {
+        // The control task is always pushed first (see `connect`). Take it out separately and give it
+        // a bounded grace period to actually pull the `Bye` we just enqueued off `cmd_rx` and flush it
+        // on the wire, mirroring `HostSession::stop`/`emergency_stop` — otherwise the unconditional
+        // abort below can race the send above and the peer never sees a clean close.
+        let (control_task, rest) = {
+            let mut tasks = inner
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let control_task = if tasks.is_empty() {
+                None
+            } else {
+                Some(tasks.remove(0))
+            };
+            let rest: Vec<_> = tasks.drain(..).collect();
+            (control_task, rest)
+        };
+        if let Some(t) = control_task {
+            let abort = t.abort_handle();
+            if tokio::time::timeout(BYE_FLUSH_GRACE, t).await.is_err() {
+                abort.abort();
+            }
+        }
+        for t in rest {
             t.abort();
         }
     }
