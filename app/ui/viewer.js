@@ -71,6 +71,7 @@
     const onStatus = opts.onStatus || function () {};
     const onFatal = opts.onFatal || function () {};
     const onLive = opts.onLive || function () {};
+    const onAudioMsg = opts.onAudio || function () {};
 
     let decoder = null, sawKeyframe = false, decoded = 0, received = 0, gaps = 0, lastId = null,
         decErrors = 0, t0 = 0, lastLatencyKeyReq = 0, live = false, kickTimer = null;
@@ -161,8 +162,8 @@
       reset();
       const channel = new Channel();
       channel.onmessage = onMessage;
-      const onAudio = new Channel(); // audio ingest (playback wiring is a follow-up in the shell)
-      onAudio.onmessage = function () {};
+      const onAudio = new Channel(); // host→controller Opus packets → the shell's audio player
+      onAudio.onmessage = onAudioMsg;
       onStatus(source.contactId ? "reaching your contact…" : "connecting…");
       const viewerCodecs = await getViewerCodecPreferences();
       try {
