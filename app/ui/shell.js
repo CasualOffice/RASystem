@@ -230,6 +230,72 @@
     listen("call-request", (e) => { const m = e.payload || {}; const c = byId(m.contact_id); toast((c ? c.name : "A contact") + " wants to view your screen", "var(--session)"); });
   }
 
+  // ---- add-contact modal (real: my_identity + add_contact) ----
+  const addModal = el("#addModal"), addInput = el("#addInput"), addLabel = el("#addLabel"), addErr = el("#addErr");
+  function openAdd() {
+    addInput.value = ""; addLabel.value = ""; addErr.hidden = true;
+    addModal.classList.add("show"); scrim.classList.add("show");
+    addInput.focus();
+    if (LIVE) {
+      invoke("my_identity").then((me) => { const code = el("#myCode"); code.textContent = me.code; code.title = me.code; el("#btnCopyCode").dataset.code = me.ticket || me.code; })
+        .catch(() => { el("#myCode").textContent = "unavailable"; });
+    } else { el("#myCode").textContent = "CRAS-K7QP-4M2X-9RJT-8W6D (demo)"; }
+  }
+  function closeAdd() { addModal.classList.remove("show"); scrim.classList.remove("show"); }
+  el("#btnAddContact").onclick = openAdd;
+  el("#btnAddClose").onclick = closeAdd; el("#btnAddCancel").onclick = closeAdd;
+  el("#btnCopyCode").onclick = (e) => {
+    const v = e.currentTarget.dataset.code || el("#myCode").textContent;
+    if (navigator.clipboard) navigator.clipboard.writeText(v).then(() => toast("Code copied"));
+  };
+  el("#btnAddSave").onclick = async () => {
+    const input = addInput.value.trim(); if (!input) { addErr.textContent = "Paste their invite code first."; addErr.hidden = false; return; }
+    if (!LIVE) { toast("Add works in the app (demo mode here)", "var(--amber)"); closeAdd(); return; }
+    try {
+      await invoke("add_contact", { input, label: addLabel.value.trim() });
+      closeAdd(); await loadContacts(); renderList(); renderMain(); toast("Contact added");
+    } catch (err) { addErr.textContent = String(err).replace(/^Error:\s*/, ""); addErr.hidden = false; }
+  };
+
+  // ---- contact details drawer (real: block / remove) ----
+  const drawer = el("#drawer");
+  function openDrawer() {
+    const c = byId(active); if (!c) return;
+    const body = el("#drawerBody"); body.innerHTML = "";
+    const av = document.createElement("div"); av.style.cssText = "display:flex;justify-content:center;margin-bottom:12px";
+    av.innerHTML = `<span class="avatar s72" style="background:${c.color}">${c.init}${presIcon(c.pres)}</span>`;
+    body.appendChild(av);
+    const nm = document.createElement("div"); nm.className = "dname"; nm.textContent = c.name; body.appendChild(nm);
+    const pr = document.createElement("div"); pr.className = "dpres"; pr.textContent = statusText(c); body.appendChild(pr);
+    if (c.code) { const cd = document.createElement("div"); cd.className = "dcode"; cd.textContent = c.code; body.appendChild(cd); }
+    const acts = document.createElement("div"); acts.className = "drawer-act";
+    const blockBtn = document.createElement("button"); blockBtn.className = "btn btn-ghost";
+    blockBtn.textContent = c.blocked ? "Unblock" : "Block";
+    blockBtn.onclick = async () => {
+      if (!LIVE) { toast("Works in the app", "var(--amber)"); return; }
+      try { await invoke("set_contact_blocked", { id: c.id, blocked: !c.blocked }); await loadContacts(); renderList(); renderMain(); closeDrawer(); toast(c.blocked ? "Unblocked" : "Blocked " + c.name); }
+      catch (err) { toast(String(err), "var(--danger)"); }
+    };
+    const rmBtn = document.createElement("button"); rmBtn.className = "btn btn-danger"; rmBtn.textContent = "Remove contact";
+    rmBtn.onclick = async () => {
+      if (!LIVE) { toast("Works in the app", "var(--amber)"); return; }
+      try { await invoke("remove_contact", { id: c.id }); const wasActive = active === c.id; await loadContacts(); if (wasActive) active = contacts[0] ? contacts[0].id : null; renderList(); renderMain(); closeDrawer(); toast("Contact removed"); }
+      catch (err) { toast(String(err), "var(--danger)"); }
+    };
+    acts.appendChild(blockBtn); acts.appendChild(rmBtn); body.appendChild(acts);
+    drawer.classList.add("show");
+  }
+  function closeDrawer() { drawer.classList.remove("show"); }
+  el("#btnDrawerClose").onclick = closeDrawer;
+
+  // hook the info action (delegated on topbar) to open the drawer
+  el("#topbar").addEventListener("click", (e) => { if (e.target.closest("#actInfo")) openDrawer(); });
+
+  // close the add modal on scrim / Esc too (additive — never touches the un-hideable owner bar)
+  scrim.addEventListener("click", closeAdd);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeAdd(); closeDrawer(); } });
+  addInput && addInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); el("#btnAddSave").click(); } });
+
   // ---- boot ----
   (async function boot() {
     await loadContacts();
