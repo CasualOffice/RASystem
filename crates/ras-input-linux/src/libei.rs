@@ -153,6 +153,15 @@ struct TrackedState {
 /// which case this sink is permanently fail-closed.
 pub struct LibeiInputSink {
     cmd_tx: Option<std_mpsc::Sender<Cmd>>,
+    /// Cancellation signal for the portal/libei handshake (see the module-level "Handshake" doc).
+    /// `false` until [`Drop`] flips it to `true` alongside sending [`Cmd::Shutdown`]. A plain
+    /// [`tokio::sync::watch`] rather than a dependency on `tokio-util`'s `CancellationToken` (not a
+    /// dependency of this crate and not worth adding for one bool): the background thread's async
+    /// task races every handshake step against `changed()`/`*borrow()` on the paired receiver, so a
+    /// `Drop` mid-handshake (e.g. Share-cancel-then-restart, before the event loop is even reached)
+    /// aborts the in-flight `await` instead of running the whole human-interactive consent sequence
+    /// to completion first. `None` alongside `cmd_tx: None` when the background thread never spawned.
+    cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
     shared: Arc<Shared>,
     state: Mutex<TrackedState>,
 }
@@ -178,14 +187,16 @@ impl LibeiInputSink {
     #[must_use]
     pub fn new() -> Self {
         let (cmd_tx, cmd_rx) = std_mpsc::channel::<Cmd>();
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let shared = Arc::new(Shared::default());
         let bg_shared = Arc::clone(&shared);
         let spawned = std::thread::Builder::new()
             .name("ras-libei-session".into())
-            .spawn(move || run_session_thread(cmd_rx, bg_shared))
+            .spawn(move || run_session_thread(cmd_rx, cancel_rx, bg_shared))
             .is_ok();
         Self {
             cmd_tx: spawned.then_some(cmd_tx),
+            cancel_tx: spawned.then_some(cancel_tx),
             shared,
             state: Mutex::new(TrackedState::default()),
         }
@@ -444,6 +455,13 @@ impl OsInputSink for LibeiInputSink {
 impl Drop for LibeiInputSink {
     fn drop(&mut self) {
         let _ = self.release_all();
+        // Flip the cancellation signal FIRST so a handshake step blocked on an `await` (before the
+        // event loop is even reached — see the module-level "Handshake" doc) observes it and aborts
+        // immediately, rather than only learning about the shutdown once (if ever) it reaches the
+        // `tokio::select!` loop that reads `cmd_rx`.
+        if let Some(cancel_tx) = &self.cancel_tx {
+            let _ = cancel_tx.send(true);
+        }
         if let Some(tx) = &self.cmd_tx {
             let _ = tx.send(Cmd::Shutdown);
         }
@@ -451,9 +469,14 @@ impl Drop for LibeiInputSink {
 }
 
 /// Entry point for the dedicated background thread: builds a single-threaded Tokio runtime and
-/// drives the async session to completion (or until `Cmd::Shutdown` / an unrecoverable error).
-/// Never panics the caller — `LibeiInputSink::new` has already returned by the time this runs.
-fn run_session_thread(cmd_rx: std_mpsc::Receiver<Cmd>, shared: Arc<Shared>) {
+/// drives the async session to completion (or until `Cmd::Shutdown` / cancellation / an
+/// unrecoverable error). Never panics the caller — `LibeiInputSink::new` has already returned by
+/// the time this runs.
+fn run_session_thread(
+    cmd_rx: std_mpsc::Receiver<Cmd>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    shared: Arc<Shared>,
+) {
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()
@@ -473,15 +496,20 @@ fn run_session_thread(cmd_rx: std_mpsc::Receiver<Cmd>, shared: Arc<Shared>) {
                 }
             }
         });
-        let _ = run_portal_session(async_rx, &shared).await;
+        let _ = run_portal_session(async_rx, cancel_rx, &shared).await;
         shared.ready.store(false, Ordering::Release);
-        // The session ended (portal absent, D-Bus unavailable, protocol error, or a normal
-        // Shutdown) having never once become ready: a genuine, fast failure, not merely
+        // The session ended (portal absent, D-Bus unavailable, protocol error, cancellation, or a
+        // normal Shutdown) having never once become ready: a genuine, fast failure, not merely
         // "still negotiating" — record it so `best_input_sink`'s bounded wait can fall back.
         if !shared.ever_ready.load(Ordering::Acquire) {
             shared.failed_before_ready.store(true, Ordering::Release);
         }
     });
+    // `run_portal_session` has returned (normal end, `Cmd::Shutdown`, cancellation, or an
+    // unrecoverable error) — nothing left to drive, so the runtime is dropped and this function
+    // returns, ending the background thread. There is no lingering work: the handshake races
+    // cancellation at every await point (see `run_portal_session`), so a cancelled handshake does
+    // not run to completion in the background after this returns.
 }
 
 /// One bound `ei_device` plus the capability interfaces we negotiated on it, and whether it is
@@ -506,38 +534,130 @@ impl BoundDevice {
     }
 }
 
+/// Sentinel returned by [`run_portal_session`] when the handshake was cancelled (`Drop` fired)
+/// before the event/command loop was ever reached — distinct from a protocol error so the caller
+/// need not inspect an error message to tell the two apart (not currently branched on, but keeps
+/// the cancellation path type-honest rather than reusing an arbitrary `Box<dyn Error>` string).
+#[derive(Debug)]
+struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("libei portal handshake cancelled (sink dropped)")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// Awaits `fut`, racing it against the cancellation signal. Returns `Err(Cancelled)` the moment
+/// `cancel_rx` observes `true` — including if it is *already* `true` when this is first called
+/// (covers a `Drop` that lands before the background thread even starts the handshake) — without
+/// waiting for `fut` to finish. Whatever partially-constructed value `fut` was building (a
+/// `RemoteDesktop` proxy, a `reis::ei::Context`'s socket) is simply dropped when the `select!`
+/// branch not taken is cancelled — those tear down the normal way (the socket closes when its
+/// `Arc` count hits zero). **`ashpd::desktop::Session` is the one exception: it has no `Drop`
+/// impl** (verified against ashpd 0.9.3's source), so once a `Session` value actually exists,
+/// cancelling a *later* step does NOT close it on its own — the caller must explicitly call
+/// `session.close().await`, which `run_portal_session` does. A cancellation landing *before*
+/// `create_session()` itself resolves (no `Session` value obtained yet) has no local handle to
+/// close by construction; whether the portal ever created anything server-side for that in-flight
+/// request is outside what this client-side cancellation can observe or control.
+async fn cancellable<T>(
+    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
+    fut: impl std::future::Future<Output = T>,
+) -> Result<T, Cancelled> {
+    if *cancel_rx.borrow() {
+        return Err(Cancelled);
+    }
+    tokio::select! {
+        biased;
+        changed = cancel_rx.changed() => {
+            // Either the sender flipped it to `true` (Drop) or the sender was itself dropped
+            // (which — given `cancel_tx` is co-owned by the same `LibeiInputSink` as `cmd_tx` and
+            // both are only ever dropped together — also only happens on teardown). Either way,
+            // treat it as cancellation: never keep running an orphaned handshake.
+            let _ = changed;
+            Err(Cancelled)
+        }
+        out = fut => Ok(out),
+    }
+}
+
 /// Runs the portal handshake, the libei sender handshake, and the event/command loop until the
-/// stream ends, `Cmd::Shutdown` is received, or an unrecoverable protocol error occurs.
+/// stream ends, `Cmd::Shutdown` is received, cancellation is observed, or an unrecoverable
+/// protocol error occurs.
+///
+/// The handshake sequence (portal `create_session` → `select_devices` → `start` — the
+/// human-interactive consent dialog that "can take many seconds" — → `connect_to_eis` → the libei
+/// sender handshake) runs entirely BEFORE the `tokio::select!` event loop below, so each step is
+/// individually raced against `cancel_rx` via [`cancellable`] rather than relying on the loop to
+/// ever observe `Cmd::Shutdown`. This is what makes a `Drop` mid-handshake (e.g. an ordinary
+/// Share-cancel-then-restart) abort promptly instead of leaking the background thread + its Tokio
+/// runtime + a live D-Bus/portal `RemoteDesktop` session until the stale consent dialog eventually
+/// resolves, if ever.
 async fn run_portal_session(
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<Cmd>,
+    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
     shared: &Arc<Shared>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let remote_desktop = RemoteDesktop::new().await?;
-    let session = remote_desktop.create_session().await?;
-    remote_desktop
-        .select_devices(
-            &session,
-            DeviceType::Keyboard | DeviceType::Pointer,
-            None,
-            PersistMode::DoNot,
-        )
-        .await?;
-    // This is the call that shows the portal's own consent dialog; it resolves only once the user
-    // has responded (Allow/Deny) — the "once per session" prompt documented at the module level.
-    let _selected = remote_desktop
-        .start(&session, &WindowIdentifier::default())
-        .await?
-        .response()?;
+    let remote_desktop = cancellable(&mut cancel_rx, RemoteDesktop::new()).await??;
+    let session = cancellable(&mut cancel_rx, remote_desktop.create_session()).await??;
 
-    let fd = remote_desktop.connect_to_eis(&session).await?;
-    let stream = UnixStream::from(fd);
-    stream.set_nonblocking(true)?;
-    let context = ei::Context::new(stream)?;
-    context.flush()?;
+    // From here on, `session` is a live portal-side resource. `ashpd::desktop::Session` has no
+    // `Drop` impl (verified against ashpd 0.9.3's source — a bare `Drop`-on-cleanup assumption
+    // here would be wrong), so an early return via `?`/cancellation on any step below would
+    // otherwise leave the remote D-Bus `org.freedesktop.portal.Session` object — and possibly a
+    // still-open consent dialog on the user's desktop — dangling indefinitely. Run the rest of the
+    // handshake in an inner block so every exit path (cancellation or a real protocol error) can
+    // best-effort close the session before propagating, instead of silently leaking it.
+    let handshake: Result<(EiConnection, EiConvertEventStream), Box<dyn std::error::Error>> =
+        async {
+            cancellable(
+                &mut cancel_rx,
+                remote_desktop.select_devices(
+                    &session,
+                    DeviceType::Keyboard | DeviceType::Pointer,
+                    None,
+                    PersistMode::DoNot,
+                ),
+            )
+            .await??;
+            // This is the call that shows the portal's own consent dialog; it resolves only once the
+            // user has responded (Allow/Deny) — the "once per session" prompt documented at the module
+            // level, and the step this cancellation racing matters most for: it is the one genuinely
+            // unbounded, human-interactive await in the whole handshake.
+            let _selected = cancellable(
+                &mut cancel_rx,
+                remote_desktop.start(&session, &WindowIdentifier::default()),
+            )
+            .await??
+            .response()?;
 
-    let (hl_conn, mut events): (EiConnection, EiConvertEventStream) = context
-        .handshake_tokio("casual-ras", ei::handshake::ContextType::Sender)
-        .await?;
+            let fd = cancellable(&mut cancel_rx, remote_desktop.connect_to_eis(&session)).await??;
+            let stream = UnixStream::from(fd);
+            stream.set_nonblocking(true)?;
+            let context = ei::Context::new(stream)?;
+            context.flush()?;
+
+            let handshake = cancellable(
+                &mut cancel_rx,
+                context.handshake_tokio("casual-ras", ei::handshake::ContextType::Sender),
+            )
+            .await??;
+            Ok(handshake)
+        }
+        .await;
+
+    let (hl_conn, mut events) = match handshake {
+        Ok(v) => v,
+        Err(e) => {
+            // Best-effort: a failure here must never mask/replace the real handshake error, and
+            // must never itself panic or block indefinitely — `close()` is a single bounded D-Bus
+            // round-trip, not another human-interactive wait.
+            let _ = session.close().await;
+            return Err(e);
+        }
+    };
 
     let mut bound: Option<BoundDevice> = None;
     let mut seq: u32 = 0;
@@ -560,6 +680,11 @@ async fn run_portal_session(
                         let _ = hl_conn.flush();
                     }
                 }
+            }
+            _ = cancel_rx.changed() => {
+                // Cancellation observed while already in the steady-state loop (e.g. a Drop racing
+                // a still-in-flight Cmd::Shutdown send) — same exit as a normal Shutdown.
+                break;
             }
         }
     }
@@ -706,6 +831,7 @@ mod tests {
         // Simulate a sink whose background thread never spawned (portal/session unavailable).
         let sink = LibeiInputSink {
             cmd_tx: None,
+            cancel_tx: None,
             shared: Arc::new(Shared::default()),
             state: Mutex::new(TrackedState::default()),
         };
@@ -723,6 +849,7 @@ mod tests {
         let (tx, _rx) = std_mpsc::channel::<Cmd>();
         let sink = LibeiInputSink {
             cmd_tx: Some(tx),
+            cancel_tx: None,
             shared: Arc::new(Shared::default()),
             state: Mutex::new(TrackedState::default()),
         };
@@ -758,6 +885,7 @@ mod tests {
         shared.ready.store(true, Ordering::Release);
         let sink = LibeiInputSink {
             cmd_tx: Some(tx),
+            cancel_tx: None,
             shared,
             state: Mutex::new(TrackedState::default()),
         };
@@ -778,6 +906,7 @@ mod tests {
     fn probe_available_is_false_with_no_session_at_all() {
         let sink = LibeiInputSink {
             cmd_tx: None,
+            cancel_tx: None,
             shared: Arc::new(Shared::default()),
             state: Mutex::new(TrackedState::default()),
         };
@@ -794,6 +923,7 @@ mod tests {
         shared.ready.store(true, Ordering::Release);
         let sink = LibeiInputSink {
             cmd_tx: Some(tx),
+            cancel_tx: None,
             shared,
             state: Mutex::new(TrackedState::default()),
         };
@@ -811,6 +941,7 @@ mod tests {
         shared.failed_before_ready.store(true, Ordering::Release);
         let sink = LibeiInputSink {
             cmd_tx: Some(tx),
+            cancel_tx: None,
             shared,
             state: Mutex::new(TrackedState::default()),
         };
@@ -829,6 +960,7 @@ mod tests {
         let (tx, _rx) = std_mpsc::channel::<Cmd>();
         let sink = LibeiInputSink {
             cmd_tx: Some(tx),
+            cancel_tx: None,
             shared: Arc::new(Shared::default()),
             state: Mutex::new(TrackedState::default()),
         };
