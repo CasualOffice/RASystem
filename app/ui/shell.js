@@ -214,7 +214,30 @@
   // The real WebCodecs viewer, folded in from the proven app path (viewer.js). Lazily created and
   // bound to the session canvas. Content-free status only (Inv 8). ON-DEVICE VERIFICATION PENDING:
   // the connect + decode path is a faithful port of working code but needs a two-machine run.
-  let viewer = null, viewerLive = false;
+  let viewer = null, viewerLive = false, controller = null, sessContactName = "";
+  const takeBtn = () => el("#btnTakeControl");
+  const sessBadge = () => session.querySelector(".ctrl-badge");
+
+  // Reflect the take-control FSM (control.js) into the toolbar button + session badge (Inv 7: the
+  // controlling state is always legible; --session chrome marks live OS control).
+  function reflectControl(state, controlling) {
+    const b = takeBtn();
+    if (b) {
+      b.classList.remove("armed", "pending", "denied");
+      b.disabled = false;
+      if (state === "granted") { b.textContent = "Controlling — click to stop"; b.classList.add("armed"); }
+      else if (state === "requesting") { b.textContent = "Requesting…"; b.classList.add("pending"); b.disabled = true; }
+      else if (state === "denied") { b.textContent = "Request denied"; b.classList.add("denied"); b.disabled = true; }
+      else if (state === "timeout") { b.textContent = "No response — timed out"; b.classList.add("pending"); b.disabled = true; }
+      else b.textContent = "Take control";
+    }
+    const badge = sessBadge();
+    if (badge && badge.lastChild) badge.lastChild.textContent = (controlling ? "Controlling " : "Viewing ") + (sessContactName || "");
+    if (state === "granted") toast("Control granted — you're driving " + sessContactName, "var(--session)");
+    else if (state === "denied") toast("Control request denied", "var(--danger)");
+    else if (state === "timeout") toast("No response to control request", "var(--amber)");
+  }
+
   function ensureViewer() {
     if (viewer) return viewer;
     if (!LIVE || !window.RASViewer || !T.core || !T.core.Channel) return null;
@@ -230,8 +253,18 @@
       Channel: T.core.Channel,
       onStatus: (s) => { sessHud.hidden = false; sessHud.textContent = s; },
       onFatal: (m) => { sessFatal.hidden = false; sessFatal.querySelector(".fmsg").textContent = m; },
-      onLive: (up) => { viewerLive = up; },
+      onLive: (up) => { viewerLive = up; if (!up && controller) controller.reset(); },
     });
+    if (window.RASControl) {
+      controller = window.RASControl.createController({
+        canvas: viewCanvas,
+        invoke: T.core.invoke,
+        isLive: () => viewerLive,
+        onState: reflectControl,
+      });
+      const b = takeBtn();
+      if (b) b.onclick = () => { if (controller) controller.requestOrToggle(); };
+    }
     return viewer;
   }
 
@@ -239,10 +272,11 @@
   async function startViewerSession(c) {
     const v = ensureViewer();
     if (!v) { toast("Viewer unavailable in this build", "var(--danger)"); return; }
+    sessContactName = c.name;
+    if (controller) controller.reset(); // fresh view-only start; reflectControl sets the badge to "Viewing X"
+    else if (sessBadge() && sessBadge().lastChild) sessBadge().lastChild.textContent = "Viewing " + c.name;
     sessFatal.hidden = true; sessHud.hidden = false; sessHud.textContent = "requesting " + c.name + "'s screen…";
     deskdemo.hidden = true; viewCanvas.hidden = false;
-    const badge = session.querySelector(".ctrl-badge");
-    if (badge && badge.lastChild) badge.lastChild.textContent = "Viewing " + c.name;
     session.classList.add("show"); inSession = true;
     toast("Requesting " + c.name + "'s screen — waiting for their consent", "var(--session)");
     await v.connectContact(c.id);   // false ⇒ onStatus already carries the reason; overlay stays so it's visible
@@ -255,6 +289,7 @@
   function startDemoSession() { deskdemo.hidden = false; viewCanvas.hidden = true; sessHud.hidden = true; sessFatal.hidden = true; session.classList.add("show"); ownerbar.classList.add("show"); inSession = true; toast("Session live · fresh grant issued", "var(--session)"); }
 
   async function endSession() {
+    if (controller) controller.reset(); // release any held input + lease-follow before we drop (Inv 4)
     if (viewer && viewerLive) { try { await viewer.disconnect(); } catch (_) {} }
     viewerLive = false;
     session.classList.remove("show"); ownerbar.classList.remove("show"); inSession = false;
@@ -283,6 +318,8 @@
       renderList(); if (active === c.id) renderMain();
     });
     listen("call-request", (e) => { const m = e.payload || {}; const c = byId(m.contact_id); toast((c ? c.name : "A contact") + " wants to view your screen", "var(--session)"); });
+    // Host denied a control request, or revoked an active lease mid-session (Inv 4). Content-free.
+    listen("control-consent-denied", () => { if (controller) controller.notifyConsentDenied(); });
   }
 
   // ---- add-contact modal (real: my_identity + add_contact) ----
