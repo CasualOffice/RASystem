@@ -15,7 +15,7 @@
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 mod imp {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
@@ -81,6 +81,12 @@ mod imp {
         Declined,
         /// scap returned a clean `CapturerBuildError` (unsupported / permission not granted).
         Unavailable,
+        /// scap delivered only frames in a format we never requested (we ask for
+        /// `FrameType::BGRAFrame`; `to_bgra` handles every `Frame` variant except
+        /// `Frame::YUVFrame`, which we deliberately drop rather than mis-encode — see `to_bgra`).
+        /// Distinguishes "driver/platform ignored our format request" from a genuinely static
+        /// screen, which also produces no frame during the startup wait but for a benign reason.
+        UnexpectedFormat,
     }
 
     /// Shared latest-frame slot between the capture thread and the pump.
@@ -91,6 +97,13 @@ mod imp {
         /// `start` after the first-frame wait to produce a precise error. `None` = no build failure
         /// observed (either frames are flowing, or startup genuinely timed out).
         startup_failure: Mutex<Option<StartupFailure>>,
+        /// Total frames dropped by `to_bgra` because scap delivered a format we didn't request
+        /// (currently only `Frame::YUVFrame` — see `to_bgra`). Diagnostic-only: never gates
+        /// behavior, just makes an otherwise-silent "we've been dropping every frame" condition
+        /// observable and distinguishable from a genuinely static screen (which legitimately
+        /// yields zero frames via the `Ok(None)` timeout path). Logged once (rate-limited) by the
+        /// capture loop and consulted by `start` to give a precise startup error.
+        unexpected_format_drops: AtomicU64,
     }
 
     struct Running {
@@ -189,6 +202,19 @@ mod imp {
         }
     }
 
+    /// Name of the `Frame` variant, for diagnostics only (Inv 8: variant tag, never pixel content).
+    fn frame_variant_name(frame: &Frame) -> &'static str {
+        match frame {
+            Frame::BGRA(_) => "BGRA",
+            Frame::BGRx(_) => "BGRx",
+            Frame::BGR0(_) => "BGR0",
+            Frame::RGBx(_) => "RGBx",
+            Frame::XBGR(_) => "XBGR",
+            Frame::RGB(_) => "RGB",
+            Frame::YUVFrame(_) => "YUVFrame",
+        }
+    }
+
     /// Normalize a scap frame to a tightly-packed 4-byte **BGRA** buffer (byte order B,G,R,A). The
     /// encoder reads only B,G,R, so any `B,G,R,*` layout is used directly; RGB-order layouts are
     /// byte-swapped. Returns `(data, width, height)`.
@@ -265,6 +291,7 @@ mod imp {
                 slot: Mutex::new(None),
                 cv: Condvar::new(),
                 startup_failure: Mutex::new(None),
+                unexpected_format_drops: AtomicU64::new(0),
             });
             let stop = Arc::new(AtomicBool::new(false));
             let fps = opts.target_fps.max(1);
@@ -310,6 +337,18 @@ mod imp {
                         .startup_failure
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // No explicit build/panic failure was recorded, but the capture thread may
+                    // still have been alive and producing frames the whole time — just never in
+                    // the BGRA format we requested. Surface that distinctly from a bare timeout
+                    // (which is indistinguishable from a genuinely static screen) rather than
+                    // reporting the generic "no frame within the startup window".
+                    let reason = reason.or_else(|| {
+                        if shared.unexpected_format_drops.load(Ordering::Relaxed) > 0 {
+                            Some(StartupFailure::UnexpectedFormat)
+                        } else {
+                            None
+                        }
+                    });
                     self.stop();
                     Err(match reason {
                         Some(StartupFailure::Declined) => {
@@ -318,6 +357,9 @@ mod imp {
                         Some(StartupFailure::Unavailable) => {
                             cap_fatal("screen capture not supported or permission not granted")
                         }
+                        Some(StartupFailure::UnexpectedFormat) => cap_fatal(
+                            "screen capture delivered only frames in an unexpected format (not BGRA)",
+                        ),
                         None => cap_fatal("no frame within the startup window"),
                     })
                 }
@@ -536,6 +578,7 @@ mod imp {
         while !stop.load(Ordering::SeqCst) {
             match capturer.get_next_frame() {
                 Ok(frame) => {
+                    let variant = frame_variant_name(&frame);
                     if let Some((data, w, h)) = to_bgra(frame) {
                         if w == 0 || h == 0 {
                             continue;
@@ -548,6 +591,26 @@ mod imp {
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         *slot = Some(buf); // drop-old
                         drop(slot);
+                        shared.cv.notify_one();
+                    } else {
+                        // We asked for `FrameType::BGRAFrame`; scap/the OS delivered something
+                        // else (currently only possible for `Frame::YUVFrame`, see `to_bgra`).
+                        // Dropping it (rather than mis-encoding) is the correct safety call, but
+                        // doing so silently is indistinguishable from a genuinely static screen
+                        // (which also yields no frame, via the `Ok(None)` timeout path) — so
+                        // count it and log the first occurrence at warn (rate-limited: logging
+                        // every dropped frame at up to 60fps would flood the log).
+                        let prev = shared
+                            .unexpected_format_drops
+                            .fetch_add(1, Ordering::Relaxed);
+                        if prev == 0 {
+                            log::warn!(
+                                "scap capture: dropped a frame in unexpected format {variant} \
+                                 (requested BGRA) — this and any further occurrences are being \
+                                 counted; frames will keep being dropped until the capturer \
+                                 delivers the requested format"
+                            );
+                        }
                         shared.cv.notify_one();
                     }
                 }
