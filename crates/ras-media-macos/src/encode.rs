@@ -156,6 +156,20 @@ impl Default for VideoToolboxEncoder {
 
 impl VideoEncoderBackend for VideoToolboxEncoder {
     fn configure(&mut self, config: &StreamConfig) -> Result<(), MediaError> {
+        // Reconfigure (not first-time setup): the old session's output callback holds a raw,
+        // non-owning pointer to the old `Arc<EncOut>` as its refcon. If we simply drop `self.session`/
+        // `self.out` below, any frame still in flight on the old session fires `on_encoded` after the
+        // backing `Arc` is freed — a use-after-free reachable via an ordinary resolution change
+        // (monitor drag/DPI/hot-plug) mid-share. Drain the old session's queued callbacks synchronously
+        // and invalidate it (cancelling any further callback) before building the replacement.
+        if let Some(old) = self.session.take() {
+            // SAFETY: session live; synchronously drains any in-flight callback before we let go of
+            // the `Arc<EncOut>` refcon it was pointing at.
+            let _ = unsafe { old.complete_frames(CM_TIME_INVALID) };
+            // SAFETY: session live; invalidate cancels further callbacks and releases resources.
+            unsafe { old.invalidate() };
+        }
+
         // Build a fresh session for the requested geometry.
         let out = Arc::new(EncOut::default());
         let mut raw: *mut VTCompressionSession = ptr::null_mut();
@@ -207,7 +221,11 @@ impl VideoEncoderBackend for VideoToolboxEncoder {
         self.set_property(k_profile, Some(prof_baseline.as_ref()))?;
         self.set_i32(k_maxgop, i32::MAX)?;
         self.set_i32(k_fps, config.fps.max(1) as i32)?;
-        self.set_i32(k_bitrate, clamp_bitrate(config.target_bitrate_bps))?;
+        let clamped_bitrate = clamp_bitrate(config.target_bitrate_bps);
+        self.set_i32(k_bitrate, clamped_bitrate)?;
+        // As in `set_bitrate`: keep `self.config` (and thus `config()`) reporting what VideoToolbox is
+        // actually configured with, not the caller's unclamped request.
+        self.config.target_bitrate_bps = clamped_bitrate as u32;
         Ok(())
     }
 
@@ -275,8 +293,12 @@ impl VideoEncoderBackend for VideoToolboxEncoder {
     fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), MediaError> {
         // SAFETY: immutable framework property-key constant.
         let key = unsafe { kVTCompressionPropertyKey_AverageBitRate };
-        self.set_i32(key, clamp_bitrate(bitrate_bps))?;
-        self.config.target_bitrate_bps = bitrate_bps;
+        let clamped = clamp_bitrate(bitrate_bps);
+        self.set_i32(key, clamped)?;
+        // Report what VideoToolbox is actually running, not the caller's unclamped request — otherwise
+        // `config()` (and anything feeding it, e.g. the ABR loop) can be told a bitrate the encoder
+        // isn't really using.
+        self.config.target_bitrate_bps = clamped as u32;
         Ok(())
     }
 
