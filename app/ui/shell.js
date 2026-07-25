@@ -213,6 +213,7 @@
   function endCall(msg) {
     incall.classList.remove("show"); pip.classList.remove("show"); callwin.classList.remove("show");
     inCall = false; clearInterval(timerInt);
+    const off = el("#camOff"); if (off) off.hidden = true; // clear the remote "camera off" placeholder
     if (msg) toast(msg, "var(--ink-faint)");
   }
   function minCall() { incall.classList.remove("show"); pip.classList.add("show"); el("#pipname").textContent = callWith ? callWith.name : ""; toast("Call minimized — still connected"); }
@@ -549,7 +550,16 @@
       else if (kind === "declined") { endCall("Call declined"); }
       else if (kind === "missed") { endCall("No answer"); }
       else if (kind === "failed") { endCall("Call failed"); }
-      // outgoing_ringing keeps the "Calling…" state already shown; remote_mute_changed is presentation-only.
+      else if (kind === "remote_mute_changed") {
+        // The peer toggled their camera/mic — show a "camera off" placeholder over the (now frozen)
+        // remote video when they go dark. Presentation-only; no media byte crosses here (Inv 8).
+        const off = el("#camOff");
+        if (off) {
+          const nm = el("#camOffName"); if (nm) nm.textContent = (name || "Contact") + " · camera off";
+          off.hidden = ev.remoteVideoMuted !== true;
+        }
+      }
+      // outgoing_ringing keeps the "Calling…" state already shown.
     });
     // Received call audio: each event carries one self-describing RAU1 Opus blob; decode + play via the
     // shared WebCodecs audio player (audio.js). Content-free to the log (Inv 8 — only bytes are handled).

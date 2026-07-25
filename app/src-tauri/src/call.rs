@@ -62,6 +62,15 @@ struct EventSink {
 }
 impl CallEventSink for EventSink {
     fn emit(&self, event: CallLifecycleEvent) {
+        // The peer's mute state (present only for remote_mute_changed) drives the peer-facing UI —
+        // e.g. a "camera off" placeholder when the remote peer turns their camera off.
+        let mute = match &event {
+            CallLifecycleEvent::RemoteMuteChanged {
+                audio_muted,
+                video_muted,
+            } => Some((*audio_muted, *video_muted)),
+            _ => None,
+        };
         let (kind, media) = describe(event);
         let _ = self.app.emit(
             "call-lifecycle",
@@ -69,6 +78,8 @@ impl CallEventSink for EventSink {
                 "kind": kind,
                 "contactId": crate::hex_id(self.peer.as_bytes()),
                 "media": media,
+                "remoteAudioMuted": mute.map(|(a, _)| a),
+                "remoteVideoMuted": mute.map(|(_, v)| v),
             }),
         );
     }
