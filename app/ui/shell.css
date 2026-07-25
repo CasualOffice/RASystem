@@ -136,6 +136,9 @@ button{font-family:inherit}
 .incall{position:absolute;inset:0;background:#07080c;display:none;flex-direction:column;z-index:20}
 .incall.show{display:flex}
 .stage{flex:1;position:relative;background:linear-gradient(160deg,#141824,#0b0d13 70%);display:grid;place-items:center;overflow:hidden}
+.stage .callvideo{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#0b0d13;z-index:0}
+.stage .callvideo[hidden]{display:none}
+.stage .ctimer,.stage .qual,.stage .rmt-name,.stage .selfview,.stage .callbar{z-index:2}
 .stage .rmt-name{position:absolute;left:16px;bottom:16px;font-size:13px;color:var(--ink);background:rgba(10,11,15,.5);backdrop-filter:blur(8px);padding:5px 11px;border-radius:var(--r-pill)}
 .stage .qual{position:absolute;right:16px;top:16px;display:flex;align-items:flex-end;gap:3px;height:18px;background:rgba(10,11,15,.5);padding:6px 8px;border-radius:var(--r-pill)}
 .stage .qual b{width:4px;background:var(--online);border-radius:1px}.stage .qual b:nth-child(1){height:6px}.stage .qual b:nth-child(2){height:10px}.stage .qual b:nth-child(3){height:14px}

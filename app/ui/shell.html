@@ -61,6 +61,8 @@
     <!-- in-call stage overlay (inside main) -->
     <div class="incall" id="incall">
       <div class="stage">
+        <!-- remote camera (video call) — WebCodecs decode target; hidden until frames arrive -->
+        <canvas class="callvideo" id="callVideo" hidden></canvas>
         <div class="ctimer mono" id="ctimer">00:00</div>
         <div class="qual" title="Connection: good · direct"><b></b><b></b><b></b></div>
         <div class="rmt-name" id="rmtname">Priya Nair</div>

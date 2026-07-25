@@ -546,12 +546,29 @@
     });
     // Received call audio: each event carries one self-describing RAU1 Opus blob; decode + play via the
     // shared WebCodecs audio player (audio.js). Content-free to the log (Inv 8 — only bytes are handled).
-    let callAudio = null;
+    let callAudio = null, callVid = null;
     listen("call-audio", (e) => {
       if (!callAudio && window.RASAudio) callAudio = window.RASAudio.createAudioPlayer({ onState: () => {}, onUnsupported: () => {} });
       if (callAudio) callAudio.handle(e.payload);
     });
     listen("call-audio-inactive", () => { if (callAudio) { callAudio.reset(); callAudio = null; } });
+    // Received call video: each event carries one RCFG/RAS1 blob; decode + render into the in-call
+    // canvas via the shared WebCodecs viewer (no connect — blobs are pushed from Rust). Inv 8: bytes only.
+    const callCanvas = el("#callVideo");
+    listen("call-video", (e) => {
+      if (!callVid && window.RASViewer && callCanvas) {
+        callCanvas.hidden = false;
+        callVid = window.RASViewer.createViewer({
+          canvas: callCanvas,
+          invoke: () => Promise.resolve(), // no request_keyframe in a call — no-op
+          Channel: T.core && T.core.Channel,
+          onStatus: () => {}, onFatal: () => {}, onLive: () => {},
+        });
+      }
+      if (callVid) callVid.feed(e.payload);
+    });
+    const stopCallVideo = () => { if (callVid) { callVid.resetSink(); callVid = null; } if (callCanvas) callCanvas.hidden = true; };
+    listen("call-audio-inactive", stopCallVideo);
     // Host denied a control request, or revoked an active lease mid-session (Inv 4). Content-free.
     listen("control-consent-denied", () => { if (controller) controller.notifyConsentDenied(); });
     // In-session chat from the remote peer (text is .reveal()'d host-side; render via textContent, Inv 8).

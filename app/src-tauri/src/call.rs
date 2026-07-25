@@ -134,15 +134,15 @@ impl CallSignalSink for SignalSink {
     }
 }
 
-/// Requests the mic pump be started/stopped. The supervisor task owns the actual pump.
+/// Requests the media pumps be started/stopped. The supervisor task owns the actual pumps.
 struct MediaCtl(mpsc::UnboundedSender<MediaCmd>);
 enum MediaCmd {
-    Start,
+    Start(CallMedia),
     Stop,
 }
 impl CallMediaController for MediaCtl {
-    fn start(&self, _media: CallMedia) {
-        let _ = self.0.send(MediaCmd::Start);
+    fn start(&self, media: CallMedia) {
+        let _ = self.0.send(MediaCmd::Start(media));
     }
     fn stop(&self) {
         let _ = self.0.send(MediaCmd::Stop);
@@ -233,38 +233,134 @@ fn spawn_media_supervisor(
     mic_stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut ingest: Option<JoinHandle<()>> = None;
+        let mut a_ingest: Option<JoinHandle<()>> = None;
+        let mut v_ingest: Option<JoinHandle<()>> = None;
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                MediaCmd::Start => {
+                MediaCmd::Start(media) => {
                     let Some(tp) = transport.lock().await.clone() else {
                         continue;
                     };
-                    if ingest.is_none() {
+                    // Audio ingress: peer mic → webview (always).
+                    if a_ingest.is_none() {
                         if let Ok(mut src) = tp.audio_source().await {
                             let app2 = app.clone();
-                            ingest = Some(tokio::spawn(async move {
+                            a_ingest = Some(tokio::spawn(async move {
                                 while let Ok(pkt) = src.next().await {
                                     forward_call_audio(&app2, &pkt);
                                 }
                             }));
                         }
                     }
+                    // Audio egress: our mic → peer (always).
                     if let Ok(sink) = tp.audio_sink().await {
                         let stop = Arc::clone(&mic_stop);
                         stop.store(false, Ordering::SeqCst);
                         std::thread::spawn(move || mic_pump(sink, stop));
                     }
+                    // Video (a video call): ingress everywhere (render the peer's camera), egress only
+                    // where a camera backend exists (macOS for now).
+                    if media.has_video() {
+                        if v_ingest.is_none() {
+                            if let Ok(mut src) = tp.video_source().await {
+                                let app2 = app.clone();
+                                v_ingest = Some(tokio::spawn(async move {
+                                    forward_call_video(app2, &mut src).await;
+                                }));
+                            }
+                        }
+                        start_camera_egress(&tp, Arc::clone(&mic_stop)).await;
+                    }
                 }
                 MediaCmd::Stop => {
                     mic_stop.store(true, Ordering::SeqCst);
-                    if let Some(h) = ingest.take() {
+                    if let Some(h) = a_ingest.take() {
+                        h.abort();
+                    }
+                    if let Some(h) = v_ingest.take() {
                         h.abort();
                     }
                 }
             }
         }
     })
+}
+
+/// Camera egress (send our camera): macOS only for now (AVFoundation via `ras-camera`). A no-op on other
+/// platforms — a video call there is receive-only for video (voice both ways).
+#[cfg(target_os = "macos")]
+async fn start_camera_egress(tp: &Arc<IrohCallTransport>, stop: Arc<AtomicBool>) {
+    if let Ok(sink) = tp.video_sink().await {
+        stop.store(false, Ordering::SeqCst);
+        std::thread::spawn(move || camera_pump(sink, stop));
+    }
+}
+#[cfg(not(target_os = "macos"))]
+async fn start_camera_egress(_tp: &Arc<IrohCallTransport>, _stop: Arc<AtomicBool>) {}
+
+/// Camera capture → H.264 encode → send loop (blocking; own thread). macOS only. Never logs a pixel.
+#[cfg(target_os = "macos")]
+fn camera_pump(sink: Box<dyn ras_core::deps::VideoSinkDyn>, stop: Arc<AtomicBool>) {
+    use ras_media::{CameraCaptureBackend, CameraOptions, VideoCodec, VideoEncoderBackend};
+    let mut cam = ras_camera::NokhwaCameraCapture::new();
+    // Declare VP9 so the negotiated StreamConfig (and thus the RCFG the webview reads) matches the VP9
+    // bytes the encoder emits — otherwise the peer's decoder would be configured for the wrong codec.
+    let cfg = match cam.start(&CameraOptions {
+        target_width: 640,
+        target_height: 480,
+        target_fps: 24,
+        codec: Some(VideoCodec::Vp9),
+        ..CameraOptions::default()
+    }) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    // Software VP9 encoder (CpuBgra-native; WebCodecs decodes vp09). openh264 is Linux/Windows-only in
+    // this app; macOS ships libvpx already (ras-media-vpx), and VP9 is universally WebCodecs-decodable.
+    let mut enc = ras_media_vpx::VpxEncoder::new();
+    if enc.configure(&cfg).is_err() {
+        return;
+    }
+    while !stop.load(Ordering::SeqCst) {
+        match cam.next_frame(std::time::Duration::from_millis(100)) {
+            Ok(Some(frame)) => {
+                if let Ok(Some(pkt)) = enc.encode(frame) {
+                    sink.send_frame(pkt);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => break,
+        }
+    }
+    cam.stop();
+}
+
+/// Video ingress: read the peer's camera frames and forward them to the webview as `call-video` blobs —
+/// one `RCFG` config blob (from the first frame's config) then `RAS1` frame blobs (the session format).
+async fn forward_call_video(app: AppHandle, src: &mut Box<dyn ras_core::deps::VideoSourceDyn>) {
+    let mut configured = false;
+    while let Ok(ev) = src.next().await {
+        let ras_transport_iroh::VideoEvent::Frame(frame) = ev else {
+            continue; // a FrameDropped marker — nothing to render
+        };
+        if !configured {
+            let c = &frame.config;
+            let codec = c.codec.webcodecs_string(c.width, c.height);
+            let json = serde_json::json!({
+                "codec": codec, "width": c.width, "height": c.height, "fps": c.fps,
+            })
+            .to_string();
+            let mut blob = Vec::with_capacity(4 + json.len());
+            blob.extend_from_slice(&crate::CONFIG_MAGIC.to_le_bytes());
+            blob.extend_from_slice(json.as_bytes());
+            let _ = app.emit("call-video", blob);
+            configured = true;
+        }
+        let _ = app.emit(
+            "call-video",
+            ras_core::frame_channel::encode_frame_blob(&frame),
+        );
+    }
 }
 
 /// The mic capture → Opus encode → send loop (blocking; runs on its own thread). Never logs a sample.
@@ -345,9 +441,6 @@ pub async fn call_place(
     contact_id: String,
     video: bool,
 ) -> Result<(), String> {
-    if video {
-        return Err("video calling is not available yet (voice only)".into());
-    }
     let bytes = parse_contact_id(&contact_id)?;
     let peer = ContactId::from_bytes(bytes);
     if !contacts_of(&state)?.is_active_contact(&peer) {
@@ -364,7 +457,12 @@ pub async fn call_place(
         d
     };
     // place_call: transitions Dialing + fires the CallInvite signal.
-    driver.lock().await.place_call(CallMedia::Voice);
+    let media = if video {
+        CallMedia::Video
+    } else {
+        CallMedia::Voice
+    };
+    driver.lock().await.place_call(media);
     // Dial the call connection; when it's up, run the control loop (which delivers the callee's
     // CallAccept/Reject) and, on active, start media.
     dial_and_serve(app, peer);
@@ -378,8 +476,12 @@ pub async fn call_accept(
     state: State<'_, AppState>,
     video: bool,
 ) -> Result<(), String> {
-    let _ = video; // voice only for now
-                   // Extract handles under the sync lock (NO await while it's held), then release it.
+    let accepted = if video {
+        CallMedia::Video
+    } else {
+        CallMedia::Voice
+    };
+    // Extract handles under the sync lock (NO await while it's held), then release it.
     let (driver, transport, rx) = {
         let slot = state.call.lock().unwrap_or_else(|e| e.into_inner());
         let ctx = slot.as_ref().ok_or("no incoming call")?;
@@ -407,7 +509,7 @@ pub async fn call_accept(
     }
     {
         let mut d = driver.lock().await;
-        d.local_accept(CallMedia::Voice);
+        d.local_accept(accepted);
         d.media_connected();
     }
     let _ = app.emit("call-audio-active", ());
