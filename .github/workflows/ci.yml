@@ -81,6 +81,20 @@ jobs:
           cargo fmt --manifest-path crates/ras-media-vpx/Cargo.toml -- --check
           cargo clippy --manifest-path crates/ras-media-vpx/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/ras-media-vpx/Cargo.toml
+      # ras-camera (call camera capture) is excluded from the workspace so its heavy cross-platform
+      # dep (nokhwa) can't break the main build. The pure conversion/adapter core (default features)
+      # is verified on ubuntu + macOS; the nokhwa backend (`--features capture`, AVFoundation) is
+      # compile-checked on macOS only (its Linux V4L2 / Windows MediaFoundation builds are the
+      # on-device follow-up). fmt/clippy/test on its own manifest so it stays gated.
+      - name: ras-camera (call camera — pure core)
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest'
+        run: |
+          cargo fmt --manifest-path crates/ras-camera/Cargo.toml -- --check
+          cargo clippy --manifest-path crates/ras-camera/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/ras-camera/Cargo.toml
+      - name: ras-camera (nokhwa backend compile-check)
+        if: matrix.os == 'macos-latest'
+        run: cargo clippy --manifest-path crates/ras-camera/Cargo.toml --all-targets --features capture -- -D warnings
       - name: bench (hot-path smoke + sanity ceiling)
         # Not a precise perf gate — runs the hand-rolled micro-benchmarks so a gross regression
         # (hang / O(n²) / alloc storm) trips the loose per-op sanity ceiling. Prints ns/op baselines.

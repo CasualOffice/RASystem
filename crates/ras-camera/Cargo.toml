@@ -1,0 +1,48 @@
+[package]
+name = "ras-camera"
+# NOTE: excluded from the root workspace (see root Cargo.toml [workspace].exclude) so a heavy,
+# version-sensitive cross-platform camera dependency (nokhwa: AVFoundation / Media Foundation / V4L2)
+# can never break the main workspace build on the three CI OSes. It CANNOT inherit `workspace.package`,
+# so those fields are set concretely — keep in sync with the workspace defaults.
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+authors = ["Casual RAS authors"]
+publish = false
+
+# Camera capture for 1:1 calls (ADR-103, L5c) behind `ras_media::CameraCaptureBackend`. A camera frame
+# becomes a CPU BGRA `CapturedFrame` (`SurfaceKind::CpuBgra`) — the exact surface the shared software
+# encoder already consumes — so there is NO new encoder/transport/wire (ADR-103 §reuse-the-pipeline).
+#
+# The pixel-conversion + frame-adapter core (`convert`) is pure and unit-tested off-device and always
+# builds. The concrete OS capture (nokhwa) is behind the OFF-by-default `capture` feature, so the
+# default build (and the excluded-crate CI step's default pass) pulls no camera system dependency and
+# carries zero cross-platform build risk; the backend is compile-checked separately on macOS.
+
+[features]
+default = []
+# Enables the concrete nokhwa camera backend (needs a platform camera framework at build time).
+capture = ["dep:nokhwa"]
+
+[dependencies]
+ras-media = { path = "../ras-media" }
+ras-protocol = { path = "../ras-protocol" }
+log = "0.4"
+
+# nokhwa is permissive (Apache-2.0 / MIT, Inv 18). Per-OS backend features; optional + off by default.
+[target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"], optional = true }
+[target.'cfg(target_os = "linux")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-v4l"], optional = true }
+[target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"], optional = true }
+
+# FFI-adjacent through nokhwa when `capture` is on; the pure core is unsafe-free.
+[lints.rust]
+unsafe_code = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
