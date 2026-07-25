@@ -11,6 +11,14 @@ The explicit brief: **premium, Teams/Slack-grade UX; NOT a generic AI-generated 
 carries an anti-AI-generic guardrail section (§10) and every surface is specified concretely (widths,
 row heights, token values, named influences) rather than "a clean sidebar."
 
+> **Scope — CURRENT PHASE IS DESKTOP (Tauri app). Mobile is deferred.** We build the three desktop
+> surfaces first: the **shell** (§4–§6), **calls** (§7), and the **remote-access session** (§8). The
+> mobile/responsive material — the §4 breakpoint collapse order, the §7 mobile call (CallKit / full-
+> screen-intent), the §8 mobile controller, and the `04-mobile` mockup — is kept as a **documented
+> future direction** so the desktop decisions don't foreclose it (the shell is designed to collapse
+> cleanly later), but **none of it is in this phase's build.** Read the mobile sections as "don't paint
+> ourselves into a corner," not "build now."
+
 ---
 
 ## 1. The reframe
@@ -381,11 +389,17 @@ px/hex (unpublished), and mobile tab labels (shifted in 2025–2026 redesigns).
 
 ---
 
-## Next steps (proposed)
+## Next steps (proposed) — DESKTOP first
 
-1. **This doc → sign-off.** Adjust the direction where you disagree.
-2. **A clickable visual mockup** (an Artifact) of the shell + one conversation + the consent card + an
-   incoming-call window + an active-session layout — so you react to the *look* before any app code.
-3. **The ADRs** (§12) for the security-touching parts, in parallel.
-4. **Build in phases**, the shell first (everything renders inside it), then messaging/reactions/media,
-   then the contact-request access flow, then calling (voice → video). Sequencing is the user's call.
+Status: the design direction + the ADRs (103/104/105, Proposed) are written, and **four clickable
+mockups** were built and verified — `01-shell` / `02-call` / `03-session` (the desktop build set) and
+`04-mobile` (kept as future reference only, per the Scope note above).
+
+1. **React to the look** — the three desktop mockups. Adjust the direction (density, accent, call
+   treatment, presence, session chrome) where you disagree.
+2. **Accept / revise the ADRs** (§12) for the security-touching parts (calling media posture, call
+   signaling, contact-request access). No code until Accepted (CLAUDE §9).
+3. **Build the desktop app in phases**, the shell first (everything renders inside it), then
+   messaging/reactions/media, then the contact-request access flow, then calling (voice → video).
+   Mobile is a later phase — the shell is designed to collapse into it, but it is out of the current
+   build. Sequencing within desktop is the owner's call.
