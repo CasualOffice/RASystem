@@ -14,9 +14,36 @@
 //! media never starts before the call is active and the per-message mic/camera gate still applies at the
 //! send boundary (Inv 15); every event is content-free (Inv 8).
 
+use crate::deps::{AudioSink, AudioSourceDyn, ControlChannelDyn, VideoSinkDyn, VideoSourceDyn};
+use crate::CoreError;
 use ras_call::{CallAction, CallLifecycleEvent, CallMedia, CallRuntime};
 use ras_protocol::ControlMsg;
 use std::sync::Arc;
+
+/// The **symmetric** call media transport (ADR-106) — the seam a live 1:1 call rides. Unlike
+/// [`crate::deps::SessionTransport`] (one-way: the host serves, the controller consumes), **both** call
+/// peers use **all** of these: each captures + sends *and* receives + plays. It bundles a bidi control
+/// channel for the in-session `ControlMsg::Call*` set, plus an egress/ingress pair each for Opus audio
+/// (QUIC datagrams, ADR-077) and camera video (per-frame uni-streams, ADR-060) — the existing tested
+/// primitives run in both directions. The concrete iroh impl dials a saved contact over the dedicated
+/// `casual-ras/call/1` ALPN (contacts-only, endpoint-authenticated); an in-memory loopback
+/// ([`crate::testkit::call_loopback`]) wires two peers crosswise for off-device tests.
+///
+/// Authenticates identity, never authority (Inv 9): being connected for a call grants nothing beyond
+/// the call, and each captured mic/camera frame is still per-message capability-gated at egress (Inv 15).
+#[async_trait::async_trait]
+pub trait CallTransport: Send + Sync {
+    /// The bidirectional in-session call control channel (`ControlMsg::Call*`).
+    async fn control_channel(&self) -> Result<Box<dyn ControlChannelDyn>, CoreError>;
+    /// Egress: this peer's captured mic Opus packets → the remote peer.
+    async fn audio_sink(&self) -> Result<Box<dyn AudioSink>, CoreError>;
+    /// Ingress: the remote peer's mic Opus packets → this peer (to decode + play).
+    async fn audio_source(&self) -> Result<Box<dyn AudioSourceDyn>, CoreError>;
+    /// Egress: this peer's captured camera frames → the remote peer.
+    async fn video_sink(&self) -> Result<Box<dyn VideoSinkDyn>, CoreError>;
+    /// Ingress: the remote peer's camera frames → this peer (to decode + render).
+    async fn video_source(&self) -> Result<Box<dyn VideoSourceDyn>, CoreError>;
+}
 
 /// Puts an in-session call `ControlMsg` on the peer's control channel. The app wires this to the live
 /// session's control sender.
@@ -291,5 +318,85 @@ mod tests {
             1,
             "outbound no-answer withdraws the ring"
         );
+    }
+
+    // ── CallTransport symmetric loopback (ADR-106, L5t) ──
+    #[tokio::test]
+    async fn call_transport_loopback_flows_media_and_control_both_ways() {
+        use crate::testkit::call_loopback;
+        use bytes::Bytes;
+        use ras_media::audio::{AudioCodec, AudioConfig};
+        use ras_media::{
+            ColorSpace, EncodedAudio, EncodedFrame, StreamConfig, VideoCodec, VideoTransportKind,
+        };
+        use ras_transport_iroh::VideoEvent;
+
+        let acfg = AudioConfig {
+            codec: AudioCodec::Opus,
+            sample_rate_hz: 48_000,
+            channels: 1,
+            frame_duration_us: 20_000,
+            target_bitrate_bps: 64_000,
+        };
+        let vcfg = StreamConfig {
+            codec: VideoCodec::H264AnnexB,
+            width: 640,
+            height: 480,
+            fps: 30,
+            target_bitrate_bps: 2_000_000,
+            color: ColorSpace::Bt709Limited,
+            video_transport: VideoTransportKind::PerFrameStream,
+        };
+        let audio = |seq: u64| EncodedAudio {
+            seq,
+            captured_at_us: seq * 20_000,
+            data: Bytes::from_static(b"opus"),
+            config: acfg,
+        };
+        let frame = |id: u64| EncodedFrame {
+            frame_id: id,
+            captured_at_us: id * 33_000,
+            is_keyframe: id == 0,
+            data: Bytes::from_static(b"\x00\x00\x00\x01"),
+            config: vcfg,
+        };
+
+        let (a, b) = call_loopback();
+
+        // Control both ways (the in-session Call* plane).
+        let mut a_ctl = a.control_channel().await.unwrap();
+        let mut b_ctl = b.control_channel().await.unwrap();
+        a_ctl.send(ControlMsg::CallBusy).await.unwrap();
+        assert!(matches!(b_ctl.recv().await.unwrap(), ControlMsg::CallBusy));
+        b_ctl
+            .send(ControlMsg::CallHangup {
+                code: ErrorCode::NormalClosure,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            a_ctl.recv().await.unwrap(),
+            ControlMsg::CallHangup { .. }
+        ));
+
+        // Audio A→B and B→A (each peer's mic reaches the other).
+        let a_asink = a.audio_sink().await.unwrap();
+        let mut b_asrc = b.audio_source().await.unwrap();
+        a_asink.send_audio(audio(1));
+        assert_eq!(b_asrc.next().await.unwrap().seq, 1);
+        let b_asink = b.audio_sink().await.unwrap();
+        let mut a_asrc = a.audio_source().await.unwrap();
+        b_asink.send_audio(audio(2));
+        assert_eq!(a_asrc.next().await.unwrap().seq, 2);
+
+        // Camera video A→B and B→A.
+        let a_vsink = a.video_sink().await.unwrap();
+        let mut b_vsrc = b.video_source().await.unwrap();
+        a_vsink.send_frame(frame(0));
+        assert!(matches!(b_vsrc.next().await.unwrap(), VideoEvent::Frame(_)));
+        let b_vsink = b.video_sink().await.unwrap();
+        let mut a_vsrc = a.video_source().await.unwrap();
+        b_vsink.send_frame(frame(1));
+        assert!(matches!(a_vsrc.next().await.unwrap(), VideoEvent::Frame(_)));
     }
 }
