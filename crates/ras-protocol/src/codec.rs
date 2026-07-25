@@ -21,11 +21,11 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use prost::Message;
 
 use crate::{
-    AccessOutcome, AnnotTool, AnnotateOp, BootstrapMsg, ControlMsg, DecoderFeedback, ErrorCode,
-    InputAction, InputEnvelope, KeyframeReason, KeyframeRequest, PointerButton, PointerUpdate,
-    RasError, Redacted, StreamConfigWire, MAX_ANNOT_POINTS, MAX_CAPABILITIES, MAX_CAPABILITY_LEN,
-    MAX_CHAT_BYTES, MAX_CLIPBOARD_BYTES, MAX_CONTROL_FRAME, MAX_CURSOR_DIM, MAX_DISPLAY_NAME,
-    MAX_FILE_CHUNK, MAX_FILE_NAME, MAX_FILE_TARGET, MAX_TEXT_INPUT,
+    AccessOutcome, AnnotTool, AnnotateOp, BootstrapMsg, CallMediaKind, ControlMsg, DecoderFeedback,
+    ErrorCode, InputAction, InputEnvelope, KeyframeReason, KeyframeRequest, PointerButton,
+    PointerUpdate, RasError, Redacted, StreamConfigWire, MAX_ANNOT_POINTS, MAX_CAPABILITIES,
+    MAX_CAPABILITY_LEN, MAX_CHAT_BYTES, MAX_CLIPBOARD_BYTES, MAX_CONTROL_FRAME, MAX_CURSOR_DIM,
+    MAX_DISPLAY_NAME, MAX_FILE_CHUNK, MAX_FILE_NAME, MAX_FILE_TARGET, MAX_TEXT_INPUT,
 };
 
 /// Generated prost types for `proto/casual_ras.proto` (package `casual_ras.v1`).
@@ -136,6 +136,27 @@ fn errorcode_from_pb(raw: i32) -> Result<ErrorCode, RasError> {
         _ => Err(RasError::fatal(
             ErrorCode::InvalidMessage,
             "unknown error code",
+        )),
+    }
+}
+
+/// Rust [`CallMediaKind`] → wire enum.
+fn callmediakind_to_pb(media: CallMediaKind) -> pb::CallMediaKindProto {
+    match media {
+        CallMediaKind::Voice => pb::CallMediaKindProto::CallMediaKindVoice,
+        CallMediaKind::Video => pb::CallMediaKindProto::CallMediaKindVideo,
+    }
+}
+
+/// Wire enum number → Rust [`CallMediaKind`]. Rejects `UNSPECIFIED (0)` and any unknown number
+/// (fail-closed: a call media kind must always be explicit).
+fn callmediakind_from_pb(raw: i32) -> Result<CallMediaKind, RasError> {
+    match pb::CallMediaKindProto::try_from(raw) {
+        Ok(pb::CallMediaKindProto::CallMediaKindVoice) => Ok(CallMediaKind::Voice),
+        Ok(pb::CallMediaKindProto::CallMediaKindVideo) => Ok(CallMediaKind::Video),
+        _ => Err(RasError::fatal(
+            ErrorCode::InvalidMessage,
+            "unknown call media kind",
         )),
     }
 }
@@ -298,6 +319,23 @@ fn control_to_pb(msg: ControlMsg) -> pb::ControlMsg {
         ControlMsg::FileChunk { data } => Kind::FileChunk(pb::FileChunk { data }),
         ControlMsg::FileComplete => Kind::FileComplete(pb::FileComplete {}),
         ControlMsg::Annotate(op) => Kind::Annotate(annotate_to_pb(op)),
+        ControlMsg::CallAccept { media } => Kind::CallAccept(pb::CallAccept {
+            media: i32::from(callmediakind_to_pb(media)),
+        }),
+        ControlMsg::CallReject { code } => Kind::CallReject(pb::CallReject {
+            code: i32::from(errorcode_to_pb(code)),
+        }),
+        ControlMsg::CallBusy => Kind::CallBusy(pb::CallBusy {}),
+        ControlMsg::CallHangup { code } => Kind::CallHangup(pb::CallHangup {
+            code: i32::from(errorcode_to_pb(code)),
+        }),
+        ControlMsg::CallMuteState {
+            audio_muted,
+            video_muted,
+        } => Kind::CallMuteState(pb::CallMuteState {
+            audio_muted,
+            video_muted,
+        }),
     };
     pb::ControlMsg { kind: Some(kind) }
 }
@@ -523,6 +561,20 @@ fn control_from_pb(proto: pb::ControlMsg) -> Result<ControlMsg, RasError> {
         }
         Some(Kind::FileComplete(_)) => Ok(ControlMsg::FileComplete),
         Some(Kind::Annotate(a)) => annotate_from_pb(a),
+        Some(Kind::CallAccept(c)) => Ok(ControlMsg::CallAccept {
+            media: callmediakind_from_pb(c.media)?,
+        }),
+        Some(Kind::CallReject(r)) => Ok(ControlMsg::CallReject {
+            code: errorcode_from_pb(r.code)?,
+        }),
+        Some(Kind::CallBusy(_)) => Ok(ControlMsg::CallBusy),
+        Some(Kind::CallHangup(h)) => Ok(ControlMsg::CallHangup {
+            code: errorcode_from_pb(h.code)?,
+        }),
+        Some(Kind::CallMuteState(m)) => Ok(ControlMsg::CallMuteState {
+            audio_muted: m.audio_muted,
+            video_muted: m.video_muted,
+        }),
         // No valid empty control message: unset oneof (empty bytes, or a future variant an old
         // build doesn't recognize) is rejected, never silently defaulted.
         None => Err(RasError::fatal(
@@ -1387,6 +1439,65 @@ mod tests {
         }));
         assert_roundtrip(&ControlMsg::Annotate(AnnotateOp::Undo));
         assert_roundtrip(&ControlMsg::Annotate(AnnotateOp::Clear));
+    }
+
+    #[test]
+    fn roundtrip_call_control() {
+        assert_roundtrip(&ControlMsg::CallAccept {
+            media: CallMediaKind::Voice,
+        });
+        assert_roundtrip(&ControlMsg::CallAccept {
+            media: CallMediaKind::Video,
+        });
+        assert_roundtrip(&ControlMsg::CallReject {
+            code: ErrorCode::ConsentDenied,
+        });
+        assert_roundtrip(&ControlMsg::CallBusy);
+        assert_roundtrip(&ControlMsg::CallHangup {
+            code: ErrorCode::NormalClosure,
+        });
+        assert_roundtrip(&ControlMsg::CallHangup {
+            code: ErrorCode::SessionRevoked,
+        });
+        for (a, v) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_roundtrip(&ControlMsg::CallMuteState {
+                audio_muted: a,
+                video_muted: v,
+            });
+        }
+    }
+
+    #[test]
+    fn call_accept_rejects_unspecified_or_unknown_media() {
+        // The media-kind mapper fails closed on UNSPECIFIED(0) and any unknown number.
+        assert!(callmediakind_from_pb(0).is_err());
+        assert!(callmediakind_from_pb(99).is_err());
+        // And through the full decode path: a CallAccept whose media enum is UNSPECIFIED is refused,
+        // never silently defaulted to Voice.
+        let m = pb::ControlMsg {
+            kind: Some(pb::control_msg::Kind::CallAccept(pb::CallAccept {
+                media: 0,
+            })),
+        };
+        assert_eq!(
+            control_from_pb(m).unwrap_err().code,
+            ErrorCode::InvalidMessage
+        );
+    }
+
+    #[test]
+    fn call_reject_and_hangup_reject_unknown_error_code() {
+        // A CallReject/CallHangup carrying UNSPECIFIED(0) or an unknown code number fails closed.
+        for kind in [
+            pb::control_msg::Kind::CallReject(pb::CallReject { code: 0 }),
+            pb::control_msg::Kind::CallHangup(pb::CallHangup { code: 9999 }),
+        ] {
+            let m = pb::ControlMsg { kind: Some(kind) };
+            assert_eq!(
+                control_from_pb(m).unwrap_err().code,
+                ErrorCode::InvalidMessage
+            );
+        }
     }
 
     #[test]
