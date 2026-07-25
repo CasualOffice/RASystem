@@ -33,6 +33,20 @@ jobs:
       - name: macOS VPX dep
         if: matrix.os == 'macos-latest'
         run: brew install libvpx pkg-config
+      # Windows linker-flakiness mitigation. `cargo test --all` links every crate's examples, incl. the
+      # OS-native `pointer_roundtrip` (a trivial stub on Windows). The MSVC linker intermittently hits
+      # `LNK1104: cannot open file …exe` because Windows Defender briefly holds the freshly-written
+      # output binary — a well-known GitHub-Windows-runner flake, not a code fault (it recurred on
+      # unrelated commits and always passed on re-run). Exclude the target dir from real-time scanning
+      # and disable incremental (fewer intermediate files to contend on). Coverage-neutral; non-fatal so
+      # it can never itself break the job.
+      - name: Windows linker-flakiness mitigation
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}\target" -ErrorAction SilentlyContinue
+          echo "CARGO_INCREMENTAL=0" >> $env:GITHUB_ENV
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
