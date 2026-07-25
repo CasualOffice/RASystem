@@ -301,6 +301,7 @@ impl Endpoint {
                 BOOTSTRAP_ALPN.to_vec(),
                 iroh_gossip::net::GOSSIP_ALPN.to_vec(),
                 SIGNAL_ALPN.to_vec(),
+                CALL_ALPN.to_vec(),
             ])
             .transport_config(transport);
         if let Some(secret) = key {
@@ -393,6 +394,22 @@ impl Endpoint {
         target: &EndpointAddr,
     ) -> Result<Session, TransportError> {
         self.dial(self.full_addr(target)?, BOOTSTRAP_ALPN).await
+    }
+
+    /// Dial a peer on the **call** ALPN (ADR-106, 1:1 voice/video). Same reachability as [`Self::connect`]
+    /// but negotiates [`CALL_ALPN`], so the peer's accept loop routes it to the call handler (never a
+    /// screen session). Identity is authenticated by QUIC/TLS, never authorization (Invariant 9).
+    pub async fn connect_call(&self, target: &EndpointAddr) -> Result<Session, TransportError> {
+        self.dial(self.full_addr(target)?, CALL_ALPN).await
+    }
+
+    /// Dial the call ALPN by explicit direct address(es) (the same-network / test path).
+    pub async fn connect_direct_call(
+        &self,
+        id: &EndpointId,
+        addrs: &[std::net::SocketAddr],
+    ) -> Result<Session, TransportError> {
+        self.dial(self.direct_addr(id, addrs)?, CALL_ALPN).await
     }
 
     /// Dial the bootstrap ALPN by explicit direct address(es) (the hermetic-test / same-network path).
@@ -1489,6 +1506,13 @@ impl Session {
     #[must_use]
     pub fn is_signal(&self) -> bool {
         self.conn.alpn() == SIGNAL_ALPN
+    }
+
+    /// Whether this connection negotiated the **call** ALPN ([`CALL_ALPN`], ADR-106) — a 1:1 call media
+    /// session, routed to the call handler (never a screen session; a call implies no screen access).
+    #[must_use]
+    pub fn is_call(&self) -> bool {
+        self.conn.alpn() == CALL_ALPN
     }
 
     /// The raw `iroh::Connection` by reference, to hand to `ras_signal::net::recv_signal`. Only valid

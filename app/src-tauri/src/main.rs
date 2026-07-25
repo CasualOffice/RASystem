@@ -30,6 +30,7 @@ use ras_media::{EncodedFrame, StreamConfig};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager, State};
 
+mod call;
 mod secure_window;
 
 /// Framing magic for the one-shot stream-config message (`"RCFG"` big-endian, sent little-endian).
@@ -43,6 +44,8 @@ const CONFIG_MAGIC: u32 = u32::from_be_bytes(*b"RCFG");
 struct AppState {
     /// A live **viewer** session (Connect role) — dial a host's ticket over iroh.
     session: Mutex<Option<ConnectedSession>>,
+    /// The single active 1:1 **call** (ADR-104/106), if any. One at a time (one-active-call).
+    call: Mutex<Option<call::CallCtx>>,
     /// The **sharer** side (Share role).
     share: ShareState,
     /// The local user's durable **contacts** address book (ADR-092): saved peers reachable by identity
@@ -2588,6 +2591,16 @@ async fn run_share(
                 // sessions unaffected. Does NOT touch `pending_bootstrap` — a signal is not the
                 // controller's session dial.
             }
+            // A 1:1 **call** connection (ADR-106): the caller dialed CALL_ALPN. Hand it to the call
+            // handler, which matches it to the ringing call and wraps it in the symmetric transport.
+            // Never a screen session (a call implies no screen access).
+            Ok(Some(session)) if session.is_call() => {
+                let call_app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let st = call_app.state::<AppState>();
+                    call::handle_inbound_call(st.inner(), session).await;
+                });
+            }
             // A bootstrap connection runs consent + issuance; a session connection presents the
             // resulting grant and streams frames. A NEW bootstrap supersedes any held one (drop it
             // first, closing that stale link), then this one's grant is held pending its session dial.
@@ -2759,6 +2772,24 @@ async fn handle_signal(
                         "Casual RAS — a contact wants to view your screen",
                         "Open Casual RAS to share your screen with them, or dismiss.",
                     );
+                }
+                // A 1:1 **call** ring (ADR-104). Intent only — authorizes nothing (Inv 9), never
+                // auto-answers (Inv 1): raise the incoming-call surface; the local user taps Accept.
+                SignalPayload::CallInvite { media, .. } => {
+                    let st = app.state::<AppState>();
+                    call::handle_call_invite(app, st.inner(), verified.sender, media.has_video())
+                        .await;
+                    alert_user(
+                        app,
+                        true,
+                        "Casual RAS — incoming call",
+                        "A contact is calling you.",
+                    );
+                }
+                // The caller withdrew the ring before we answered.
+                SignalPayload::CallCancel { .. } => {
+                    let st = app.state::<AppState>();
+                    call::handle_call_cancel(app, st.inner(), verified.sender).await;
                 }
                 // Presence beacons arrive via gossip, not this ALPN — nothing to do here.
                 SignalPayload::PresenceBeacon { .. } => {}
@@ -3450,6 +3481,11 @@ fn main() {
             connect_to_contact,
             send_message,
             call_contact,
+            call::call_place,
+            call::call_accept,
+            call::call_decline,
+            call::call_hangup,
+            call::call_set_mute,
             my_identity,
             list_contacts,
             add_contact,
@@ -3574,6 +3610,7 @@ fn main() {
 
             app.manage(AppState {
                 session: Mutex::new(None),
+                call: Mutex::new(None),
                 share: ShareState {
                     session: Mutex::new(Some(ShareSession {
                         stop: stop_tx,
