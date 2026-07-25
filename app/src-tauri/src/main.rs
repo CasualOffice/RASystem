@@ -2505,6 +2505,19 @@ async fn run_share(
     // `serve_one` so the capture/encoder are built for the codec the viewer can decode.
     let mut pending_bootstrap: Option<(ras_transport_iroh::Session, ras_media::VideoCodec)> = None;
 
+    // Bound the number of concurrently in-flight inbound GOSSIP/SIGNAL handler tasks. Each such dial
+    // spawns a detached task; without a ceiling, a peer that can merely speak the ALPN (no contact
+    // status needed to *open* a connection — the contacts check happens *inside* the handler) could
+    // open many concurrent dials and force unbounded task/stream allocation on the always-on endpoint,
+    // which lives for the whole app lifetime. The cap is acquired NON-BLOCKING (`try_acquire_owned`)
+    // so it never stalls the accept loop that also serves screen sessions (the latency invariant); on
+    // exhaustion the new dial is simply dropped (shed-under-flood, fail-closed). The permit is moved
+    // into the spawned task and released on its completion. The ceiling is far above any legitimate
+    // simultaneous use (gossip is one connection per contact-pair topic; signals are short-lived
+    // one-message reads), so normal operation never touches it — it only bounds an abuse flood.
+    const MAX_INFLIGHT_SIGNAL_GOSSIP: usize = 64;
+    let signal_gossip_limit = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_SIGNAL_GOSSIP));
+
     loop {
         if *stop.borrow() {
             break;
@@ -2528,14 +2541,21 @@ async fn run_share(
             // controller's session dial, so a held grant keeps draining. `is_gossip`/`is_signal`/
             // `is_bootstrap` are mutually exclusive; a session is none of them.
             Ok(Some(session)) if session.is_gossip() => {
-                if let Some(g) = gossip.as_ref() {
+                // Shed (drop the dial) if we're already at the in-flight ceiling — see the semaphore
+                // comment above. `try_acquire_owned` never blocks the accept loop.
+                if let (Some(g), Ok(permit)) = (
+                    gossip.as_ref(),
+                    signal_gossip_limit.clone().try_acquire_owned(),
+                ) {
                     let conn = session.into_connection();
                     let g = g.clone();
                     tauri::async_runtime::spawn(async move {
+                        let _permit = permit; // held for the task's lifetime, released on completion
                         let _ = g.handle_connection(conn).await;
                     });
                 }
-                // else: presence disabled ⇒ drop the connection; sessions/contacts unaffected.
+                // else: presence disabled OR at the flood ceiling ⇒ drop the connection;
+                // sessions/contacts unaffected.
             }
             // A SIGNAL_ALPN connection carries one signed out-of-session message from a contact
             // (ADR-095). Verify it contacts-only and surface it; no consent, no grant, no pixels — it
@@ -2543,14 +2563,21 @@ async fn run_share(
             // that also serves screen sessions (the latency invariant). FAIL-SAFE: the whole arm no-ops
             // if the contacts book is unavailable (a message can't be verified without it).
             Ok(Some(session)) if session.is_signal() => {
-                if let Some(book) = contacts.clone() {
+                // Shed (drop the dial) if we're already at the in-flight ceiling — see the semaphore
+                // comment above. `try_acquire_owned` never blocks the accept loop.
+                if let (Some(book), Ok(permit)) = (
+                    contacts.clone(),
+                    signal_gossip_limit.clone().try_acquire_owned(),
+                ) {
                     let sig_app = app.clone();
                     tauri::async_runtime::spawn(async move {
+                        let _permit = permit; // held for the task's lifetime, released on completion
                         handle_signal(&sig_app, session, book).await;
                     });
                 }
-                // else: contacts storage unavailable ⇒ drop the connection; sessions unaffected.
-                // Does NOT touch `pending_bootstrap` — a signal is not the controller's session dial.
+                // else: contacts storage unavailable OR at the flood ceiling ⇒ drop the connection;
+                // sessions unaffected. Does NOT touch `pending_bootstrap` — a signal is not the
+                // controller's session dial.
             }
             // A bootstrap connection runs consent + issuance; a session connection presents the
             // resulting grant and streams frames. A NEW bootstrap supersedes any held one (drop it
