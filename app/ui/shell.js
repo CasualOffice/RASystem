@@ -172,8 +172,16 @@
   el("#topbar").addEventListener("click", (e) => {
     if (e.target.closest("#actCall")) startIncoming(false);
     else if (e.target.closest("#actVideo")) startIncoming(true);
-    else if (e.target.closest("#actScreen")) openConsent();
+    else if (e.target.closest("#actScreen")) screenAction();
   });
+  // Clicking "screen" means: I want to VIEW this contact's screen. Live → real viewer session
+  // (their host runs its own local Allow/Deny — Inv 1 — before any pixels cross). Demo → the
+  // owner-side consent preview, so the design still demonstrates without a backend.
+  function screenAction() {
+    const c = byId(active); if (!c) return;
+    if (LIVE) startViewerSession(c);
+    else openConsent();
+  }
 
   // ---- call flow (designed preview; real voice/video calling is ADR-103/104) ----
   const callwin = el("#callwin"), scrim = el("#scrim"), incall = el("#incall"), pip = el("#pip");
@@ -199,13 +207,60 @@
   el("#btnMute").onclick = (e) => e.currentTarget.classList.toggle("on");
   el("#btnCam").onclick = (e) => e.currentTarget.classList.toggle("on");
 
-  // ---- consent -> session flow (designed preview; wires to the session backend as it's folded in) ----
+  // ---- consent -> session flow ----
   const consent = el("#consent"), session = el("#session"), ownerbar = el("#ownerbar");
+  const deskdemo = el("#deskdemo"), viewCanvas = el("#viewCanvas"), sessHud = el("#sessHud"), sessFatal = el("#sessFatal");
+
+  // The real WebCodecs viewer, folded in from the proven app path (viewer.js). Lazily created and
+  // bound to the session canvas. Content-free status only (Inv 8). ON-DEVICE VERIFICATION PENDING:
+  // the connect + decode path is a faithful port of working code but needs a two-machine run.
+  let viewer = null, viewerLive = false;
+  function ensureViewer() {
+    if (viewer) return viewer;
+    if (!LIVE || !window.RASViewer || !T.core || !T.core.Channel) return null;
+    // one-time fatal banner scaffold (Inv 8: message is engine capability text, never stream content)
+    sessFatal.innerHTML = "";
+    const title = document.createElement("b"); title.textContent = "Can't show this screen";
+    const msg = document.createElement("span"); msg.className = "fmsg";
+    const close = document.createElement("button"); close.className = "btn btn-ghost"; close.textContent = "Close"; close.onclick = endSession;
+    sessFatal.append(title, msg, close);
+    viewer = window.RASViewer.createViewer({
+      canvas: viewCanvas,
+      invoke: T.core.invoke,
+      Channel: T.core.Channel,
+      onStatus: (s) => { sessHud.hidden = false; sessHud.textContent = s; },
+      onFatal: (m) => { sessFatal.hidden = false; sessFatal.querySelector(".fmsg").textContent = m; },
+      onLive: (up) => { viewerLive = up; },
+    });
+    return viewer;
+  }
+
+  // LIVE: connect to a contact and render their screen into the session canvas.
+  async function startViewerSession(c) {
+    const v = ensureViewer();
+    if (!v) { toast("Viewer unavailable in this build", "var(--danger)"); return; }
+    sessFatal.hidden = true; sessHud.hidden = false; sessHud.textContent = "requesting " + c.name + "'s screen…";
+    deskdemo.hidden = true; viewCanvas.hidden = false;
+    const badge = session.querySelector(".ctrl-badge");
+    if (badge && badge.lastChild) badge.lastChild.textContent = "Viewing " + c.name;
+    session.classList.add("show"); inSession = true;
+    toast("Requesting " + c.name + "'s screen — waiting for their consent", "var(--session)");
+    await v.connectContact(c.id);   // false ⇒ onStatus already carries the reason; overlay stays so it's visible
+  }
+
+  // DEMO owner-side preview (no backend): the consent card → a faux session + un-hideable owner bar.
   function openConsent() { const c = byId(active); if (c) el("#reqname").textContent = c.name; consent.classList.add("show"); scrim.classList.add("show"); }
   el("#btnDeny").onclick = () => { consent.classList.remove("show"); scrim.classList.remove("show"); toast("Access denied", "var(--danger)"); };
-  el("#btnAllow").onclick = () => { consent.classList.remove("show"); scrim.classList.remove("show"); startSession(); };
-  function startSession() { session.classList.add("show"); ownerbar.classList.add("show"); inSession = true; toast("Session live · fresh grant issued", "var(--session)"); }
-  function endSession() { session.classList.remove("show"); ownerbar.classList.remove("show"); inSession = false; toast("Session ended — control revoked", "var(--session)"); }
+  el("#btnAllow").onclick = () => { consent.classList.remove("show"); scrim.classList.remove("show"); startDemoSession(); };
+  function startDemoSession() { deskdemo.hidden = false; viewCanvas.hidden = true; sessHud.hidden = true; sessFatal.hidden = true; session.classList.add("show"); ownerbar.classList.add("show"); inSession = true; toast("Session live · fresh grant issued", "var(--session)"); }
+
+  async function endSession() {
+    if (viewer && viewerLive) { try { await viewer.disconnect(); } catch (_) {} }
+    viewerLive = false;
+    session.classList.remove("show"); ownerbar.classList.remove("show"); inSession = false;
+    viewCanvas.hidden = true; deskdemo.hidden = false; sessHud.hidden = true; sessFatal.hidden = true;
+    toast("Session ended — control revoked", "var(--session)");
+  }
   el("#btnSessStop").onclick = endSession; el("#btnOwnerStop").onclick = endSession;
 
   function closeTransient() { callwin.classList.remove("show"); consent.classList.remove("show"); scrim.classList.remove("show"); }
