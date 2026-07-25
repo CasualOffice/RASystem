@@ -26,6 +26,7 @@ ras-identity = { path = "../ras-identity" }
 ras-grant = { path = "../ras-grant" }
 ras-policy = { path = "../ras-policy" }
 ras-control = { path = "../ras-control" }
+ras-call = { path = "../ras-call" }
 ras-audit = { path = "../ras-audit" }
 ras-media = { path = "../ras-media" }
 ras-transport-iroh = { path = "../ras-transport-iroh" }

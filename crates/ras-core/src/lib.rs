@@ -16,6 +16,7 @@
 //! object-safe DI seams) — both design-sanctioned (§5.4 spells them out) and permissively licensed.
 
 pub mod abr;
+pub mod call;
 pub mod deps;
 pub mod event;
 pub mod frame_channel;
