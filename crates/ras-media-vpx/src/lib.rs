@@ -121,6 +121,41 @@ const VP9_TEMPORAL_LAYERS: u32 = 3;
 /// the default "forward everything" ceiling for [`VpxEncoder::set_max_temporal_layer`].
 const VP9_MAX_LAYER_ID: u8 = (VP9_TEMPORAL_LAYERS - 1) as u8;
 
+/// Minimum kbps floor for the VP9 temporal SVC **base layer** (`ts_target_bitrate[0]`). This is the
+/// one layer that can never be shed — every receiver, even one dropping every enhancement frame, still
+/// depends on the base layer alone decoding to a usable picture. At very low total bitrates (an
+/// aggressive ABR downshift under real congestion — exactly the scenario SVC exists to survive) a plain
+/// percentage split (`total * 40 / 100`) can floor to 0 kbps under integer division, hobbling libvpx's
+/// rate controller for the layer that matters most right when bandwidth is tightest. 20 kbps is well
+/// below any usable screen-share bitrate but keeps the base layer's rate-control target sane instead of
+/// zero.
+const VP9_BASE_LAYER_MIN_KBPS: u32 = 20;
+
+/// Split a total VP9 CBR target (`total_kbps`, matching `cfg.rc_target_bitrate`'s units) into the
+/// **cumulative** per-temporal-layer targets libvpx's SVC config expects (`ts_target_bitrate[i]` is the
+/// bitrate for layers `0..=i` combined, strictly ascending, and the last entry equals `total_kbps` —
+/// see the comment on `VpxEncoder::build`). `num_layers` must be 2 or 3 (the only patterns this encoder
+/// configures); any other value returns an empty slice conceptually (callers only invoke this under
+/// `self.svc()` with a layer count they just set).
+///
+/// The base layer (index 0) is floored at [`VP9_BASE_LAYER_MIN_KBPS`] so it is never starved to 0 by
+/// integer-division rounding at very low total bitrates. Layer 1 (3-layer case) is then clamped up to
+/// at least the (possibly-raised) base so the sequence stays non-decreasing, and the total always ends
+/// at `total_kbps` exactly, preserving libvpx's cumulative/ascending/ends-at-total contract.
+fn vp9_temporal_layer_bitrates_kbps(total_kbps: u32, num_layers: u32) -> [u32; 3] {
+    match num_layers {
+        3 => {
+            let base = ((total_kbps * 40) / 100).max(VP9_BASE_LAYER_MIN_KBPS.min(total_kbps));
+            let mid = ((total_kbps * 60) / 100).max(base);
+            [base, mid, total_kbps]
+        }
+        _ => {
+            let base = ((total_kbps * 60) / 100).max(VP9_BASE_LAYER_MIN_KBPS.min(total_kbps));
+            [base, total_kbps, 0]
+        }
+    }
+}
+
 /// Map a frame's position within the temporal-SVC GOP to its libvpx temporal-layer id, for the fixed
 /// periodic patterns this encoder configures (`docs/10`, VP9 spec temporal-layering annex).
 ///
@@ -378,8 +413,11 @@ impl VpxEncoder {
             cfg.g_error_resilient = ffi::VPX_ERROR_RESILIENT_DEFAULT;
             // The layering *mode* is a config field (there is no separate control id for it): a fixed
             // periodic pattern lets libvpx assign temporal-layer ids internally. Per-layer cumulative
-            // bitrate must be ascending and end at the total (40/60/100% for 3 layers; 60/100% for 2).
+            // bitrate must be ascending and end at the total (40/60/100% for 3 layers; 60/100% for 2),
+            // with the base layer floored at `VP9_BASE_LAYER_MIN_KBPS` — see
+            // `vp9_temporal_layer_bitrates_kbps`.
             let total = cfg.rc_target_bitrate;
+            let split = vp9_temporal_layer_bitrates_kbps(total, layers);
             match layers {
                 3 => {
                     cfg.temporal_layering_mode =
@@ -389,9 +427,9 @@ impl VpxEncoder {
                     cfg.ts_rate_decimator[0] = 4;
                     cfg.ts_rate_decimator[1] = 2;
                     cfg.ts_rate_decimator[2] = 1;
-                    cfg.ts_target_bitrate[0] = (total * 40) / 100;
-                    cfg.ts_target_bitrate[1] = (total * 60) / 100;
-                    cfg.ts_target_bitrate[2] = total;
+                    cfg.ts_target_bitrate[0] = split[0];
+                    cfg.ts_target_bitrate[1] = split[1];
+                    cfg.ts_target_bitrate[2] = split[2];
                 }
                 _ => {
                     cfg.temporal_layering_mode =
@@ -400,8 +438,8 @@ impl VpxEncoder {
                     cfg.ts_layer_id = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                     cfg.ts_rate_decimator[0] = 2;
                     cfg.ts_rate_decimator[1] = 1;
-                    cfg.ts_target_bitrate[0] = (total * 60) / 100;
-                    cfg.ts_target_bitrate[1] = total;
+                    cfg.ts_target_bitrate[0] = split[0];
+                    cfg.ts_target_bitrate[1] = split[1];
                 }
             }
         }
@@ -771,15 +809,16 @@ impl ras_media::VideoEncoderBackend for VpxEncoder {
             cfg.rc_target_bitrate = target_kbps;
             if svc {
                 let total = target_kbps;
+                let split = vp9_temporal_layer_bitrates_kbps(total, cfg.ts_number_layers);
                 match cfg.ts_number_layers {
                     3 => {
-                        cfg.ts_target_bitrate[0] = (total * 40) / 100;
-                        cfg.ts_target_bitrate[1] = (total * 60) / 100;
-                        cfg.ts_target_bitrate[2] = total;
+                        cfg.ts_target_bitrate[0] = split[0];
+                        cfg.ts_target_bitrate[1] = split[1];
+                        cfg.ts_target_bitrate[2] = split[2];
                     }
                     2 => {
-                        cfg.ts_target_bitrate[0] = (total * 60) / 100;
-                        cfg.ts_target_bitrate[1] = total;
+                        cfg.ts_target_bitrate[0] = split[0];
+                        cfg.ts_target_bitrate[1] = split[1];
                     }
                     _ => {}
                 }
@@ -1091,6 +1130,54 @@ mod tests {
             low * 2 < high,
             "lowering the bitrate must shrink output (high={high} bytes, low={low} bytes)"
         );
+    }
+
+    /// The base temporal layer (`ts_target_bitrate[0]`) must never be starved to 0 by integer-division
+    /// rounding at very low total bitrates — it's the one layer every receiver depends on to decode
+    /// anything at all, and it's exactly the layer the ABR leans on hardest when it downshifts under
+    /// real congestion. Regression test for the P1 fixed here.
+    #[test]
+    fn base_temporal_layer_never_floors_to_zero_at_low_bitrate() {
+        for total_kbps in [0u32, 1, 2, 3, 5, 10, 19, 20, 21] {
+            let split3 = vp9_temporal_layer_bitrates_kbps(total_kbps, 3);
+            assert!(
+                split3[0] > 0 || total_kbps == 0,
+                "3-layer base must be >0 for total_kbps={total_kbps} (got {split3:?})"
+            );
+            assert!(
+                split3[0] <= split3[1] && split3[1] <= split3[2],
+                "3-layer split must stay ascending/cumulative for total_kbps={total_kbps} (got {split3:?})"
+            );
+            assert_eq!(
+                split3[2], total_kbps,
+                "3-layer split must end exactly at the total for total_kbps={total_kbps}"
+            );
+
+            let split2 = vp9_temporal_layer_bitrates_kbps(total_kbps, 2);
+            assert!(
+                split2[0] > 0 || total_kbps == 0,
+                "2-layer base must be >0 for total_kbps={total_kbps} (got {split2:?})"
+            );
+            assert!(
+                split2[0] <= split2[1],
+                "2-layer split must stay ascending/cumulative for total_kbps={total_kbps} (got {split2:?})"
+            );
+            assert_eq!(
+                split2[1], total_kbps,
+                "2-layer split must end exactly at the total for total_kbps={total_kbps}"
+            );
+        }
+    }
+
+    /// At normal (non-degenerate) bitrates the fixed floor must not perturb the existing 40/60/100 (or
+    /// 60/100) percentage split at all — this is purely a low-bitrate safety net.
+    #[test]
+    fn temporal_layer_split_matches_legacy_percentages_above_the_floor() {
+        let split3 = vp9_temporal_layer_bitrates_kbps(1000, 3);
+        assert_eq!(split3, [400, 600, 1000]);
+
+        let split2 = vp9_temporal_layer_bitrates_kbps(1000, 2);
+        assert_eq!(split2, [600, 1000, 0]);
     }
 
     #[test]

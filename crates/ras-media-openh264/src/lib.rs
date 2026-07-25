@@ -223,6 +223,10 @@ impl ras_media::VideoEncoderBackend for OpenH264Encoder {
     }
 
     fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), MediaError> {
+        // Same floor as `build_encoder`'s `.bitrate(...)`: a degenerate 0 target (e.g. from a bug
+        // elsewhere in the ABR) must not reach OpenH264's `SetOption`, whose behavior at a literal
+        // zero bitrate is unvalidated/undefined.
+        let bitrate_bps = bitrate_bps.max(1);
         self.config.target_bitrate_bps = bitrate_bps;
         // Retarget the live encoder's rate controller without forcing a keyframe — the latency-first
         // ABR ticks frequently and an IDR per change would spike latency (design §3.6). If the encoder
