@@ -712,6 +712,7 @@ casual-ras/
 | `docs/22_LEARNINGS_TRACKER.md` | **Study-only research learnings (RustDesk/ecosystem: Wayland input, cursor, capture exclusion, latency, cross-OS input parity) + the half-done-implementation fix tracker (☐/◐/☑)** |
 | `docs/23_OPEN_WORK_TRACKER.md` | Post-alpha open work: feature gaps, tech debt, engineering backlog with fixability tags + the input/cursor rollback record |
 | `docs/24_UI_UX.md` | **UI/UX design system + plan: tokens, the color-semantics rule, component/a11y requirements, the P0 backlog with live status, phased roadmap** |
+| `docs/25_UI_DESIGN_DIRECTION.md` | **Grounded design direction for the contacts-first collaboration + calls + remote-access shell (from a 4-track competitor UI research sweep): shell/presence/chat/call/session layouts, tokens, anti-AI-generic guardrails, named influences, ADR-worthy decisions** |
 | `docs/design/phase-<n>-design.md` | Per-phase design notes (written at each phase's design gate) |
 
 ---
