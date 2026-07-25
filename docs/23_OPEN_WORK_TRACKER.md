@@ -72,3 +72,46 @@ the experience — reverted to the simple proven model:
 **2.1 note:** the *viewer→host* annotation + remote pointer are kept; only the *host→controller* (sharer)
 annotation was removed. All the above are compile + macOS-unit verified; the live two-machine run is the
 on-device confirmation (the `q` HUD number is the lag diagnostic).
+
+## Production-readiness audit (2026-07-25, multi-agent) — findings + dispositions
+
+Two rounds of parallel adversarial code review (9 review agents total) over every major surface, each
+finding independently re-verified against the actual code before action. **Fixed items are committed +
+CI-green; the deferred rows below are recorded so they're not lost.** Grading per the legend at the top.
+
+### Round 1 — session core / app / security core / transport-media / OS-input
+
+| Sev | Finding | Disposition |
+|---|---|---|
+| P0 | macOS VideoToolbox encoder **use-after-free** on mid-session reconfigure (old session/`Arc<EncOut>` refcon freed while a callback may be in flight; reachable via an ordinary monitor drag) | ☑ FIXED — drain (`CompleteFrames`) + `invalidate` the old session before replacing it |
+| P1 | App **accept-loop race**: `trigger_stop_sharing` cleared the session slot before `run_share` exited, so a fast Stop→Share-again could spawn a 2nd `accept()` on the same endpoint | ☑ FIXED — `run_lock` held for the task's whole lifetime |
+| P1 | `ControllerSession::disconnect` didn't grace-wait for its `Bye` to reach the wire (forced the host onto the reconnect path on every ordinary disconnect) | ☑ FIXED — `BYE_FLUSH_GRACE` mirror of `HostSession::stop` |
+| P1 | File-transfer consent prompt **HOL-blocked** the host control loop (froze live input up to 90 s) | ☑ FIXED — off-loop `file_consent_rx` mirror of the control-consent fix; **regression test added + verified to actually catch the bug** |
+| P1 | `validate_filename` didn't reject Unicode **bidi-override/zero-width** chars → filename spoofing in the file-accept consent dialog | ☑ FIXED — Cf-category denylist + test |
+| P1 | libei portal handshake not cancellable → leaked thread + open portal session on Share-cancel-during-consent | ☑ FIXED — cancellable handshake **+** explicit `session.close()` on the cancel path (the fix's own comment was wrong: ashpd `Session` has no `Drop` — verified against 0.9.3 source) |
+| P1 | OpenH264 runtime `set_bitrate(0)` had no floor; VP9 SVC base-layer bitrate could integer-divide to 0 kbps under aggressive downshift | ☑ FIXED — `.max(1)` floor + `VP9_BASE_LAYER_MIN_KBPS` |
+| P2 | peer-`Bye` stop-idempotency bypass; fsync-error swallowed in `host_handle_file_complete`; ABR f32 precision; scap silent format-mismatch stall; audio-opus bitrate-cast overflow; `HealthObserver` "unknown path → Direct" mislabel | ☑ ALL FIXED |
+
+### Round 2 — bootstrap/signal / presence-gossip-contacts / OS audio-cursor / JS frontend
+
+| Sev | Finding | Disposition |
+|---|---|---|
+| P1 | `FileContactBook` **block/remove fail-open-on-restart**: best-effort persist meant a failed disk write let a revoked/blocked contact reload as active | ☑ FIXED — kill-switch/revoke now force `save()` + surface the error (Inv 1) |
+| P1 | Controller **stuck keyboard modifiers**: held keys never released on webview focus loss / control end (only buttons were) → stuck Shift/Ctrl/⌘ on the host | ☑ FIXED — `heldKeys` tracking flushed on every exit hook + control-end |
+| P1 | **Windows WASAPI** silent-audio-death on non-48kHz/non-stereo endpoints (Opus `configure` fails, pump exits, "AUDIO SHARED" still shows) | ◐ `HW`/`DEVICE` — DOCUMENTED in-code, NOT blind-fixed. Correct fix = resample to 48k stereo + an `AudioUnavailable` lifecycle event; both need a real Windows audio device to build+verify, and `ras-core` is deliberately log-free. Tracked for the Windows on-device pass. |
+| P2 | JS contact-id interpolated into `querySelector` without escaping; six input invokes missing `.catch` | ☑ FIXED — `CSS.escape` + `.catch` guards |
+| P2 | Signals have **no nonce** → a captured signed `AccessRequestIntent` is replayable within the freshness window to re-raise a consent prompt (bounded by consent — Inv 1 holds — so annoyance, not access) | ☐ `BIG-NET`/`FUTURE` — a per-sender monotonic/nonce dedup on the signal path. Touches the wire; wants an ADR. |
+| P2 | Presence-privacy: pairwise gossip topic = `SHA256(domain‖sorted pubkeys)`, so a 3rd party who knows both pubkeys can observe the pair is online | ☐ `FUTURE` — pairing-secret-derived topic (already the code's documented hardening follow-up) |
+| P2 | No concurrency/rate cap on inbound SIGNAL/GOSSIP dials (task-per-dial, unbounded); `presence_poll_loop`'s `last` map accretes dead entries across churn | ☐ `CODE-NOW` (small) — a bounded semaphore + a prune pass; low impact (bounded by contact count in practice) |
+| P2 | Audio/cursor timestamp + multi-monitor quality: Windows loopback `captured_at_us=0` (no QPC); Linux open-loop audio clock drifts under xruns; Linux/macOS cursor position normalized over the wrong display until `set_display_bounds` | ☐ `DEVICE` — A/V-sync + multi-monitor quality, on-device-tuned |
+
+**Verified clean (no P0/P1) — recorded as ground truth (Inv 17):** the authorization spine (grants,
+leases, per-message capability gate, PASETO envelope, audit hash-chain) — no auth-bypass or fail-open;
+`ras-bootstrap`/`ras-signal` — no replay-across-sweep, no signature bypass (`verify_strict`), no
+remote-bytes panic; presence/gossip routing — a SIGNAL/GOSSIP dial provably cannot reach the
+screen-serving/grant path (ALPN routing is mutually exclusive + fail-closed), contacts-storage failure
+fails **safe** (deny), not open; the macOS SCK audio callback captures only an `Arc` (no UAF, unlike the
+video-encoder class); the JS frontend — **no XSS** (every peer string via `textContent`, the two
+`innerHTML` uses are `= ""` clears), no secret-in-logs (Inv 8), Stop/Disconnect always reachable (Inv 7),
+pointer-lock can't trap the local cursor, the WebCodecs decode path is retry-capped (no black-screen
+regression).
