@@ -220,6 +220,13 @@ mod tests {
         media_stopped: Mutex<u32>,
         events: Mutex<Vec<CallLifecycleEvent>>,
     }
+    impl Recorder {
+        /// Drain the control messages the driver asked to send (a real driver would put these on the
+        /// transport control channel; the end-to-end test ferries them through the loopback transport).
+        fn take_sent(&self) -> Vec<ControlMsg> {
+            std::mem::take(&mut self.sent.lock().unwrap())
+        }
+    }
     impl CallControlSink for Recorder {
         fn send(&self, msg: ControlMsg) {
             self.sent.lock().unwrap().push(msg);
@@ -398,5 +405,90 @@ mod tests {
         let mut a_vsrc = a.video_source().await.unwrap();
         b_vsink.send_frame(frame(1));
         assert!(matches!(a_vsrc.next().await.unwrap(), VideoEvent::Frame(_)));
+    }
+
+    /// Capstone: two [`CallDriver`]s conduct a **full call over the real loopback transport** — the
+    /// `ControlMsg::Call*` messages ride the transport's control channel and the mic audio rides its
+    /// audio plane, proving driver + wire + transport + media compose end-to-end (off-device). The
+    /// out-of-session ring is delivered directly (as the signal plane would).
+    #[tokio::test]
+    async fn full_call_over_the_loopback_transport() {
+        use crate::testkit::call_loopback;
+        use bytes::Bytes;
+        use ras_media::audio::{AudioCodec, AudioConfig, EncodedAudio};
+
+        let acfg = AudioConfig {
+            codec: AudioCodec::Opus,
+            sample_rate_hz: 48_000,
+            channels: 1,
+            frame_duration_us: 20_000,
+            target_bitrate_bps: 64_000,
+        };
+        let mic = |seq: u64| EncodedAudio {
+            seq,
+            captured_at_us: seq * 20_000,
+            data: Bytes::from_static(b"opus"),
+            config: acfg,
+        };
+
+        let (ta, tb) = call_loopback();
+        let mut a_ctl = ta.control_channel().await.unwrap();
+        let mut b_ctl = tb.control_channel().await.unwrap();
+        let ra = Arc::new(Recorder::default());
+        let mut da = driver(&ra);
+        let rb = Arc::new(Recorder::default());
+        let mut db = driver(&rb);
+
+        // A places a video call → its ring is a signal (recorded); deliver it to B (as the signal plane
+        // would). B rings, does NOT auto-answer (Inv 1).
+        da.place_call(CallMedia::Video);
+        assert_eq!(*ra.invites.lock().unwrap(), vec![CallMedia::Video]);
+        db.on_invite(CallMedia::Video);
+        assert_eq!(db.runtime().manager().state(), ras_call::CallState::Ringing);
+
+        // B accepts → CallAccept rides the TRANSPORT control channel to A.
+        db.local_accept(CallMedia::Video);
+        for m in rb.take_sent() {
+            b_ctl.send(m).await.unwrap();
+        }
+        let accept = a_ctl.recv().await.unwrap();
+        assert!(matches!(accept, ControlMsg::CallAccept { .. }));
+        da.on_control(&accept);
+
+        // Both media sessions come up → both start capturing.
+        da.media_connected();
+        db.media_connected();
+        assert_eq!(*ra.media_started.lock().unwrap(), vec![CallMedia::Video]);
+        assert_eq!(*rb.media_started.lock().unwrap(), vec![CallMedia::Video]);
+
+        // Mic audio flows over the transport's audio plane, both ways.
+        let a_asink = ta.audio_sink().await.unwrap();
+        let mut b_asrc = tb.audio_source().await.unwrap();
+        a_asink.send_audio(mic(1));
+        assert_eq!(b_asrc.next().await.unwrap().seq, 1);
+        let b_asink = tb.audio_sink().await.unwrap();
+        let mut a_asrc = ta.audio_source().await.unwrap();
+        b_asink.send_audio(mic(2));
+        assert_eq!(a_asrc.next().await.unwrap().seq, 2);
+
+        // A hangs up → CallHangup rides the transport to B → B stops media + ends (Inv 4/12).
+        da.hangup();
+        assert_eq!(*ra.media_stopped.lock().unwrap(), 1);
+        for m in ra.take_sent() {
+            a_ctl.send(m).await.unwrap();
+        }
+        let bye = b_ctl.recv().await.unwrap();
+        assert!(matches!(bye, ControlMsg::CallHangup { .. }));
+        db.on_control(&bye);
+        assert_eq!(
+            *rb.media_stopped.lock().unwrap(),
+            1,
+            "peer tears down media too"
+        );
+        assert!(rb
+            .events
+            .lock()
+            .unwrap()
+            .contains(&CallLifecycleEvent::Ended));
     }
 }
