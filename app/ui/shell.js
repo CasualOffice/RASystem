@@ -214,9 +214,24 @@
   // The real WebCodecs viewer, folded in from the proven app path (viewer.js). Lazily created and
   // bound to the session canvas. Content-free status only (Inv 8). ON-DEVICE VERIFICATION PENDING:
   // the connect + decode path is a faithful port of working code but needs a two-machine run.
-  let viewer = null, viewerLive = false, controller = null, sessContactName = "";
+  let viewer = null, viewerLive = false, controller = null, audioPlayer = null, sessContactName = "";
   const takeBtn = () => el("#btnTakeControl");
+  const audioBtn = () => el("#btnAudio");
   const sessBadge = () => session.querySelector(".ctrl-badge");
+
+  // Reflect the shared-audio player state (audio.js) onto the toolbar button. Output-only, live-only
+  // (Inv 12); an "AUDIO SHARED" affordance is honest disclosure (Inv 7). Hidden until a packet arrives.
+  function reflectAudio(s) {
+    const b = audioBtn();
+    if (!b) return;
+    b.hidden = !s.started;
+    b.classList.toggle("playing", s.started && !s.muted && !s.needsGesture);
+    b.classList.toggle("muted", s.muted);
+    b.classList.toggle("needs-gesture", s.needsGesture);
+    const lbl = b.querySelector(".audio-label");
+    if (lbl) lbl.textContent = s.needsGesture ? "Enable audio" : s.muted ? "Muted" : "Audio";
+    b.setAttribute("aria-pressed", s.muted ? "false" : "true");
+  }
 
   // Reflect the take-control FSM (control.js) into the toolbar button + session badge (Inv 7: the
   // controlling state is always legible; --session chrome marks live OS control).
@@ -247,6 +262,15 @@
     const msg = document.createElement("span"); msg.className = "fmsg";
     const close = document.createElement("button"); close.className = "btn btn-ghost"; close.textContent = "Close"; close.onclick = endSession;
     sessFatal.append(title, msg, close);
+    // shared-audio player (host→controller Opus). Fed by the viewer's audio Channel below.
+    if (window.RASAudio) {
+      audioPlayer = window.RASAudio.createAudioPlayer({
+        onState: reflectAudio,
+        onUnsupported: (m) => toast(m, "var(--amber)"),
+      });
+      const ab = audioBtn();
+      if (ab) ab.onclick = () => { if (audioPlayer) audioPlayer.toggle(); };
+    }
     viewer = window.RASViewer.createViewer({
       canvas: viewCanvas,
       invoke: T.core.invoke,
@@ -254,6 +278,7 @@
       onStatus: (s) => { sessHud.hidden = false; sessHud.textContent = s; },
       onFatal: (m) => { sessFatal.hidden = false; sessFatal.querySelector(".fmsg").textContent = m; },
       onLive: (up) => { viewerLive = up; if (!up && controller) controller.reset(); },
+      onAudio: (msg) => { if (audioPlayer) audioPlayer.handle(msg); },
     });
     if (window.RASControl) {
       controller = window.RASControl.createController({
@@ -290,10 +315,12 @@
 
   async function endSession() {
     if (controller) controller.reset(); // release any held input + lease-follow before we drop (Inv 4)
+    if (audioPlayer) audioPlayer.reset(); // tear down the AudioContext — no audio state lingers (Inv 12)
     if (viewer && viewerLive) { try { await viewer.disconnect(); } catch (_) {} }
     viewerLive = false;
     session.classList.remove("show"); ownerbar.classList.remove("show"); inSession = false;
     viewCanvas.hidden = true; deskdemo.hidden = false; sessHud.hidden = true; sessFatal.hidden = true;
+    const ab = audioBtn(); if (ab) ab.hidden = true;
     toast("Session ended — control revoked", "var(--session)");
   }
   el("#btnSessStop").onclick = endSession; el("#btnOwnerStop").onclick = endSession;

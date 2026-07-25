@@ -192,6 +192,9 @@ button{font-family:inherit}
 .sesstoolbar .sb.pending{background:var(--surface-4);color:var(--ink-dim)}
 .sesstoolbar .sb.denied{background:var(--danger);color:#fff}
 .sesstoolbar .sb:disabled{cursor:default;opacity:.85}
+.sesstoolbar .sb.playing{color:var(--ink)}
+.sesstoolbar .sb.muted{color:var(--ink-faint)}
+.sesstoolbar .sb.needs-gesture{background:var(--amber-glow);color:var(--amber)}
 .sesstoolbar .sep{width:1px;height:18px;background:var(--line);margin:0 3px}
 .telemetry{position:absolute;left:14px;bottom:14px;font-family:var(--mono);font-size:11px;color:var(--ink-dim);background:rgba(10,11,15,.55);padding:5px 9px;border-radius:var(--r-pill);z-index:5}
 .ctrl-badge{position:absolute;right:14px;bottom:14px;display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--session);background:var(--session-soft);border:1px solid var(--session-line);padding:5px 11px;border-radius:var(--r-pill);z-index:5}
