@@ -161,6 +161,7 @@ crates/                 # shared Rust core (the future SDK internals)
   ras-signal/           # signed, contacts-only signaling (presence · messages · access/call intents)
   ras-call/             # pure 1:1 call state machine + manager (ADR-103/104) — spine of calling
   ras-mic/              # cross-platform microphone capture (cpal) for calls — pure framer + device glue
+  ras-camera/           # cross-platform camera capture (nokhwa) for calls — pure BGRA core + backend (excluded crate)
   ras-bootstrap/        # rotating single-use connection tickets + replay/nonce cache
   ras-grant/            # signed access requests · PASETO v4.public grants · unattended-access model
   ras-policy/           # capability intersection · signed-catalogue file push
