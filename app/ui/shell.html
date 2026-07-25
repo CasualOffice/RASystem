@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Casual RAS</title>
+<link rel="stylesheet" href="shell.css" />
+</head>
+<body>
+<div class="app">
+  <!-- rail -->
+  <nav class="rail" aria-label="Primary">
+    <div class="rail-mark" title="Casual RAS">C</div>
+    <button class="nav active" title="Contacts" aria-current="page">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="10" cy="8" r="4"/><path d="M21 21v-2a4 4 0 0 0-3-3.9"/></svg>
+    </button>
+    <button class="nav" title="Recent">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+    </button>
+    <button class="nav" title="Calls"><span class="dot"></span>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4h4l2 5-3 2a12 12 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/></svg>
+    </button>
+    <button class="nav" title="Activity">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 12h4l2 7 4-14 2 7h4"/></svg>
+    </button>
+    <div class="rail-spacer"></div>
+    <button class="nav" title="You — online" style="padding:0">
+      <span class="avatar s40" style="background:#4a5578">YM<span class="presence online"><i></i></span></span>
+    </button>
+    <button class="nav" title="Settings">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.6-2-3.4-2.4 1a7 7 0 0 0-1.7-1L14.5 2h-4l-.3 2.4a7 7 0 0 0-1.7 1l-2.4-1-2 3.4L4 11a7 7 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 1.7 1l.3 2.4h4l.3-2.4a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6a7 7 0 0 0 .1-1z"/></svg>
+    </button>
+  </nav>
+
+  <!-- list -->
+  <div class="list">
+    <div class="list-head">
+      <div class="title">Messages
+        <button class="iconbtn" title="New message">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+        </button>
+      </div>
+      <div class="search"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>Search contacts</div>
+    </div>
+    <div class="convs" id="convs"></div>
+  </div>
+
+  <!-- main -->
+  <div class="main" id="main">
+    <div class="topbar" id="topbar"></div>
+    <div class="thread" id="thread"></div>
+    <div class="composer">
+      <form class="cbox" id="composer">
+        <button class="iconbtn" type="button" title="Attach"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.5 12.5 21a4.5 4.5 0 0 1-6.4-6.4L15 5.7A3 3 0 0 1 19.2 10l-8.9 8.8a1.5 1.5 0 0 1-2.1-2.1l7.9-7.9"/></svg></button>
+        <input id="cinput" placeholder="Message…" autocomplete="off" />
+        <button class="iconbtn" type="button" title="Emoji"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M8 14a4.5 4.5 0 0 0 8 0"/><path d="M9 9h.01M15 9h.01"/></svg></button>
+        <button class="send" id="send" type="submit" title="Send" disabled><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></button>
+      </form>
+    </div>
+
+    <!-- in-call stage overlay (inside main) -->
+    <div class="incall" id="incall">
+      <div class="stage">
+        <div class="ctimer mono" id="ctimer">00:00</div>
+        <div class="qual" title="Connection: good · direct"><b></b><b></b><b></b></div>
+        <div class="rmt-name" id="rmtname">Priya Nair</div>
+        <div class="selfview" title="Your camera"></div>
+        <div class="callbar">
+          <button class="cbtn on" id="btnMute" title="Mute"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/><path d="M19 10a7 7 0 0 1-14 0M12 19v3"/></svg></button>
+          <button class="cbtn" id="btnCam" title="Camera"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m23 7-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button>
+          <button class="cbtn" title="Share screen"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></button>
+          <button class="cbtn" title="More"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg></button>
+          <button class="cbtn end" id="btnMinCall" title="Minimize (keep call)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 12h14"/></svg></button>
+          <button class="cbtn end" id="btnHang" title="Hang up"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M22 16.9A16 16 0 0 1 3 6a2 2 0 0 1 2-2h3l1.5 4-2 1.5a12 12 0 0 0 6 6l1.5-2 4 1.5V17a2 2 0 0 1-2 2" transform="rotate(135 12 12)"/></svg></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- live remote session overlay (controller pov, inside main) -->
+    <div class="session" id="session">
+      <div class="desk">
+        <div class="menubar"><b style="font-weight:600">Finder</b><span>File</span><span>Edit</span><span>View</span><span style="margin-left:auto" class="mono">2:14 PM</span></div>
+        <div class="win" style="left:60px;top:70px;width:340px;height:200px"><div class="wt"><i></i><i></i><i></i><span style="color:#aeb4c0;font-size:11px;margin-left:6px">app.rs — ras-core</span></div></div>
+        <div class="win" style="right:70px;top:120px;width:300px;height:170px"><div class="wt"><i></i><i></i><i></i><span style="color:#aeb4c0;font-size:11px;margin-left:6px">Terminal</span></div></div>
+        <svg class="osc" style="left:300px;top:200px" viewBox="0 0 16 22" fill="#f4f5f8" stroke="#0b0d13" stroke-width="1"><path d="M1 1l13 9-5.5 1.2L11 18l-2.5 1-2.6-6L1 15z"/></svg>
+        <div class="sesstoolbar">
+          <button class="sb" title="Switch display"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/></svg>Display 1</button>
+          <span class="sep"></span>
+          <button class="sb" title="Quality">HD</button>
+          <button class="sb" title="Capabilities">Control · Clipboard</button>
+          <button class="sb" title="Send file"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12M8 7l4-4 4 4"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg></button>
+          <button class="sb" title="Chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+          <span class="sep"></span>
+          <button class="sb stop" id="btnSessStop">Stop</button>
+        </div>
+        <div class="telemetry">12 ms · 0.1% loss · direct</div>
+        <div class="ctrl-badge"><i></i>Controlling Priya Nair</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- incoming call window -->
+<div class="callwin" id="callwin" role="dialog" aria-label="Incoming call">
+  <div class="avatar s72 cav" id="cwav" aria-hidden="true"></div>
+  <div class="cnm" id="cwname">Priya Nair</div>
+  <div class="csub">Casual RAS · <b style="color:var(--ink)">Incoming video call</b></div>
+  <div class="csec"><a>Message</a><a>Remind me</a></div>
+  <div class="cbtns">
+    <div><button class="cbtn audio sm" id="btnAcceptA" title="Accept audio"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4h4l2 5-3 2a12 12 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/></svg></button><div class="cbtn-lbl">Audio</div></div>
+    <div><button class="cbtn video" id="btnAcceptV" title="Accept video"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m23 7-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button><div class="cbtn-lbl">Video</div></div>
+    <div><button class="cbtn decline sm" id="btnDecline" title="Decline"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M18 6 6 18M6 6l12 12"/></svg></button><div class="cbtn-lbl">Decline</div></div>
+  </div>
+</div>
+
+<!-- PiP -->
+<div class="pip" id="pip">
+  <div class="pth"></div>
+  <div class="pnm" id="pipname">Priya Nair</div>
+  <button class="picon" title="Mute"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/><path d="M19 10a7 7 0 0 1-14 0"/></svg></button>
+  <button class="picon" id="btnExpand" title="Back to call"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button>
+  <button class="picon end" id="btnPipEnd" title="Hang up"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+</div>
+
+<!-- consent card -->
+<div class="consent" id="consent" role="dialog" aria-label="Access request">
+  <span class="kick"><i></i>Access request</span>
+  <div class="chd">
+    <span class="avatar s40" style="background:#7a5c3a">AR</span>
+    <div class="t"><b id="reqname">Alex Rivera</b> wants to access your screen</div>
+  </div>
+  <div class="matchcode">Match code · <b>K7QP</b> · <b>4M2X</b> · <b>9RJT</b></div>
+  <div class="caps">
+    <div class="caprow"><div class="capbody"><div class="cn">View screen</div><div class="cd">See what's on your display.</div></div>
+      <label class="switch"><input type="checkbox" checked aria-label="View screen"><span class="tk"></span><span class="th"></span></label></div>
+    <div class="caprow"><div class="capbody"><div class="cn">Control keyboard &amp; mouse</div><div class="cd">Move the pointer and type. One controller at a time.</div></div>
+      <label class="switch"><input type="checkbox" aria-label="Control"><span class="tk"></span><span class="th"></span></label></div>
+    <div class="caprow"><div class="capbody"><div class="cn">Clipboard</div><div class="cd">Copy text between machines.</div></div>
+      <label class="switch"><input type="checkbox" aria-label="Clipboard"><span class="tk"></span><span class="th"></span></label></div>
+    <div class="caprow"><div class="capbody"><div class="cn">File transfer — Downloads only</div><div class="cd">Send files into your Downloads folder.</div></div>
+      <label class="switch"><input type="checkbox" aria-label="Files"><span class="tk"></span><span class="th"></span></label></div>
+  </div>
+  <label class="remember"><input type="checkbox"><span>Remember Alex — skip this prompt next time. Every connection still mints a fresh, per-action-checked grant; this only skips the pop-up.</span></label>
+  <div class="foot">
+    <button class="btn btn-ghost" id="btnDeny">Deny</button>
+    <button class="btn btn-primary" id="btnAllow">Allow</button>
+  </div>
+</div>
+
+<!-- owner "being controlled" bar (un-hideable) -->
+<div class="ownerbar" id="ownerbar">
+  <span class="odot"></span>
+  <span class="otx">REMOTE CONTROL ACTIVE — Alex Rivera is controlling your screen</span>
+  <span class="olock"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Can't be hidden</span>
+  <button class="btn btn-danger ostop" id="btnOwnerStop">Stop</button>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<div class="toast" id="toast"><span class="td"></span><span id="toasttx">Ready</span></div>
+<div class="hint">Click a <b>contact</b> · the <b>call</b> / <b>screen</b> icons in the top bar drive the real flows · <b>Esc</b> closes overlays</div>
+<script src="shell.js"></script>
+</body>
+</html>
