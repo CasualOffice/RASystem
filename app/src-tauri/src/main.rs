@@ -1407,6 +1407,14 @@ struct ShareState {
     /// old hardcoded `MonitorId(0)`. Defaults to `0` (the primary/first display) so a share works with
     /// no picker interaction on a single-display machine.
     selected_monitor: Mutex<u32>,
+    /// Serializes `run_share` invocations on the shared endpoint (TOCTOU fix). Every `run_share` task
+    /// holds this lock for its **entire** lifetime (acquired before its accept loop, released only when
+    /// it returns). `start_sharing` acquires it in the *same spawned task* that runs `run_share`, so a
+    /// fast Stop-then-Share-again cannot have two tasks both calling `endpoint.accept()`: the new task's
+    /// lock acquisition simply queues behind the old task's release, which happens only after the old
+    /// task has observed `stop` and dropped its in-flight `accept()` future. `start_sharing` itself
+    /// still returns immediately — only the spawned task waits.
+    run_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// A running share: the `watch` sender used to tear the whole share down, plus (once a viewer is
@@ -1532,6 +1540,24 @@ impl LocalConsent {
     fn respond_file(&self, allow: bool) {
         if let Some(tx) = lock(&self.pending_file).take() {
             let _ = tx.send(allow);
+        }
+    }
+
+    /// Cancel every currently-pending consent prompt (access / control-lease / file-transfer) as a
+    /// **denial**, so a Stop (button or the global emergency-stop hotkey) doesn't leave a dialog for a
+    /// now-defunct share sitting up to 90s waiting for an answer nobody can meaningfully give. Safe to
+    /// call with zero pending prompts (each `take()` is a no-op then). A dropped `oneshot::Receiver`
+    /// (e.g. the corresponding `prompt`/`consent_to_*` call already timed out or the session already
+    /// tore down) makes `send` a harmless no-op — never panics.
+    fn cancel_all(&self) {
+        if let Some(tx) = lock(&self.pending).take() {
+            let _ = tx.send(false);
+        }
+        if let Some(tx) = lock(&self.pending_control).take() {
+            let _ = tx.send(false);
+        }
+        if let Some(tx) = lock(&self.pending_file).take() {
+            let _ = tx.send(false);
         }
     }
 
@@ -1927,6 +1953,10 @@ fn trigger_stop_sharing(state: &AppState) {
     if let Some(s) = lock(&state.share.session).take() {
         let _ = s.stop.send(true);
     }
+    // Any in-flight consent prompt (access / control-lease / file-transfer) belongs to a share that is
+    // now gone — resolve it as denied immediately instead of leaving it to a (up to 90s) timeout, which
+    // would otherwise show the local user a dialog for a session that no longer exists.
+    state.share.consent.cancel_all();
 }
 
 /// Bring the main Casual RAS window back from the compact sharing strip (issue #5). Un-minimizes +
@@ -1966,7 +1996,14 @@ async fn start_sharing(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
         host: None,
     });
     let consent = state.share.consent.clone();
+    // TOCTOU fix (see `ShareState::run_lock`): acquire the run-lock INSIDE the spawned task, before
+    // `run_share`'s accept loop starts. If a previous `run_share` (e.g. one `trigger_stop_sharing` just
+    // signalled to stop) still holds it, this task simply waits — so there is never a window where two
+    // tasks both call `endpoint.accept()` on the same shared endpoint. `start_sharing` itself still
+    // returns immediately; only the spawned task can block.
+    let run_lock = state.share.run_lock.clone();
     tauri::async_runtime::spawn(async move {
+        let _permit = run_lock.lock().await;
         run_share(app, stop_rx, consent, endpoint, gossip, contacts).await;
     });
     Ok(())
@@ -2918,10 +2955,21 @@ async fn serve_one(
     let host = host.with_input_sink(input_sink.clone());
     // Feed the OS-clipboard write backend (ADR-079) so a `clipboard.write`-granted push can set the
     // host clipboard (never pastes — ADR-076). It stays inert while clipboard.write is withheld
-    // (default OFF); a clipboard the platform can't open just leaves the host refusing pushes.
+    // (default OFF); a clipboard the platform can't open just leaves the host refusing pushes — but
+    // that failure is surfaced (content-free, Inv 8: no clipboard data, just backend availability) so it
+    // isn't a silent no-op for a host who explicitly opted in on the Share screen.
     let host = match ras_clipboard::ArboardClipboardSink::new() {
         Ok(sink) => host.with_clipboard_sink(Arc::new(sink)),
-        Err(_) => host,
+        Err(_) => {
+            log::warn!("share: clipboard backend unavailable — clipboard sharing will not work this session");
+            if consent.clipboard_allowed() {
+                let _ = app.emit(
+                    "share-status",
+                    "Clipboard sharing is unavailable on this machine (backend failed to open). The rest of the share continues normally.",
+                );
+            }
+            host
+        }
     };
     // File transfer (ADR-086/090): the vendor-declared `"drop"` catalogue (host-chosen sandbox dir + size
     // cap), the per-transfer local consent prompt (Inv 1 — reuses `LocalConsent`'s `FileConsent` impl), and
@@ -3466,6 +3514,7 @@ fn main() {
                     })),
                     consent: consent.clone(),
                     selected_monitor: Mutex::new(0),
+                    run_lock: Arc::new(tokio::sync::Mutex::new(())),
                 },
                 contacts,
                 endpoint: endpoint.clone(),
@@ -3484,7 +3533,13 @@ fn main() {
                     // Route inbound SIGNAL_ALPN messages contacts-only (ADR-095). Read the book back
                     // from managed state (the local `contacts` was moved into `AppState`).
                     let reach_contacts = app.state::<AppState>().contacts.clone();
+                    // TOCTOU fix: hold `run_lock` for this task's entire `run_share` lifetime, so a
+                    // later `start_sharing` (after a Stop clears the session slot) cannot spawn a second
+                    // `run_share` accept loop on the same endpoint until this one has fully exited — see
+                    // `ShareState::run_lock`.
+                    let run_lock = app.state::<AppState>().share.run_lock.clone();
                     tauri::async_runtime::spawn(async move {
+                        let _permit = run_lock.lock().await;
                         run_share(
                             reach_app,
                             stop_rx,
