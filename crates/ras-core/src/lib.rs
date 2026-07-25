@@ -2152,6 +2152,96 @@ mod e2e {
         );
     }
 
+    /// Regression (mirrors [`a_slow_control_consent_does_not_block_other_control_messages`] for the
+    /// file-offer path): a pending **file-transfer** consent prompt — which, like the control prompt,
+    /// blocks up to 90 s on the local user in the real app — must NOT head-of-line-block the host
+    /// control loop. The audit's own verifier flagged that the production-readiness fix moving the
+    /// file-consent await off-loop had no regression test locking the guarantee in, so a future
+    /// refactor could silently reintroduce the HOL block. This is that test: while the host is
+    /// provably parked in the file-consent prompt, an unrelated `ChatMessage` must still be serviced;
+    /// the transfer is still accepted only AFTER consent resolves (Inv 1 — consent-before-action).
+    #[tokio::test]
+    async fn a_slow_file_consent_does_not_block_other_control_messages() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let sink = Arc::new(RecordingFileSink::default());
+        let (host_tp, ctrl_tp) = loopback_pair();
+        let host = HostSession::new(
+            HostSessionConfig::new(MonitorId(0)),
+            host_tp,
+            SyntheticCaptureBackend::new(320, 240),
+            SyntheticEncoder::new(),
+            Arc::new(FixedCaps(caps(&["screen.view", "file.push.logs"]))),
+        )
+        .with_file_catalogue(file_catalogue())
+        .with_file_consent(Arc::new(GatedFileConsent {
+            entered: entered.clone(),
+            release: release.clone(),
+        }))
+        .with_file_write_sink(sink.clone());
+        let controller = ControllerSession::new(
+            ControllerSessionConfig::new(EndpointAddr::new(EndpointId([0u8; 32]))),
+            ctrl_tp,
+        );
+        let (host_r, ctrl_r) = tokio::join!(host.start(), controller.connect());
+        let mut host_events = host_r.unwrap();
+        let _ctrl_events = ctrl_r.unwrap();
+        assert_eq!(host.state(), SessionState::Active);
+
+        // Kick off the file offer; wait until the host is *provably* parked inside the consent prompt
+        // (the gate's `entered` signal) — so the chat below is genuinely sent while consent is pending,
+        // not racing the offer's arrival. If the loop awaited consent inline, nothing after this point
+        // in the host loop (including the chat) would be serviced until `release` fires.
+        controller.send_file_offer("logs".to_string(), "app.log".to_string(), 11);
+        entered.notified().await;
+
+        // The transfer must not have been accepted yet (consent is still parked, Inv 1)…
+        assert!(
+            sink.opened
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none(),
+            "no transfer may be armed before the (still-parked) file consent resolves (Inv 1)"
+        );
+
+        // …but an unrelated chat sent right now must still surface promptly (no HOL block).
+        controller.send_chat("ping".into());
+        let mut saw_chat = false;
+        for _ in 0..20 {
+            while let Ok(ev) = host_events.try_recv() {
+                if let LifecycleEvent::ChatMessage { .. } = ev {
+                    saw_chat = true;
+                }
+            }
+            if saw_chat {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            saw_chat,
+            "a chat sent while a file-consent prompt is pending must be serviced (no HOL block)"
+        );
+
+        // Release consent; the transfer is accepted only now — consent-before-action preserved.
+        release.notify_one();
+        assert!(
+            wait_until(
+                || sink
+                    .opened
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some(),
+                800
+            )
+            .await,
+            "the transfer must be accepted after the file consent finally Allows (Inv 1)"
+        );
+
+        controller.disconnect(StopReason::UserRequested).await;
+        host.stop(StopReason::UserRequested).await;
+    }
+
     // ── Audio plane, host→controller (ADR-077) ──────────────────────────────────────────────────
     /// Controller-side [`AudioOutput`] that tallies packets delivered through the transport — proves a
     /// true end-to-end host→controller flow, not just a host-local send.
