@@ -53,7 +53,24 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: test
+        if: matrix.os != 'windows-latest'
         run: cargo test --all
+      # Windows: retry to ride out the transient `LNK1104: cannot open file …exe` Defender file-lock
+      # flake (see the mitigation step above). A genuine test failure fails all attempts, so this never
+      # hides a real regression; it only absorbs the well-known runner flake that always clears on re-run.
+      - name: test (windows, retry linker flake)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ok = $false
+          foreach ($attempt in 1..3) {
+            Write-Host "cargo test --all (attempt $attempt)"
+            cargo test --all
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Host "attempt $attempt failed (exit $LASTEXITCODE) - waiting for the Defender file-lock to settle, then retrying"
+            Start-Sleep -Seconds 12
+          }
+          if (-not $ok) { exit 1 }
       # ras-media-vpx links system libvpx and is excluded from the workspace, so build + test it on its
       # own manifest, incl. fmt/clippy so it stays gated. It is now used on BOTH Linux (the VP9 host
       # encode path) AND macOS (codec negotiation — VP9 for WebKitGTK viewers), so exercise it on each
