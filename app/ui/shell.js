@@ -321,9 +321,61 @@
     session.classList.remove("show"); ownerbar.classList.remove("show"); inSession = false;
     viewCanvas.hidden = true; deskdemo.hidden = false; sessHud.hidden = true; sessFatal.hidden = true;
     const ab = audioBtn(); if (ab) ab.hidden = true;
+    resetSessionChat(); // wipe chat content + collapse (Inv 8 hygiene — no stale chat lingers)
     toast("Session ended — control revoked", "var(--session)");
   }
   el("#btnSessStop").onclick = endSession; el("#btnOwnerStop").onclick = endSession;
+
+  // ---- in-session chat + clipboard (send_chat / send_clipboard; chat-message / clipboard-received) ----
+  // Usable only while a viewer session is live. Content is placed via textContent, never innerHTML and
+  // never logged (Inv 8). Chat is unencrypted-to-the-log-but-Redacted-on-the-wire host-side already.
+  const sessChat = el("#sessChat"), sessChatLog = el("#sessChatLog"), sessChatInput = el("#sessChatInput");
+  const sessChatUnread = el("#sessChatUnread"), sessChatNotice = el("#sessChatNotice");
+  let chatOpen = false, chatUnread = 0, chatNoticeT = null;
+  const chatTime = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  function chatEmpty() { sessChatLog.innerHTML = ""; const p = document.createElement("div"); p.className = "sc-empty"; p.textContent = "No messages yet — say hi 👋"; sessChatLog.appendChild(p); }
+  function appendChat(text, mine) {
+    const e = sessChatLog.querySelector(".sc-empty"); if (e) e.remove();
+    const stick = sessChatLog.scrollHeight - sessChatLog.scrollTop - sessChatLog.clientHeight < 24;
+    const b = document.createElement("div"); b.className = "sc-msg " + (mine ? "me" : "them");
+    const t = document.createElement("span"); t.className = "sc-text"; t.textContent = text; b.appendChild(t); // Inv 8: textContent
+    const tm = document.createElement("span"); tm.className = "sc-time"; tm.textContent = chatTime(); b.appendChild(tm);
+    sessChatLog.appendChild(b);
+    if (mine || stick) sessChatLog.scrollTop = sessChatLog.scrollHeight;
+    if (!mine && !chatOpen) { chatUnread++; sessChatUnread.textContent = chatUnread > 99 ? "99+" : String(chatUnread); sessChatUnread.hidden = false; }
+  }
+  function openChat() { chatOpen = true; sessChat.hidden = false; chatUnread = 0; sessChatUnread.hidden = true; setTimeout(() => sessChatInput.focus(), 40); sessChatLog.scrollTop = sessChatLog.scrollHeight; }
+  function closeChat() { chatOpen = false; sessChat.hidden = true; }
+  function chatNotice(msg, ok) {
+    sessChatNotice.textContent = msg; sessChatNotice.classList.toggle("ok", !!ok); sessChatNotice.hidden = false;
+    clearTimeout(chatNoticeT); chatNoticeT = setTimeout(() => { sessChatNotice.hidden = true; }, 3000);
+  }
+  function resetSessionChat() { closeChat(); chatUnread = 0; sessChatUnread.hidden = true; sessChatInput.value = ""; sessChatNotice.hidden = true; chatEmpty(); }
+  async function sendSessChat() {
+    if (!viewerLive) return;
+    const text = sessChatInput.value.trim(); if (!text) return;
+    sessChatInput.value = ""; appendChat(text, true);
+    if (LIVE) { try { await invoke("send_chat", { text }); } catch (_) { chatNotice("Couldn't send — no active session."); } }
+  }
+  el("#btnSessChat").onclick = () => { if (chatOpen) closeChat(); else openChat(); };
+  el("#btnSessChatClose").onclick = closeChat;
+  el("#sessChatForm").addEventListener("submit", (e) => { e.preventDefault(); sendSessChat(); });
+  sessChatInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendSessChat(); } });
+
+  // Push local clipboard text to the peer (host-side re-gates on the clipboard capability, Inv 15).
+  async function sendClipboard() {
+    if (!viewerLive) { toast("Start a session first", "var(--amber)"); return; }
+    let text = "";
+    try { text = await navigator.clipboard.readText(); } catch (_) { toast("Clipboard access denied by the OS", "var(--amber)"); return; }
+    if (!text) { toast("Clipboard is empty"); return; }
+    if (!LIVE) return;
+    try { await invoke("send_clipboard", { text }); toast("Clipboard sent · " + text.length + " chars", "var(--online)"); }
+    catch (_) { toast("Couldn't send clipboard", "var(--danger)"); }
+  }
+  el("#btnSendClip").onclick = sendClipboard;
+  el("#btnSendFile").onclick = () => toast("File transfer lands in the next update", "var(--amber)");
+  chatEmpty();
 
   function closeTransient() { callwin.classList.remove("show"); consent.classList.remove("show"); scrim.classList.remove("show"); }
   scrim.onclick = closeTransient;
@@ -347,6 +399,10 @@
     listen("call-request", (e) => { const m = e.payload || {}; const c = byId(m.contact_id); toast((c ? c.name : "A contact") + " wants to view your screen", "var(--session)"); });
     // Host denied a control request, or revoked an active lease mid-session (Inv 4). Content-free.
     listen("control-consent-denied", () => { if (controller) controller.notifyConsentDenied(); });
+    // In-session chat from the remote peer (text is .reveal()'d host-side; render via textContent, Inv 8).
+    listen("chat-message", (e) => { const text = typeof e.payload === "string" ? e.payload : String(e.payload ?? ""); if (text) appendChat(text, false); });
+    // Peer pushed us clipboard text — content-free byte count only (Inv 8).
+    listen("clipboard-received", (e) => { const n = Number(e.payload) || 0; chatNotice("Received clipboard · " + n + " bytes", true); if (!chatOpen) openChat(); });
   }
 
   // ---- add-contact modal (real: my_identity + add_contact) ----

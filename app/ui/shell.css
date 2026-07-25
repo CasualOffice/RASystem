@@ -207,6 +207,27 @@ button{font-family:inherit}
 .sessfatal{position:absolute;inset:0;z-index:7;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;padding:40px;background:rgba(6,7,10,.92);color:var(--ink-dim);font-size:14px;line-height:1.5}
 .sessfatal[hidden]{display:none}
 .sessfatal b{color:var(--ink);font-size:15px;font-weight:600}
+/* in-session chat panel (anchored bottom-right of the session stage) */
+.sesschat{position:absolute;right:14px;bottom:52px;width:300px;max-height:60%;display:flex;flex-direction:column;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);z-index:8;overflow:hidden}
+.sesschat[hidden]{display:none}
+.sc-head{display:flex;align-items:center;justify-content:space-between;padding:8px 8px 8px 12px;border-bottom:1px solid var(--line-soft)}
+.sc-title{font-size:13px;font-weight:600;color:var(--ink)}
+.sc-log{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-height:120px}
+.sc-empty{margin:auto;color:var(--ink-faint);font-size:12.5px}
+.sc-msg{max-width:82%;padding:6px 10px;border-radius:12px;font-size:13px;line-height:1.35;word-wrap:break-word;white-space:pre-wrap}
+.sc-msg.them{align-self:flex-start;background:var(--surface-4);color:var(--ink);border-bottom-left-radius:4px}
+.sc-msg.me{align-self:flex-end;background:var(--accent);color:var(--accent-ink);border-bottom-right-radius:4px}
+.sc-msg .sc-time{display:block;margin-top:2px;font-size:10px;opacity:.6;font-family:var(--mono)}
+.sc-notice{margin:0 12px 8px;padding:6px 10px;font-size:12px;color:var(--ink-dim);background:var(--surface-3);border:1px solid var(--line);border-radius:var(--r-md)}
+.sc-notice[hidden]{display:none}
+.sc-notice.ok{color:var(--online);border-color:var(--online-glow)}
+.sc-form{display:flex;align-items:center;gap:6px;padding:8px;border-top:1px solid var(--line-soft)}
+.sc-form input{flex:1;height:34px;padding:0 10px;background:var(--surface-3);border:1px solid var(--line);border-radius:var(--r-md);color:var(--ink);font-size:13px;font-family:inherit}
+.sc-form input:focus{outline:none;border-color:var(--accent)}
+.sc-form .send{width:34px;height:34px;flex:none;display:grid;place-items:center;border:0;border-radius:var(--r-md);background:var(--accent);color:var(--accent-ink);cursor:pointer}
+.sc-form .send:hover{background:var(--accent-hover)}
+.sb .sc-unread{position:absolute;top:-4px;right:-4px;min-width:15px;height:15px;padding:0 4px;border-radius:var(--r-pill);background:var(--accent);color:var(--accent-ink);font-size:10px;font-weight:600;display:grid;place-items:center}
+.sesstoolbar .sb{position:relative}
 /* owner "you are being controlled" bar (fixed, un-hideable) */
 .ownerbar{position:fixed;left:0;right:0;bottom:0;height:52px;display:none;align-items:center;gap:14px;padding:0 18px;background:var(--session-soft);border-top:2px solid var(--session-line);z-index:70;backdrop-filter:blur(8px)}
 .ownerbar.show{display:flex}
