@@ -1,0 +1,799 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Casual RAS — Remote-access session & consent</title>
+<style>
+/* ============================================================================
+   Casual RAS — mockup foundation (design direction, docs/25)   [INLINED VERBATIM]
+   ============================================================================ */
+
+:root {
+  /* — ground + surface ladder (higher = lighter, NOT shadowed) — */
+  --bg:         #0A0B0F;   /* app ground */
+  --surface-1:  #0F1117;   /* rail (darkest working surface) */
+  --surface-2:  #14161D;   /* list column */
+  --surface-3:  #191C24;   /* main pane / raised row */
+  --surface-4:  #20242E;   /* popover · input · hovered row */
+  --surface-5:  #272C38;   /* active/pressed */
+
+  /* — hairlines (structure over boxes) — */
+  --line:       #262A34;
+  --line-soft:  #1C2029;
+  --line-strong:#333A47;
+
+  /* — text — */
+  --ink:        #E7E9ED;   /* primary */
+  --ink-dim:    #9BA1AD;   /* secondary / preview text */
+  --ink-faint:  #6B717E;   /* timestamps, hint, disabled */
+
+  /* — the one accent (desaturated indigo): primary action · focus · active · your-own-reaction — */
+  --accent:       #6E79D6;
+  --accent-hover: #7f8ae2;
+  --accent-press: #5b66c4;
+  --accent-glow:  rgba(110, 121, 214, 0.16);
+  --accent-ink:   #eef0fc;
+
+  /* — semantics (each its own scale, NEVER the accent) — */
+  --online:  #3FB950;  --online-glow: rgba(63,185,80,0.15);
+  --away:    #C9CDD6;  /* hollow-ring foreground */
+  --amber:   #D2A83B;  --amber-glow:  rgba(210,168,59,0.15);
+  --danger:  #E5484D;  --danger-hover:#f05a5f; --danger-glow: rgba(229,72,77,0.16);
+
+  /* — RESERVED live-session chrome (screen/control/audio active). Not the accent, not danger. — */
+  --session:      #FF6B35;
+  --session-soft: rgba(255,107,53,0.16);
+  --session-line: rgba(255,107,53,0.55);
+
+  /* — type — */
+  --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, system-ui, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+  /* — radius (one language, applied with intent) — */
+  --r-sm: 6px;   --r-md: 8px;   --r-lg: 12px;   --r-pill: 999px;
+
+  /* — spacing rhythm (4px base) — */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+
+  /* — motion (one curve; state changes only) — */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --t-fast: 120ms; --t-mid: 160ms; --t-slow: 200ms;
+
+  /* — the single real shadow, reserved for true overlays only — */
+  --shadow-pop: 0 12px 32px -8px rgba(0,0,0,0.6), 0 0 0 1px var(--line);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* uppercase section labels: a touch of tracking, faint, small */
+.label {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.dim  { color: var(--ink-dim); }
+.faint{ color: var(--ink-faint); }
+
+/* — focus: always visible, accent ring (never removed) — */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
+
+/* ─────────────────────────────  AVATAR + PRESENCE  ───────────────────────── */
+.avatar { position: relative; flex: none; border-radius: 50%; background: var(--surface-4);
+  display: grid; place-items: center; color: var(--ink); font-weight: 600; overflow: visible; }
+.avatar.s28 { width: 28px; height: 28px; font-size: 12px; }
+.avatar.s32 { width: 32px; height: 32px; font-size: 13px; }
+.avatar.s40 { width: 40px; height: 40px; font-size: 15px; }
+.avatar.s46 { width: 46px; height: 46px; font-size: 16px; }
+.avatar.s72 { width: 72px; height: 72px; font-size: 26px; }
+.avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
+.presence { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px;
+  border-radius: 50%; background: var(--bg); display: grid; place-items: center; }
+.presence.s46 { width: 15px; height: 15px; right: 0; bottom: 0; }
+.presence i { display: block; }
+.presence.online i { width: 8px; height: 8px; border-radius: 50%; background: var(--online); }
+.presence.away i { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--away); background: transparent; box-sizing: border-box; }
+.presence.dnd i { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); position: relative; }
+.presence.dnd i::after { content:""; position:absolute; inset: 3px 1.5px; background: var(--bg); border-radius: 1px; }
+.presence.offline i { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--ink-faint); background: transparent; box-sizing: border-box; }
+.presence.insession { background: var(--bg); width: 15px; height: 15px; }
+.presence.insession i { width: 11px; height: 9px; border-radius: 2px; background: var(--session); position: relative; box-shadow: 0 0 0 2px var(--bg); }
+.presence.insession i::after { content:""; position:absolute; left:50%; bottom:-3px; transform:translateX(-50%); width:5px; height:2px; background: var(--session); border-radius:1px; }
+
+/* ───────────────────────────────  BUTTONS  ──────────────────────────────── */
+.btn { font-family: inherit; font-size: 14px; font-weight: 500; line-height: 1; cursor: pointer;
+  border: 1px solid transparent; border-radius: var(--r-md); padding: 9px 14px; color: var(--ink);
+  background: transparent; transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease); }
+.btn:hover { background: var(--surface-4); }
+.btn-primary { background: var(--accent); color: var(--accent-ink); }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary:active { background: var(--accent-press); }
+.btn-ghost { border-color: var(--line); color: var(--ink-dim); }
+.btn-ghost:hover { border-color: var(--line-strong); color: var(--ink); background: var(--surface-3); }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger:hover { background: var(--danger-hover); }
+.btn-icon { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; border-radius: var(--r-md); color: var(--ink-dim); }
+.btn-icon:hover { background: var(--surface-4); color: var(--ink); }
+
+/* ────────────────────────────  PILLS / BADGES  ──────────────────────────── */
+.badge-unread { min-width: 19px; height: 19px; padding: 0 6px; border-radius: var(--r-pill);
+  background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 600;
+  display: inline-grid; place-items: center; font-variant-numeric: tabular-nums; }
+.badge-unread.muted { background: var(--surface-5); color: var(--ink-dim); }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px;
+  border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--surface-3);
+  font-size: 12px; color: var(--ink-dim); }
+.chip.mine { border-color: var(--accent); background: var(--accent-glow); color: var(--accent); }
+
+.session-banner { display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+  background: var(--session-soft); border: 1px solid var(--session-line); border-radius: var(--r-md);
+  color: var(--session); font-size: 13px; font-weight: 600; }
+.session-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--session);
+  box-shadow: 0 0 0 4px var(--session-soft); animation: pulse 1.6s var(--ease) infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+@media (prefers-reduced-motion: reduce) { .session-dot { animation: none; } }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--surface-5); border-radius: 999px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--line-strong); }
+
+/* ============================================================================
+   SCREEN-SPECIFIC CSS  (03 — remote-access session + consent)
+   Built only on the tokens above. No new accents / fonts / radii.
+   ============================================================================ */
+
+.page { max-width: 1440px; margin: 0 auto; padding: 40px 40px 80px; }
+.page-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; }
+.page-head h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+.page-head .step { font-size: 13px; }
+.page-sub { color: var(--ink-dim); font-size: 14px; max-width: 720px; margin: 0 0 40px; }
+
+.panel { margin-bottom: 56px; }
+.panel > .label { display: block; margin-bottom: 14px; }
+.panel-note { font-size: 12.5px; color: var(--ink-faint); margin: 12px 0 0; max-width: 640px; }
+
+svg { display: block; }
+
+/* ─── (A) CONSENT CARD ─────────────────────────────────────────────────── */
+.consent-stage {
+  display: flex; justify-content: flex-start; padding: 40px;
+  background: var(--bg);
+  border: 1px solid var(--line-soft); border-radius: var(--r-lg);
+}
+.consent-card {
+  width: 420px; background: var(--surface-3); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop); overflow: hidden;
+}
+.consent-top {
+  display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.consent-top .kicker { display: flex; align-items: center; gap: 8px; }
+.consent-top .kicker .dot-amber {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--amber);
+  box-shadow: 0 0 0 4px var(--amber-glow);
+}
+.consent-top .kicker span { font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--amber); }
+.consent-top .grow { flex: 1; }
+.consent-top .who { font-size: 11px; color: var(--ink-faint); }
+
+.consent-hero { display: flex; gap: 14px; align-items: center; padding: 20px 20px 4px; }
+.consent-hero h2 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.35; }
+.consent-hero h2 b { font-weight: 600; }
+.consent-hero .verified { color: var(--ink-dim); font-size: 12.5px; margin-top: 3px; display: flex; align-items: center; gap: 5px; }
+.consent-hero .verified svg { color: var(--online); }
+
+.matchcode {
+  margin: 16px 20px 4px; padding: 11px 14px; border-radius: var(--r-md);
+  background: var(--bg); border: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.matchcode .mc-label { font-size: 11px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.05em; }
+.matchcode .mc-code { font-family: var(--mono); font-size: 15px; font-variant-numeric: tabular-nums;
+  color: var(--ink); letter-spacing: 0.04em; }
+.matchcode .mc-code .sep { color: var(--ink-faint); padding: 0 2px; }
+
+.caps-head { display: flex; align-items: baseline; justify-content: space-between; padding: 18px 20px 8px; }
+.caps-head .label { margin: 0; }
+.caps-head .default-off { font-size: 11px; color: var(--ink-faint); }
+
+.cap-list { padding: 0 12px; }
+.cap-row {
+  display: flex; align-items: flex-start; gap: 12px; padding: 11px 8px;
+  border-radius: var(--r-md); transition: background var(--t-fast) var(--ease);
+}
+.cap-row:hover { background: var(--surface-4); }
+.cap-icon { flex: none; width: 32px; height: 32px; border-radius: var(--r-md);
+  display: grid; place-items: center; background: var(--surface-4); color: var(--ink-dim); }
+.cap-row.on .cap-icon { background: var(--accent-glow); color: var(--accent); }
+.cap-body { flex: 1; min-width: 0; }
+.cap-body .cap-name { font-size: 14px; font-weight: 500; color: var(--ink); }
+.cap-body .cap-desc { font-size: 12px; color: var(--ink-faint); margin-top: 1px; }
+
+/* toggle switch */
+.switch { flex: none; position: relative; width: 38px; height: 22px; margin-top: 4px; }
+.switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.switch .track { position: absolute; inset: 0; background: var(--surface-5); border-radius: var(--r-pill);
+  transition: background var(--t-fast) var(--ease); border: 1px solid var(--line); }
+.switch .thumb { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--ink-dim); transition: transform var(--t-fast) var(--ease), background var(--t-fast) var(--ease); }
+.switch input:checked ~ .track { background: var(--accent); border-color: var(--accent); }
+.switch input:checked ~ .thumb { transform: translateX(16px); background: #fff; }
+.switch input:focus-visible ~ .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.caps-caption { display: flex; gap: 8px; align-items: flex-start; padding: 12px 20px 4px; }
+.caps-caption svg { flex: none; color: var(--ink-faint); margin-top: 1px; }
+.caps-caption p { margin: 0; font-size: 12px; color: var(--ink-faint); line-height: 1.45; }
+
+.consent-foot { padding: 16px 20px 20px; border-top: 1px solid var(--line-soft); margin-top: 12px; }
+.consent-actions { display: flex; gap: 10px; }
+.consent-actions .btn { flex: 1; padding: 11px 14px; font-size: 14px; }
+.remember { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; cursor: pointer; }
+.remember .cbx { flex: none; width: 18px; height: 18px; border-radius: var(--r-sm); margin-top: 1px;
+  border: 1px solid var(--line-strong); background: var(--surface-2); display: grid; place-items: center; }
+.remember input { position: absolute; opacity: 0; }
+.remember .cbx svg { opacity: 0; color: var(--accent-ink); }
+.remember input:checked ~ .cbx { background: var(--accent); border-color: var(--accent); }
+.remember input:checked ~ .cbx svg { opacity: 1; }
+.remember input:focus-visible ~ .cbx { outline: 2px solid var(--accent); outline-offset: 2px; }
+.remember .r-text { font-size: 13px; }
+.remember .r-text .r-title { color: var(--ink); }
+.remember .r-text .r-note { display: block; color: var(--ink-faint); font-size: 12px; margin-top: 2px; line-height: 1.4; }
+
+/* ─── (B) CONTROLLER VIEW ─────────────────────────────────────────────── */
+.controller {
+  position: relative; height: 620px; border-radius: var(--r-lg); overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(900px 620px at 78% 8%, rgba(110,121,214,0.14), transparent 55%),
+    radial-gradient(700px 500px at 10% 100%, rgba(63,185,80,0.05), transparent 55%),
+    linear-gradient(160deg, #10233d 0%, #131a2c 45%, #0c0e16 100%);
+}
+/* faux menu bar */
+.faux-menubar { position: absolute; top: 0; left: 0; right: 0; height: 26px; z-index: 1;
+  display: flex; align-items: center; gap: 18px; padding: 0 14px;
+  background: rgba(10,11,15,0.55); backdrop-filter: blur(8px); border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 12px; color: rgba(231,233,237,0.82); }
+.faux-menubar .apple { font-size: 13px; color: rgba(231,233,237,0.92); }
+.faux-menubar .mb-bold { font-weight: 600; color: rgba(231,233,237,0.95); }
+.faux-menubar .grow { flex: 1; }
+.faux-menubar .mb-right { display: flex; align-items: center; gap: 14px; color: rgba(231,233,237,0.75); }
+.faux-menubar .mb-clock { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* faux app windows */
+.win { position: absolute; border-radius: 10px; overflow: hidden; border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 24px 60px -18px rgba(0,0,0,0.6); background: #171922; }
+.win-bar { height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 12px;
+  background: #1d2029; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.win-bar .tl { width: 11px; height: 11px; border-radius: 50%; }
+.win-bar .tl.r { background: #ff5f57; } .win-bar .tl.y { background: #febc2e; } .win-bar .tl.g { background: #28c840; }
+.win-bar .win-title { margin-left: 8px; font-size: 12px; color: rgba(231,233,237,0.7); font-weight: 500; }
+
+.win-code { top: 84px; left: 40px; width: 500px; height: 300px; }
+.win-code .code-body { padding: 14px 16px; font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+  color: #aab3c5; background: #12141b; height: calc(100% - 32px); overflow: hidden; }
+.win-code .ln { display: flex; gap: 16px; }
+.win-code .num { color: #454b5a; width: 18px; text-align: right; user-select: none; }
+.win-code .kw { color: #a78bfa; } .win-code .fn { color: #7dd3fc; } .win-code .str { color: #86efac; }
+.win-code .cm { color: #55607a; } .win-code .nm { color: #f0a868; }
+
+.win-chat { top: 210px; left: 420px; width: 330px; height: 340px; }
+.win-chat .chat-body { padding: 14px; height: calc(100% - 32px); background: #14161d; display: flex; flex-direction: column; gap: 12px; }
+.win-chat .msg { display: flex; gap: 9px; }
+.win-chat .msg .a { width: 26px; height: 26px; border-radius: 50%; flex: none; display: grid; place-items: center;
+  font-size: 11px; font-weight: 600; }
+.win-chat .msg .m-name { font-size: 12px; font-weight: 600; color: var(--ink); }
+.win-chat .msg .m-name .m-t { font-weight: 400; color: var(--ink-faint); font-size: 11px; margin-left: 6px; }
+.win-chat .msg .m-text { font-size: 13px; color: var(--ink-dim); margin-top: 1px; }
+
+/* remote OS cursor — never scaled/tinted (Tuple) */
+.remote-cursor { position: absolute; top: 348px; left: 512px; z-index: 3; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5)); }
+
+/* top-center session toolbar (over the screen, --surface-4) */
+.session-toolbar {
+  position: absolute; top: 40px; left: 50%; transform: translateX(-50%); z-index: 5;
+  display: flex; align-items: center; gap: 4px; padding: 6px;
+  background: var(--surface-4); border: 1px solid var(--line-strong); border-radius: var(--r-pill);
+  box-shadow: var(--shadow-pop);
+}
+.stb { height: 34px; padding: 0 12px; display: inline-flex; align-items: center; gap: 7px;
+  border-radius: var(--r-pill); background: transparent; border: none; color: var(--ink-dim);
+  font-family: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease); }
+.stb:hover { background: var(--surface-5); color: var(--ink); }
+.stb.icon { width: 34px; padding: 0; justify-content: center; }
+.stb.active { background: var(--accent-glow); color: var(--accent); }
+.stb-div { width: 1px; height: 20px; background: var(--line-strong); margin: 0 3px; }
+.stb-quality { color: var(--ink); }
+.stb-quality b { font-weight: 600; }
+.stb.stop { background: var(--danger); color: #fff; font-weight: 600; padding: 0 16px; }
+.stb.stop:hover { background: var(--danger-hover); }
+/* live capability toggles inside the toolbar read like tiny state pills */
+.stb .cap-dot { width: 6px; height: 6px; border-radius: 50%; }
+.stb .cap-dot.on { background: var(--accent); }
+.stb .cap-dot.off { background: var(--ink-faint); }
+
+/* telemetry readout (Parsec-style, corner) */
+.telemetry {
+  position: absolute; left: 16px; bottom: 16px; z-index: 5;
+  display: flex; align-items: center; gap: 10px; padding: 7px 12px;
+  background: rgba(10,11,15,0.6); backdrop-filter: blur(8px);
+  border: 1px solid rgba(255,255,255,0.08); border-radius: var(--r-pill);
+  font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--ink-dim);
+}
+.telemetry .t-bars { display: flex; align-items: flex-end; gap: 2px; height: 12px; }
+.telemetry .t-bars i { width: 3px; border-radius: 1px; background: var(--online); }
+.telemetry .t-bars i:nth-child(1){ height: 5px; } .telemetry .t-bars i:nth-child(2){ height: 8px; } .telemetry .t-bars i:nth-child(3){ height: 12px; }
+.telemetry .t-sep { color: var(--ink-faint); }
+.telemetry .t-good { color: var(--online); }
+.telemetry .t-direct { color: var(--ink); }
+
+/* the "who are you controlling" ambient badge (Tuple) */
+.control-ambient {
+  position: absolute; right: 16px; bottom: 16px; z-index: 5;
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 8px;
+  background: var(--session-soft); border: 1px solid var(--session-line); border-radius: var(--r-pill);
+  font-size: 12px; font-weight: 600; color: var(--session);
+}
+
+/* ─── (C) OWNER INDICATOR ─────────────────────────────────────────────── */
+.owner-grid { display: grid; grid-template-columns: 1fr 340px; gap: 24px; align-items: start; }
+
+/* the controlled monitor with the un-removable frame */
+.owner-monitor { position: relative; border-radius: var(--r-lg); overflow: hidden;
+  border: 3px solid var(--session); box-shadow: 0 0 0 1px var(--session-line), 0 0 34px -6px var(--session-soft); }
+.owner-monitor .frame-corner { position: absolute; z-index: 4; width: 22px; height: 22px; border: 2px solid var(--session); }
+.owner-monitor .fc-tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+.owner-monitor .fc-tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+.owner-monitor .fc-bl { bottom: 46px; left: 8px; border-right: none; border-top: none; }
+.owner-monitor .fc-br { bottom: 46px; right: 8px; border-left: none; border-top: none; }
+
+.owner-desktop { position: relative; height: 380px;
+  background:
+    radial-gradient(700px 380px at 70% 10%, rgba(255,107,53,0.06), transparent 55%),
+    linear-gradient(155deg, #241322 0%, #171320 50%, #0d0e15 100%);
+}
+.owner-desktop .faux-menubar { background: rgba(10,11,15,0.5); }
+.owner-desktop .win { position: absolute; }
+.owner-doc { top: 66px; left: 44px; width: 440px; height: 250px; }
+.owner-doc .doc-body { padding: 22px 26px; height: calc(100% - 32px); background: #fbfbfd; }
+.owner-doc .doc-body h4 { margin: 0 0 12px; font-size: 15px; color: #1a1c22; font-weight: 600; }
+.owner-doc .doc-body .rule { height: 8px; border-radius: 4px; background: #e6e7ec; margin-bottom: 9px; }
+.owner-doc .doc-body .rule.w1 { width: 92%; } .owner-doc .doc-body .rule.w2 { width: 78%; }
+.owner-doc .doc-body .rule.w3 { width: 85%; } .owner-doc .doc-body .rule.w4 { width: 60%; }
+.owner-doc .doc-body .rule.accent { background: #d8c4bb; }
+
+/* the remote controller's cursor moving on the owner's screen */
+.owner-remote-cursor { position: absolute; top: 210px; left: 300px; z-index: 3;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
+.owner-remote-cursor .cursor-tag { position: absolute; top: 20px; left: 14px; white-space: nowrap;
+  padding: 3px 8px; border-radius: var(--r-sm); background: var(--session); color: #fff;
+  font-size: 11px; font-weight: 600; }
+
+/* the non-removable STOP bar (Chrome RD) — anchored bottom, inside the frame */
+.owner-stopbar {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 6; height: 46px;
+  display: flex; align-items: center; gap: 12px; padding: 0 12px 0 16px;
+  background: linear-gradient(180deg, rgba(255,107,53,0.14), rgba(10,11,15,0.92));
+  border-top: 1px solid var(--session-line); backdrop-filter: blur(6px);
+}
+.owner-stopbar .sb-icon { flex: none; color: var(--session); display: grid; place-items: center; }
+.owner-stopbar .sb-text { flex: 1; min-width: 0; font-size: 13px; line-height: 1.25; }
+.owner-stopbar .sb-text .sb-title { font-weight: 600; color: var(--session); letter-spacing: 0.02em; }
+.owner-stopbar .sb-text .sb-who { color: var(--ink-dim); font-weight: 400; }
+.owner-stopbar .sb-locked { font-size: 11px; color: var(--ink-faint); display: flex; align-items: center; gap: 5px; }
+.owner-stopbar .btn-danger { padding: 8px 18px; font-weight: 600; }
+
+/* side: the calmer VIEWING variant + the legend */
+.owner-side { display: flex; flex-direction: column; gap: 20px; }
+.mini-label { display: block; margin-bottom: 10px; }
+
+/* small VIEWING-ACTIVE variant — border only, no stop-bar takeover */
+.viewing-monitor { position: relative; border-radius: var(--r-md); overflow: hidden;
+  border: 2px solid var(--session-line); }
+.viewing-desktop { position: relative; height: 168px;
+  background: linear-gradient(155deg, #12233a 0%, #131a2c 55%, #0c0e16 100%); }
+.viewing-desktop .faux-menubar { height: 22px; font-size: 11px; }
+.viewing-badge {
+  position: absolute; left: 10px; bottom: 10px; z-index: 3;
+  display: flex; align-items: center; gap: 8px; padding: 5px 11px;
+  background: rgba(10,11,15,0.72); border: 1px solid var(--session-line); border-radius: var(--r-pill);
+  font-size: 11px; font-weight: 600; color: var(--session); letter-spacing: 0.02em;
+}
+.viewing-badge .eye { color: var(--session); }
+.variant-note { font-size: 12px; color: var(--ink-faint); margin: 10px 2px 0; line-height: 1.45; }
+
+/* legend of the two states */
+.state-legend { background: var(--surface-3); border: 1px solid var(--line); border-radius: var(--r-md); padding: 4px 4px; }
+.legend-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.legend-row + .legend-row { border-top: 1px solid var(--line-soft); }
+.legend-swatch { flex: none; width: 40px; height: 26px; border-radius: var(--r-sm); }
+.legend-swatch.control { border: 2px solid var(--session); box-shadow: inset 0 0 8px var(--session-soft); }
+.legend-swatch.view { border: 2px solid var(--session-line); }
+.legend-text .lt-title { font-size: 13px; font-weight: 600; color: var(--ink); }
+.legend-text .lt-desc { font-size: 12px; color: var(--ink-faint); margin-top: 1px; }
+</style>
+</head>
+<body>
+<main class="page">
+
+  <div class="page-head">
+    <h1>Remote-access session &amp; consent</h1>
+    <span class="step mono faint">Screen 03 / 03</span>
+  </div>
+  <p class="page-sub">
+    The security state has to be <em>legible</em> — that's the whole differentiator. A control request is a
+    decision surface, the controller sees exactly what it's allowed to do, and the owner can never lose sight of
+    (or control over) being watched.
+  </p>
+
+  <!-- ═══════════════════════ (A) CONSENT CARD ═══════════════════════ -->
+  <section class="panel">
+    <span class="label">A · Access-request consent — a decision surface, not a chat message</span>
+    <div class="consent-stage">
+      <div class="consent-card" role="dialog" aria-label="Access request from Alex Rivera">
+
+        <div class="consent-top">
+          <span class="kicker"><span class="dot-amber"></span><span>Access request</span></span>
+          <span class="grow"></span>
+          <span class="who mono">via contact · MacBook Pro 16″</span>
+        </div>
+
+        <div class="consent-hero">
+          <div class="avatar s40" style="background:#3b4d8f;color:#c7d0ff;">AR</div>
+          <div>
+            <h2><b>Alex Rivera</b> wants to access your screen</h2>
+            <div class="verified">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.4 7.7 8 10 4.6-2.3 8-5 8-10V6z"/><path d="m9 12 2 2 4-4"/></svg>
+              Identity verified · paired device
+            </div>
+          </div>
+        </div>
+
+        <div class="matchcode" aria-label="Human key-check code">
+          <span class="mc-label">Match code</span>
+          <span class="mc-code">K7QP<span class="sep">·</span>4M2X<span class="sep">·</span>9RJT</span>
+        </div>
+
+        <div class="caps-head">
+          <span class="label">Capabilities you'll grant</span>
+          <span class="default-off">Edit before allowing</span>
+        </div>
+
+        <div class="cap-list">
+          <!-- View screen — ON -->
+          <div class="cap-row on">
+            <span class="cap-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            </span>
+            <div class="cap-body">
+              <div class="cap-name">View screen</div>
+              <div class="cap-desc">Sees your live display. No recording.</div>
+            </div>
+            <label class="switch" title="View screen">
+              <input type="checkbox" checked aria-label="View screen" />
+              <span class="track"></span><span class="thumb"></span>
+            </label>
+          </div>
+
+          <!-- Control keyboard & mouse — OFF by default (deny-by-default, Inv 2; the highest-privilege
+               capability is never pre-enabled — the owner opts in explicitly) -->
+          <div class="cap-row">
+            <span class="cap-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m4 4 7 16 2-6 6-2z"/></svg>
+            </span>
+            <div class="cap-body">
+              <div class="cap-name">Control keyboard &amp; mouse</div>
+              <div class="cap-desc">Can move the pointer and type. One controller at a time.</div>
+            </div>
+            <label class="switch" title="Control keyboard and mouse">
+              <input type="checkbox" aria-label="Control keyboard and mouse" />
+              <span class="track"></span><span class="thumb"></span>
+            </label>
+          </div>
+
+          <!-- Clipboard — OFF -->
+          <div class="cap-row">
+            <span class="cap-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>
+            </span>
+            <div class="cap-body">
+              <div class="cap-name">Clipboard</div>
+              <div class="cap-desc">Copy text between machines. Off by default.</div>
+            </div>
+            <label class="switch" title="Clipboard">
+              <input type="checkbox" aria-label="Clipboard" />
+              <span class="track"></span><span class="thumb"></span>
+            </label>
+          </div>
+
+          <!-- File transfer — OFF -->
+          <div class="cap-row">
+            <span class="cap-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6m0 0-2.5 2.5M12 12l2.5 2.5"/></svg>
+            </span>
+            <div class="cap-body">
+              <div class="cap-name">File transfer <span class="faint">— Downloads only</span></div>
+              <div class="cap-desc">Push files into ~/Downloads. No browsing your disk.</div>
+            </div>
+            <label class="switch" title="File transfer, Downloads only">
+              <input type="checkbox" aria-label="File transfer, Downloads only" />
+              <span class="track"></span><span class="thumb"></span>
+            </label>
+          </div>
+
+          <!-- Hear my audio — OFF -->
+          <div class="cap-row">
+            <span class="cap-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/></svg>
+            </span>
+            <div class="cap-body">
+              <div class="cap-name">Hear my audio</div>
+              <div class="cap-desc">Streams system output. Live only, never recorded.</div>
+            </div>
+            <label class="switch" title="Hear my audio">
+              <input type="checkbox" aria-label="Hear my audio" />
+              <span class="track"></span><span class="thumb"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="caps-caption">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <p>Only these are requested. Any capability not listed here is <b>never</b> pre-enabled — a controller
+             can't quietly gain scope you didn't grant.</p>
+        </div>
+
+        <div class="consent-foot">
+          <div class="consent-actions">
+            <button class="btn btn-primary" type="button">Allow</button>
+            <button class="btn btn-ghost" type="button">Deny</button>
+          </div>
+          <label class="remember">
+            <input type="checkbox" aria-label="Remember Alex — skip this prompt next time" />
+            <span class="cbx">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-11"/></svg>
+            </span>
+            <span class="r-text">
+              <span class="r-title">Remember Alex — skip this prompt next time</span>
+              <span class="r-note">Every connection still needs a fresh, per-action-checked grant. This only skips the pop-up.</span>
+            </span>
+          </label>
+        </div>
+
+      </div>
+    </div>
+    <p class="panel-note">Deny-by-default posture is visible at a glance: only <b>View screen</b> is pre-checked; Control, Clipboard,
+      File transfer, and Audio start off. The match code lets the owner confirm they're granting the real Alex.</p>
+  </section>
+
+  <!-- ═══════════════════════ (B) CONTROLLER VIEW ═══════════════════════ -->
+  <section class="panel">
+    <span class="label">B · Controller view — you are viewing &amp; controlling Priya's screen</span>
+    <div class="controller">
+
+      <!-- faux remote desktop -->
+      <div class="faux-menubar">
+        <span class="apple">◉</span>
+        <span class="mb-bold">Xcode</span>
+        <span>File</span><span>Edit</span><span>View</span><span>Product</span><span>Debug</span>
+        <span class="grow"></span>
+        <span class="mb-right">
+          <span>Priya Nair</span>
+          <span class="mb-clock">10:42</span>
+        </span>
+      </div>
+
+      <!-- code window -->
+      <div class="win win-code">
+        <div class="win-bar"><i class="tl r"></i><i class="tl y"></i><i class="tl g"></i><span class="win-title">SessionTransport.swift — casual-ras</span></div>
+        <div class="code-body">
+          <div class="ln"><span class="num">18</span><span><span class="cm">// resume the same authenticated peer (ADR-091)</span></span></div>
+          <div class="ln"><span class="num">19</span><span><span class="kw">func</span> <span class="fn">reconnect</span>(to peer: EndpointId) <span class="kw">async throws</span> {</span></div>
+          <div class="ln"><span class="num">20</span><span>&nbsp;&nbsp;<span class="kw">let</span> grant = <span class="kw">try await</span> validator.<span class="fn">revalidate</span>()</span></div>
+          <div class="ln"><span class="num">21</span><span>&nbsp;&nbsp;<span class="kw">guard</span> grant.<span class="nm">notExpired</span> <span class="kw">else</span> { <span class="kw">throw</span> .expired }</span></div>
+          <div class="ln"><span class="num">22</span><span>&nbsp;&nbsp;connection = <span class="kw">try await</span> endpoint.<span class="fn">connect</span>(peer, alpn: <span class="str">"casual-ras/1"</span>)</span></div>
+          <div class="ln"><span class="num">23</span><span>&nbsp;&nbsp;<span class="kw">await</span> media.<span class="fn">forceKeyframe</span>()  <span class="cm">// IDR across all planes</span></span></div>
+          <div class="ln"><span class="num">24</span><span>}</span></div>
+          <div class="ln"><span class="num">25</span><span></span></div>
+          <div class="ln"><span class="num">26</span><span><span class="cm">// ── control lease re-validated by the unchanged gate ──</span></span></div>
+        </div>
+      </div>
+
+      <!-- chat window -->
+      <div class="win win-chat">
+        <div class="win-bar"><i class="tl r"></i><i class="tl y"></i><i class="tl g"></i><span class="win-title">Messages</span></div>
+        <div class="chat-body">
+          <div class="msg">
+            <span class="a" style="background:#2f4a3a;color:#8ee0a8;">PN</span>
+            <div><div class="m-name">Priya Nair <span class="m-t">10:39</span></div><div class="m-text">it crashes right after the reconnect — can you drive?</div></div>
+          </div>
+          <div class="msg">
+            <span class="a" style="background:#3b4d8f;color:#c7d0ff;">AR</span>
+            <div><div class="m-name">Alex Rivera <span class="m-t">10:41</span></div><div class="m-text">yep taking control now, watch line 21</div></div>
+          </div>
+          <div class="msg">
+            <span class="a" style="background:#2f4a3a;color:#8ee0a8;">PN</span>
+            <div><div class="m-name">Priya Nair <span class="m-t">10:42</span></div><div class="m-text">oh — the guard. good catch</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- remote OS cursor (never scaled/tinted) -->
+      <svg class="remote-cursor" width="20" height="20" viewBox="0 0 24 24" fill="#f4f5f8" stroke="#0a0b0f" stroke-width="1"><path d="M5 3l14 8-6 1.5L10 20 5 3z"/></svg>
+
+      <!-- top-center session toolbar -->
+      <div class="session-toolbar" role="toolbar" aria-label="Session controls">
+        <button class="stb" type="button" title="Switch display">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/></svg>
+          Display 1 <span class="faint">of 2</span>
+        </button>
+        <div class="stb-div"></div>
+        <button class="stb stb-quality" type="button" title="Quality">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h4V10H3zM10 20h4V4h-4zM17 20h4v-8h-4z"/></svg>
+          <b>Auto</b>
+        </button>
+        <div class="stb-div"></div>
+        <!-- live capability toggles -->
+        <button class="stb active" type="button" title="Control active"><span class="cap-dot on"></span>Control</button>
+        <button class="stb" type="button" title="Clipboard off"><span class="cap-dot off"></span>Clipboard</button>
+        <div class="stb-div"></div>
+        <button class="stb icon" type="button" title="Push file">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 9l5-5 5 5M12 4v12"/></svg>
+        </button>
+        <button class="stb icon" type="button" title="Chat">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        </button>
+        <div class="stb-div"></div>
+        <button class="stb stop" type="button" title="Stop session">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+          Stop
+        </button>
+      </div>
+
+      <!-- connection telemetry (Parsec-style) -->
+      <div class="telemetry" aria-label="Connection telemetry">
+        <span class="t-bars"><i></i><i></i><i></i></span>
+        <span class="t-good">12&nbsp;ms</span>
+        <span class="t-sep">·</span>
+        <span>0.1% loss</span>
+        <span class="t-sep">·</span>
+        <span class="t-direct">direct</span>
+      </div>
+
+      <!-- ambient who-you-control badge (Tuple) -->
+      <div class="control-ambient">
+        <span class="session-dot" style="box-shadow:0 0 0 3px var(--session-soft)"></span>
+        Controlling Priya Nair
+      </div>
+
+    </div>
+    <p class="panel-note">The Stop button is always the far-right, highest-salience control. Live capability toggles
+      let the controller drop scope mid-session; telemetry stays present but quiet (12 ms · direct P2P, no relay).</p>
+  </section>
+
+  <!-- ═══════════════════════ (C) OWNER INDICATOR ═══════════════════════ -->
+  <section class="panel">
+    <span class="label">C · Owner indicator — you are being controlled (Inv 7: un-hideable, reserved color)</span>
+    <div class="owner-grid">
+
+      <!-- the controlled monitor: hot-orange frame + un-removable stop bar -->
+      <div>
+        <span class="label mini-label">Remote control active</span>
+        <div class="owner-monitor" role="img" aria-label="Your screen is being controlled by Alex Rivera">
+          <span class="frame-corner fc-tl"></span>
+          <span class="frame-corner fc-tr"></span>
+          <span class="frame-corner fc-bl"></span>
+          <span class="frame-corner fc-br"></span>
+
+          <div class="owner-desktop">
+            <div class="faux-menubar">
+              <span class="apple">◉</span>
+              <span class="mb-bold">Pages</span>
+              <span>File</span><span>Edit</span><span>Insert</span><span>Format</span>
+              <span class="grow"></span>
+              <span class="mb-right"><span class="mb-clock">10:42</span></span>
+            </div>
+
+            <div class="win owner-doc">
+              <div class="win-bar"><i class="tl r"></i><i class="tl y"></i><i class="tl g"></i><span class="win-title">Q3 Renewal.pages</span></div>
+              <div class="doc-body">
+                <h4>Renewal terms — Lindqvist account</h4>
+                <div class="rule w1"></div>
+                <div class="rule w2"></div>
+                <div class="rule w3 accent"></div>
+                <div class="rule w1"></div>
+                <div class="rule w4"></div>
+              </div>
+            </div>
+
+            <!-- the remote controller's cursor moving on your screen -->
+            <div class="owner-remote-cursor">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="#f4f5f8" stroke="#0a0b0f" stroke-width="1"><path d="M5 3l14 8-6 1.5L10 20 5 3z"/></svg>
+              <span class="cursor-tag">Alex</span>
+            </div>
+          </div>
+
+          <!-- un-removable STOP bar (Chrome RD) -->
+          <div class="owner-stopbar">
+            <span class="sb-icon">
+              <span class="session-dot"></span>
+            </span>
+            <div class="sb-text">
+              <span class="sb-title">REMOTE CONTROL ACTIVE</span>
+              <span class="sb-who"> — Alex Rivera is controlling your screen</span>
+            </div>
+            <span class="sb-locked">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              Can't be hidden
+            </span>
+            <button class="btn btn-danger" type="button">Stop</button>
+          </div>
+        </div>
+        <p class="panel-note">This chrome is structural — the frame and Stop bar are drawn by the OS-excluded secure
+          window, so a controller can't capture over them or dismiss them. Emergency stop is also on a global hotkey.</p>
+      </div>
+
+      <!-- side column: the calmer VIEWING variant + a legend -->
+      <div class="owner-side">
+        <div>
+          <span class="label mini-label">Remote viewing active — calmer variant</span>
+          <div class="viewing-monitor" role="img" aria-label="Your screen is being viewed by Devon Cole">
+            <div class="viewing-desktop">
+              <div class="faux-menubar">
+                <span class="apple">◉</span><span class="mb-bold">Finder</span>
+                <span class="grow"></span>
+                <span class="mb-right mb-clock">10:42</span>
+              </div>
+              <div class="viewing-badge">
+                <span class="eye">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                </span>
+                REMOTE VIEWING · Devon Cole
+              </div>
+            </div>
+          </div>
+          <p class="variant-note">Viewing shows the frame only — no input is happening, so no full Stop-bar takeover.
+            The reserved orange still marks the live state so it's never mistaken for normal UI.</p>
+        </div>
+
+        <div>
+          <span class="label mini-label">Two states, one reserved color</span>
+          <div class="state-legend">
+            <div class="legend-row">
+              <span class="legend-swatch control"></span>
+              <span class="legend-text">
+                <span class="lt-title">Control active</span>
+                <span class="lt-desc">Frame + anchored Stop bar + who's driving.</span>
+              </span>
+            </div>
+            <div class="legend-row">
+              <span class="legend-swatch view"></span>
+              <span class="legend-text">
+                <span class="lt-title">Viewing active</span>
+                <span class="lt-desc">Frame + a small badge. No input, calmer.</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,898 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Casual RAS — Mobile</title>
+<style>
+/* ============================================================================
+   Casual RAS — mockup foundation (design direction, docs/25) — INLINED VERBATIM
+   ============================================================================ */
+:root {
+  --bg:         #0A0B0F;
+  --surface-1:  #0F1117;
+  --surface-2:  #14161D;
+  --surface-3:  #191C24;
+  --surface-4:  #20242E;
+  --surface-5:  #272C38;
+
+  --line:       #262A34;
+  --line-soft:  #1C2029;
+  --line-strong:#333A47;
+
+  --ink:        #E7E9ED;
+  --ink-dim:    #9BA1AD;
+  --ink-faint:  #6B717E;
+
+  --accent:       #6E79D6;
+  --accent-hover: #7f8ae2;
+  --accent-press: #5b66c4;
+  --accent-glow:  rgba(110, 121, 214, 0.16);
+  --accent-ink:   #eef0fc;
+
+  --online:  #3FB950;  --online-glow: rgba(63,185,80,0.15);
+  --away:    #C9CDD6;
+  --amber:   #D2A83B;  --amber-glow:  rgba(210,168,59,0.15);
+  --danger:  #E5484D;  --danger-hover:#f05a5f; --danger-glow: rgba(229,72,77,0.16);
+
+  --session:      #FF6B35;
+  --session-soft: rgba(255,107,53,0.16);
+  --session-line: rgba(255,107,53,0.55);
+
+  --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, system-ui, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+  --r-sm: 6px;   --r-md: 8px;   --r-lg: 12px;   --r-pill: 999px;
+
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --t-fast: 120ms; --t-mid: 160ms; --t-slow: 200ms;
+
+  --shadow-pop: 0 12px 32px -8px rgba(0,0,0,0.6), 0 0 0 1px var(--line);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.label {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.dim  { color: var(--ink-dim); }
+.faint{ color: var(--ink-faint); }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
+
+.avatar { position: relative; flex: none; border-radius: 50%; background: var(--surface-4);
+  display: grid; place-items: center; color: var(--ink); font-weight: 600; overflow: visible; }
+.avatar.s28 { width: 28px; height: 28px; font-size: 12px; }
+.avatar.s32 { width: 32px; height: 32px; font-size: 13px; }
+.avatar.s40 { width: 40px; height: 40px; font-size: 15px; }
+.avatar.s46 { width: 46px; height: 46px; font-size: 16px; }
+.avatar.s72 { width: 72px; height: 72px; font-size: 26px; }
+.avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
+.presence { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px;
+  border-radius: 50%; background: var(--bg); display: grid; place-items: center; }
+.presence.s46 { width: 15px; height: 15px; right: 0; bottom: 0; }
+.presence i { display: block; }
+.presence.online i { width: 8px; height: 8px; border-radius: 50%; background: var(--online); }
+.presence.away i { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--away); background: transparent; box-sizing: border-box; }
+.presence.dnd i { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); position: relative; }
+.presence.dnd i::after { content:""; position:absolute; inset: 3px 1.5px; background: var(--bg); border-radius: 1px; }
+.presence.offline i { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--ink-faint); background: transparent; box-sizing: border-box; }
+.presence.insession { background: var(--bg); width: 15px; height: 15px; }
+.presence.insession i { width: 11px; height: 9px; border-radius: 2px; background: var(--session); position: relative; box-shadow: 0 0 0 2px var(--bg); }
+.presence.insession i::after { content:""; position:absolute; left:50%; bottom:-3px; transform:translateX(-50%); width:5px; height:2px; background: var(--session); border-radius:1px; }
+
+.btn { font-family: inherit; font-size: 14px; font-weight: 500; line-height: 1; cursor: pointer;
+  border: 1px solid transparent; border-radius: var(--r-md); padding: 9px 14px; color: var(--ink);
+  background: transparent; transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease); }
+.btn:hover { background: var(--surface-4); }
+.btn-primary { background: var(--accent); color: var(--accent-ink); }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary:active { background: var(--accent-press); }
+.btn-ghost { border-color: var(--line); color: var(--ink-dim); }
+.btn-ghost:hover { border-color: var(--line-strong); color: var(--ink); background: var(--surface-3); }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger:hover { background: var(--danger-hover); }
+.btn-icon { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; border-radius: var(--r-md); color: var(--ink-dim); }
+.btn-icon:hover { background: var(--surface-4); color: var(--ink); }
+
+.badge-unread { min-width: 19px; height: 19px; padding: 0 6px; border-radius: var(--r-pill);
+  background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 600;
+  display: inline-grid; place-items: center; font-variant-numeric: tabular-nums; }
+.badge-unread.muted { background: var(--surface-5); color: var(--ink-dim); }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px;
+  border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--surface-3);
+  font-size: 12px; color: var(--ink-dim); }
+.chip.mine { border-color: var(--accent); background: var(--accent-glow); color: var(--accent); }
+
+.session-banner { display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+  background: var(--session-soft); border: 1px solid var(--session-line); border-radius: var(--r-md);
+  color: var(--session); font-size: 13px; font-weight: 600; }
+.session-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--session);
+  box-shadow: 0 0 0 4px var(--session-soft); animation: pulse 1.6s var(--ease) infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+@media (prefers-reduced-motion: reduce) { .session-dot { animation: none; } }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--surface-5); border-radius: 999px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--line-strong); }
+
+/* ============================================================================
+   SCREEN-SPECIFIC — mobile mockup (three device frames on one stage)
+   ============================================================================ */
+.stage {
+  min-height: 100%;
+  padding: 56px 40px 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 40px;
+  background: var(--bg);
+}
+.stage-head { text-align: left; width: 100%; max-width: 1320px; }
+.stage-head h1 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+.stage-head p { margin: 8px 0 0; color: var(--ink-dim); font-size: 15px; max-width: 640px; }
+
+.frames { display: flex; gap: 48px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
+.frame-wrap { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.frame-cap { font-size: 12px; color: var(--ink-faint); text-align: center; max-width: 360px; }
+.frame-cap b { color: var(--ink-dim); font-weight: 600; }
+
+/* the phone device — clean, no cartoon notch */
+.device {
+  width: 390px; height: 844px;
+  border-radius: 46px;
+  background: var(--surface-1);
+  border: 1px solid var(--line-strong);
+  padding: 10px;
+  box-shadow: var(--shadow-pop), 0 40px 80px -30px rgba(0,0,0,0.8);
+  position: relative;
+}
+.screen {
+  width: 100%; height: 100%;
+  border-radius: 38px;
+  overflow: hidden;
+  background: var(--bg);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+/* subtle status bar (no notch cartoon) */
+.statusbar {
+  height: 44px; flex: none;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 24px;
+  font-size: 13px; font-weight: 600; color: var(--ink);
+}
+.statusbar .sb-right { display: flex; align-items: center; gap: 6px; color: var(--ink); }
+.sb-icon { display: block; }
+.pill-cam {
+  position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+  width: 88px; height: 26px; border-radius: 999px; background: #000;
+  z-index: 30;
+}
+
+svg { display: block; }
+
+/* --- (A) CHATS LIST --- */
+.mtopbar {
+  flex: none; padding: 6px 16px 12px;
+  display: flex; align-items: flex-end; justify-content: space-between;
+}
+.mtopbar h2 { margin: 0; font-size: 28px; font-weight: 600; letter-spacing: -0.02em; }
+.mtopbar-actions { display: flex; gap: 4px; }
+.list-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; }
+
+/* Telegram-grid conversation row, touch height ~66px */
+.crow {
+  display: grid;
+  grid-template-columns: 46px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 16px;
+  min-height: 66px;
+  cursor: pointer;
+  position: relative;
+  transition: background var(--t-fast) var(--ease);
+}
+.crow:hover { background: var(--surface-3); }
+.crow.active { background: var(--surface-3); }
+.crow + .crow::before {
+  content: ""; position: absolute; left: 74px; right: 0; top: 0;
+  height: 1px; background: var(--line-soft);
+}
+.crow-body { min-width: 0; }
+.crow-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.crow-name { font-size: 15px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.crow-name.session-name { color: var(--session); }
+.crow-time { flex: none; font-size: 12px; color: var(--ink-faint); }
+.crow-time.tabular { font-variant-numeric: tabular-nums; }
+.crow-bot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
+.crow-prev { font-size: 14px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 5px; }
+.crow-prev.session-prev { color: var(--session); font-weight: 500; }
+.crow-prev .you { color: var(--ink-faint); }
+.crow-meta { flex: none; display: flex; align-items: center; gap: 8px; }
+.mini-mute { color: var(--ink-faint); }
+.tick { color: var(--accent); }
+.tick.read { color: var(--online); }
+
+/* bottom tab bar — 4 labeled tabs */
+.tabbar {
+  flex: none;
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  border-top: 1px solid var(--line);
+  background: var(--surface-1);
+  padding: 8px 4px 22px;
+}
+.tab {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  color: var(--ink-faint); font-size: 10px; font-weight: 500; letter-spacing: 0.01em;
+  cursor: pointer; padding: 2px 0;
+}
+.tab svg { width: 24px; height: 24px; }
+.tab.on { color: var(--accent); }
+.tab-badge {
+  position: absolute; top: -4px; right: 50%; margin-right: -20px;
+}
+.tab-icon-wrap { position: relative; }
+
+/* --- (B) CONVERSATION --- */
+.convtop {
+  flex: none;
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px 10px 4px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.back-btn { width: 40px; height: 40px; display: grid; place-items: center; color: var(--ink-dim); cursor: pointer; border-radius: var(--r-md); }
+.back-btn:hover { background: var(--surface-4); color: var(--ink); }
+.convtop-id { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; cursor: pointer; }
+.convtop-name { font-size: 15px; font-weight: 600; color: var(--ink); line-height: 1.2; }
+.convtop-sub { font-size: 12px; color: var(--online); line-height: 1.2; margin-top: 1px; }
+.convtop-actions { display: flex; gap: 2px; }
+
+/* docked PiP call pill peeking below the conversation topbar */
+.pip-pill {
+  margin: 8px 12px 2px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 8px 7px 10px;
+  background: var(--surface-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  box-shadow: var(--shadow-pop);
+}
+.pip-live { width: 7px; height: 7px; border-radius: 50%; background: var(--online); box-shadow: 0 0 0 3px var(--online-glow); }
+.pip-text { flex: 1; min-width: 0; }
+.pip-text .pip-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+.pip-text .pip-timer { font-size: 11px; color: var(--ink-dim); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.pip-btns { display: flex; gap: 4px; }
+.pip-btn { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; cursor: pointer; border: none; }
+.pip-btn.neutral { background: var(--surface-5); color: var(--ink); }
+.pip-btn.end { background: var(--danger); color: #fff; }
+
+.msg-scroll { flex: 1; overflow-y: auto; padding: 12px 0 8px; }
+.day-sep { display: flex; align-items: center; justify-content: center; margin: 8px 0 14px; }
+.day-sep span { font-size: 11px; font-weight: 600; color: var(--ink-faint); letter-spacing: 0.04em; text-transform: uppercase; background: var(--surface-3); padding: 4px 12px; border-radius: var(--r-pill); }
+
+/* flat, left-aligned message rows — tighter mobile gutter */
+.msg {
+  display: grid; grid-template-columns: 40px 1fr; gap: 10px;
+  padding: 3px 14px; position: relative;
+}
+.msg.grouped { grid-template-columns: 40px 1fr; padding-top: 1px; padding-bottom: 1px; }
+.msg.grouped .msg-gutter { visibility: hidden; }
+.msg:hover { background: var(--surface-2); }
+.msg-gutter { display: flex; justify-content: center; }
+.msg-body { min-width: 0; }
+.msg-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 1px; }
+.msg-name { font-size: 14px; font-weight: 600; color: var(--ink); }
+.msg-name.me { color: var(--accent); }
+.msg-time { font-size: 11px; color: var(--ink-faint); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.msg-text { font-size: 15px; color: var(--ink); line-height: 1.45; word-wrap: break-word; }
+.msg.grouped .msg-hovertime {
+  position: absolute; left: 0; width: 54px; text-align: right;
+  font-size: 10px; color: var(--ink-faint); font-family: var(--mono);
+  top: 5px; opacity: 0; transition: opacity var(--t-fast) var(--ease);
+}
+.msg.grouped:hover .msg-hovertime { opacity: 1; }
+
+/* inline image */
+.msg-img {
+  margin-top: 6px; width: 214px; height: 138px; border-radius: var(--r-md);
+  border: 1px solid var(--line); overflow: hidden; position: relative;
+  background:
+    linear-gradient(135deg, #1b2740 0%, #24344f 45%, #3a2f52 100%);
+}
+.msg-img .img-glyph { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(231,233,237,0.28); }
+.msg-img .img-cap { position: absolute; left: 8px; bottom: 8px; font-size: 11px; color: rgba(231,233,237,0.85); background: rgba(0,0,0,0.45); padding: 2px 7px; border-radius: var(--r-pill); font-family: var(--mono); }
+
+/* reaction chips */
+.reacts { display: flex; gap: 6px; margin-top: 6px; }
+.react {
+  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px;
+  border-radius: var(--r-pill); border: 1px solid var(--line); background: var(--surface-3);
+  font-size: 12px; color: var(--ink-dim); cursor: pointer; line-height: 1;
+}
+.react.mine { border-color: var(--accent); background: var(--accent-glow); color: var(--accent); }
+.react .rc { font-variant-numeric: tabular-nums; }
+
+/* a control-request that is NOT a chat bubble — high-salience DECISION card. Uses amber (the
+   pending/decision semantic, matching the desktop consent card in 03) — NOT session-orange, which is
+   reserved for a LIVE capture session, which a pending request is not. */
+.req-card {
+  margin: 10px 14px 4px; padding: 12px 14px;
+  border: 1px solid rgba(210,168,59,0.45); background: var(--amber-glow);
+  border-radius: var(--r-md);
+}
+.req-card .req-top { display: flex; align-items: center; gap: 8px; color: var(--amber); font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.req-card .req-line { margin-top: 6px; font-size: 14px; color: var(--ink); }
+.req-card .req-code { font-size: 12px; color: var(--ink-dim); font-family: var(--mono); margin-top: 3px; }
+.req-card .req-actions { display: flex; gap: 8px; margin-top: 10px; }
+.req-card .req-actions .btn { flex: 1; padding: 8px 12px; }
+
+/* composer */
+.composer {
+  flex: none; padding: 8px 10px 26px;
+  border-top: 1px solid var(--line-soft);
+  display: flex; align-items: flex-end; gap: 8px;
+}
+.comp-btn { width: 38px; height: 38px; flex: none; display: grid; place-items: center; color: var(--ink-dim); cursor: pointer; border-radius: 50%; }
+.comp-btn:hover { background: var(--surface-4); color: var(--ink); }
+.comp-input {
+  flex: 1; min-height: 38px; display: flex; align-items: center; gap: 8px;
+  background: var(--surface-3); border: 1px solid var(--line);
+  border-radius: 20px; padding: 0 10px 0 14px;
+}
+.comp-input input {
+  flex: 1; background: transparent; border: none; outline: none;
+  color: var(--ink); font-family: inherit; font-size: 15px; height: 38px;
+}
+.comp-input input::placeholder { color: var(--ink-faint); }
+.comp-input .emoji { color: var(--ink-dim); cursor: pointer; display: grid; place-items: center; width: 26px; height: 26px; }
+.comp-input .emoji:hover { color: var(--ink); }
+.send-btn { width: 38px; height: 38px; flex: none; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; border: none; cursor: pointer; }
+.send-btn:hover { background: var(--accent-hover); }
+
+/* --- (C) INCOMING CALL --- */
+.callscreen {
+  flex: 1; position: relative; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.call-bg {
+  position: absolute; inset: 0;
+  /* one restrained atmosphere radial for the incoming-call takeover — accent only, no
+     session-orange (a call is not a live capture session) and no stacked second bloom */
+  background:
+    radial-gradient(560px 560px at 50% 32%, rgba(110,121,214,0.30), transparent 64%),
+    linear-gradient(180deg, #10131c 0%, #0a0b0f 72%);
+}
+.call-content { position: relative; z-index: 2; flex: 1; display: flex; flex-direction: column; }
+.call-status { text-align: center; padding-top: 20px; }
+.call-status .enc { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-dim); font-weight: 500; }
+.call-hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 0 24px; }
+.call-avatar {
+  width: 128px; height: 128px; border-radius: 50%;
+  background: linear-gradient(135deg, #5b66c4, #8a5cc4);
+  display: grid; place-items: center; font-size: 44px; font-weight: 600; color: #fff;
+  box-shadow: 0 0 0 6px rgba(255,255,255,0.05), 0 24px 60px -20px rgba(0,0,0,0.7);
+}
+.call-name { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; color: var(--ink); }
+.call-kind { margin-top: -12px; display: flex; align-items: center; gap: 7px; color: var(--ink-dim); font-size: 15px; }
+
+.call-actions { padding: 0 20px 40px; }
+.call-secondary { display: flex; justify-content: center; gap: 44px; margin-bottom: 30px; }
+.call-sec-btn { display: flex; flex-direction: column; align-items: center; gap: 7px; color: var(--ink-dim); font-size: 12px; cursor: pointer; }
+.call-sec-btn .sec-ic { width: 44px; height: 44px; border-radius: 50%; background: var(--surface-4); border: 1px solid var(--line); display: grid; place-items: center; color: var(--ink); }
+.call-sec-btn:hover .sec-ic { background: var(--surface-5); }
+
+/* slide-to-answer affordance */
+.slide-track {
+  position: relative; height: 78px; border-radius: 44px;
+  background: rgba(255,255,255,0.05); border: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px; overflow: hidden;
+}
+.slide-hint {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  font-size: 12px; color: var(--ink-faint); letter-spacing: 0.06em; text-transform: uppercase; font-weight: 600;
+  display: flex; align-items: center; gap: 6px;
+  animation: slidehint 2.2s var(--ease) infinite;
+}
+@keyframes slidehint { 0%,100% { opacity: 0.35; transform: translateX(-50%) translateX(-4px); } 50% { opacity: 0.9; transform: translateX(-50%) translateX(6px); } }
+@media (prefers-reduced-motion: reduce) { .slide-hint { animation: none; opacity: 0.6; } }
+.call-round {
+  width: 66px; height: 66px; border-radius: 50%; display: grid; place-items: center;
+  cursor: pointer; border: none; z-index: 2;
+}
+.call-round.decline { background: var(--danger); color: #fff; }
+.call-round.decline:hover { background: var(--danger-hover); }
+.call-round.accept { background: var(--online); color: #06210b; }
+.call-round.accept:hover { filter: brightness(1.06); }
+.call-round.accept { animation: acceptpulse 1.8s var(--ease) infinite; }
+@keyframes acceptpulse { 0%,100% { box-shadow: 0 0 0 0 rgba(63,185,80,0.30); } 50% { box-shadow: 0 0 0 12px rgba(63,185,80,0); } }
+@media (prefers-reduced-motion: reduce) { .call-round.accept { animation: none; } }
+
+/* tiny mobile-session-control hint chip below the call frame caption area (differentiator) */
+.diff-note {
+  width: 100%; max-width: 1320px;
+  display: flex; align-items: center; gap: 16px;
+  margin-top: 4px; padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md); background: var(--surface-2);
+}
+.diff-note .dn-glyph { flex: none; width: 40px; height: 40px; border-radius: var(--r-md); background: var(--session-soft); color: var(--session); display: grid; place-items: center; }
+.diff-note .dn-text { font-size: 13px; color: var(--ink-dim); line-height: 1.5; }
+.diff-note .dn-text b { color: var(--ink); font-weight: 600; }
+
+/* a compact "mobile session control" preview — touch/trackpad toggle + edge stop */
+.sess-mini {
+  flex: none; width: 190px; align-self: center;
+  border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden;
+  background: var(--surface-1);
+}
+.sess-mini .sm-scr { height: 96px; position: relative; background: linear-gradient(140deg, #12151d, #1b1f2a); }
+.sess-mini .sm-cursor { position: absolute; left: 60%; top: 44%; color: var(--ink); }
+.sess-mini .sm-stop { position: absolute; top: 6px; left: 6px; }
+.sess-mini .sm-bar { display: flex; align-items: center; justify-content: space-between; padding: 7px 8px; border-top: 1px solid var(--line); }
+.sm-modes { display: flex; gap: 4px; }
+.sm-mode { font-size: 10px; font-weight: 600; padding: 4px 8px; border-radius: var(--r-pill); color: var(--ink-dim); border: 1px solid var(--line); }
+.sm-mode.on { color: var(--session); border-color: var(--session-line); background: var(--session-soft); }
+
+@media (max-width: 900px) {
+  .stage { padding: 32px 16px 48px; }
+  .frames { gap: 32px; }
+}
+</style>
+</head>
+<body>
+<div class="stage">
+
+  <div class="stage-head">
+    <h1>Casual RAS — Mobile</h1>
+    <p>Push-navigation IA with a 4-tab bar — a distinct mobile shell, not a shrunk desktop. Chats list, a pushed conversation with a surviving call PiP, and a full-screen incoming call.</p>
+  </div>
+
+  <div class="frames">
+
+    <!-- ============================================================= -->
+    <!-- (A) CHATS / CONTACTS TAB                                       -->
+    <!-- ============================================================= -->
+    <div class="frame-wrap">
+      <div class="device">
+        <div class="screen">
+          <div class="pill-cam"></div>
+
+          <div class="statusbar">
+            <span class="mono">9:41</span>
+            <span class="sb-right">
+              <!-- signal -->
+              <svg class="sb-icon" width="18" height="14" viewBox="0 0 18 14" fill="currentColor"><rect x="0" y="9" width="3" height="4" rx="1"/><rect x="5" y="6" width="3" height="7" rx="1"/><rect x="10" y="3" width="3" height="10" rx="1"/><rect x="15" y="0" width="3" height="13" rx="1"/></svg>
+              <!-- battery -->
+              <svg class="sb-icon" width="24" height="14" viewBox="0 0 24 14" fill="none"><rect x="1" y="2" width="19" height="10" rx="2.5" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="4" width="13" height="6" rx="1" fill="currentColor"/><rect x="21" y="5" width="2" height="4" rx="1" fill="currentColor"/></svg>
+            </span>
+          </div>
+
+          <div class="mtopbar">
+            <h2>Chats</h2>
+            <div class="mtopbar-actions">
+              <button class="btn-icon" aria-label="Search">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              </button>
+              <button class="btn-icon" aria-label="New message">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="list-scroll">
+
+            <!-- in-session contact (product state) -->
+            <div class="crow">
+              <div class="avatar s46">PN
+                <span class="presence insession s46"><i></i></span>
+              </div>
+              <div class="crow-body">
+                <div class="crow-top">
+                  <span class="crow-name session-name">Priya Nair</span>
+                  <span class="crow-time tabular">now</span>
+                </div>
+                <div class="crow-bot">
+                  <span class="crow-prev session-prev">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+                    Controlling your screen
+                  </span>
+                </div>
+              </div>
+              <div class="crow-meta"></div>
+            </div>
+
+            <div class="crow">
+              <div class="avatar s46">AR
+                <span class="presence online s46"><i></i></span>
+              </div>
+              <div class="crow-body">
+                <div class="crow-top">
+                  <span class="crow-name">Alex Rivera</span>
+                  <span class="crow-time tabular">9:38</span>
+                </div>
+                <div class="crow-bot">
+                  <span class="crow-prev">Pushed the fix — pull when you get a sec</span>
+                  <span class="crow-meta"><span class="badge-unread">2</span></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="crow">
+              <div class="avatar s46">DC
+                <span class="presence away s46"><i></i></span>
+              </div>
+              <div class="crow-body">
+                <div class="crow-top">
+                  <span class="crow-name">Devon Cole</span>
+                  <span class="crow-time tabular">9:12</span>
+                </div>
+                <div class="crow-bot">
+                  <span class="crow-prev"><span class="you">You:</span> sounds good, ping me before the call</span>
+                  <span class="crow-meta">
+                    <svg class="tick read" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12l5 5L15 7"/><path d="M11 15l1.5 1.5L22 7"/></svg>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div class="crow">
+              <div class="avatar s46">MB
+                <span class="presence dnd s46"><i></i></span>
+              </div>
+              <div class="crow-body">
+                <div class="crow-top">
+                  <span class="crow-name">Marcus Bell</span>
+                  <span class="crow-time tabular">8:47</span>
+                </div>
+                <div class="crow-bot">
+                  <span class="crow-prev">Requested to view your screen · expired</span>
+                  <span class="crow-meta">
+                    <svg class="mini-mute" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 14V9a5 5 0 0 0-10 0v5l-2 2h14Z"/><path d="M3 3l18 18"/></svg>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div class="crow">
+              <div class="avatar s46">SL
+                <span class="presence online s46"><i></i></span>
+              </div>
+              <div class="crow-body">
+                <div class="crow-top">
+                  <span class="crow-name">Sofia Lindqvist</span>
+                  <span class="crow-time tabular">8:20</span>
+                </div>
+                <div class="crow-bot">
+                  <span class="crow-prev">Missed video call · 2m</span>
+                  <span class="crow-meta"><span class="badge-unread">1</span></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="crow">
+              <div class="avatar s46" style="background:#2a2540;color:#c8bef0">DT
+                <span class="presence offline s46"><i></i></span>
+              </div>
+              <div class="crow-body">
+                <div class="crow-top">
+                  <span class="crow-name">Design Team</span>
+                  <span class="crow-time tabular">Yesterday</span>
+                </div>
+                <div class="crow-bot">
+                  <span class="crow-prev">Nadia: shipping the token pass tonight 🙌</span>
+                  <span class="crow-meta"><span class="badge-unread muted">4</span></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="crow">
+              <div class="avatar s46">HK
+                <span class="presence offline s46"><i></i></span>
+              </div>
+              <div class="crow-body">
+                <div class="crow-top">
+                  <span class="crow-name">Hana Kim</span>
+                  <span class="crow-time tabular">Tue</span>
+                </div>
+                <div class="crow-bot">
+                  <span class="crow-prev"><span class="you">You:</span> thanks for the walkthrough earlier</span>
+                  <span class="crow-meta">
+                    <svg class="tick read" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12l5 5L15 7"/><path d="M11 15l1.5 1.5L22 7"/></svg>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- bottom tab bar -->
+          <nav class="tabbar">
+            <div class="tab">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              <span>Contacts</span>
+            </div>
+            <div class="tab">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.6a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.5-1.3a2 2 0 0 1 2.1-.4c.8.3 1.7.6 2.6.7a2 2 0 0 1 1.7 2Z"/></svg>
+              <span>Calls</span>
+            </div>
+            <div class="tab on">
+              <span class="tab-icon-wrap">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2Z"/></svg>
+                <span class="tab-badge"><span class="badge-unread">3</span></span>
+              </span>
+              <span>Chats</span>
+            </div>
+            <div class="tab">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+              <span>You</span>
+            </div>
+          </nav>
+
+        </div>
+      </div>
+      <div class="frame-cap"><b>A · Chats tab.</b> Telegram-grid rows at 66px touch height. Priya is <b>in-session</b> (orange screen glyph) — a live remote session is always visible on the contact (Inv 7). 4-tab bar: Contacts · Calls · Chats · You.</div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- (B) CONVERSATION (pushed full screen)                          -->
+    <!-- ============================================================= -->
+    <div class="frame-wrap">
+      <div class="device">
+        <div class="screen">
+          <div class="pill-cam"></div>
+
+          <div class="statusbar">
+            <span class="mono">9:41</span>
+            <span class="sb-right">
+              <svg class="sb-icon" width="18" height="14" viewBox="0 0 18 14" fill="currentColor"><rect x="0" y="9" width="3" height="4" rx="1"/><rect x="5" y="6" width="3" height="7" rx="1"/><rect x="10" y="3" width="3" height="10" rx="1"/><rect x="15" y="0" width="3" height="13" rx="1"/></svg>
+              <svg class="sb-icon" width="24" height="14" viewBox="0 0 24 14" fill="none"><rect x="1" y="2" width="19" height="10" rx="2.5" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="4" width="13" height="6" rx="1" fill="currentColor"/><rect x="21" y="5" width="2" height="4" rx="1" fill="currentColor"/></svg>
+            </span>
+          </div>
+
+          <div class="convtop">
+            <div class="back-btn" role="button" aria-label="Back">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+            </div>
+            <div class="convtop-id">
+              <div class="avatar s40">AR<span class="presence online"><i></i></span></div>
+              <div>
+                <div class="convtop-name">Alex Rivera</div>
+                <div class="convtop-sub">Active now</div>
+              </div>
+            </div>
+            <div class="convtop-actions">
+              <button class="btn-icon" aria-label="Voice call">
+                <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.6a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.5-1.3a2 2 0 0 1 2.1-.4c.8.3 1.7.6 2.6.7a2 2 0 0 1 1.7 2Z"/></svg>
+              </button>
+              <button class="btn-icon" aria-label="Video call">
+                <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M23 7l-7 5 7 5V7Z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+              </button>
+              <button class="btn-icon" aria-label="Request screen access">
+                <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- docked call PiP peeking — a call surviving navigation into chat -->
+          <div class="pip-pill">
+            <span class="pip-live"></span>
+            <div class="avatar s32">DC</div>
+            <div class="pip-text">
+              <div class="pip-name">Devon Cole</div>
+              <div class="pip-timer">04:12 · on hold in chat</div>
+            </div>
+            <div class="pip-btns">
+              <button class="pip-btn neutral" aria-label="Mute">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+              </button>
+              <button class="pip-btn end" aria-label="End call">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16.9a15 15 0 0 1 20 0l-2.5 2.5-3-1.3v-2.4a12 12 0 0 0-9 0v2.4l-3 1.3Z"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="msg-scroll">
+
+            <div class="day-sep"><span>Today</span></div>
+
+            <div class="msg">
+              <div class="msg-gutter"><div class="avatar s40">AR<span class="presence online"><i></i></span></div></div>
+              <div class="msg-body">
+                <div class="msg-head"><span class="msg-name">Alex Rivera</span><span class="msg-time">9:31</span></div>
+                <div class="msg-text">Morning — I looked at the grant-expiry path you flagged. The validator's rejecting on endpoint mismatch like it should.</div>
+              </div>
+            </div>
+            <div class="msg grouped">
+              <div class="msg-hovertime">9:32</div>
+              <div class="msg-gutter"></div>
+              <div class="msg-body">
+                <div class="msg-text">Here's the trace from the two-machine run:</div>
+                <div class="msg-img">
+                  <span class="img-glyph">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="4" width="18" height="14" rx="2"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="M21 15l-5-5L5 21"/></svg>
+                  </span>
+                  <span class="img-cap">grant-trace.png · 214 KB</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="msg">
+              <div class="msg-gutter"><div class="avatar s40" style="background:var(--accent-glow);color:var(--accent)">You</div></div>
+              <div class="msg-body">
+                <div class="msg-head"><span class="msg-name me">You</span><span class="msg-time">9:35</span></div>
+                <div class="msg-text">Perfect, that's exactly the fail-closed edge. Pushing a test for it now.</div>
+                <div class="reacts">
+                  <span class="react mine"><span>👍</span><span class="rc">2</span></span>
+                  <span class="react"><span>🚀</span><span class="rc">1</span></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="msg">
+              <div class="msg-gutter"><div class="avatar s40">AR<span class="presence online"><i></i></span></div></div>
+              <div class="msg-body">
+                <div class="msg-head"><span class="msg-name">Alex Rivera</span><span class="msg-time">9:38</span></div>
+                <div class="msg-text">Pushed the fix — pull when you get a sec. Want to hop on a quick screen-share to walk it?</div>
+              </div>
+            </div>
+
+            <!-- a control request is a DECISION, never a bubble -->
+            <div class="req-card">
+              <div class="req-top">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+                Screen access request
+              </div>
+              <div class="req-line"><b>Alex Rivera</b> wants to <b>access your screen</b></div>
+              <div class="req-code">Match code · K7QP · 4M2X · 9RJT</div>
+              <div class="req-actions">
+                <button class="btn btn-ghost">Deny</button>
+                <button class="btn btn-primary">Review &amp; Allow</button>
+              </div>
+            </div>
+
+          </div>
+
+          <div class="composer">
+            <div class="comp-btn" role="button" aria-label="Attach">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+            </div>
+            <div class="comp-input">
+              <input type="text" placeholder="Message" aria-label="Message">
+              <span class="emoji" role="button" aria-label="Emoji">
+                <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M8.5 14a4 4 0 0 0 7 0" stroke-linecap="round"/><circle cx="9" cy="10" r="0.6" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="0.6" fill="currentColor" stroke="none"/></svg>
+              </span>
+            </div>
+            <button class="send-btn" aria-label="Send">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></svg>
+            </button>
+          </div>
+
+        </div>
+      </div>
+      <div class="frame-cap"><b>B · Conversation.</b> Flat left-aligned messages, reactions, inline image. A <b>call PiP peeks</b> at top — Devon's call survives navigating into chat. The access request is a dedicated card, not a bubble.</div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- (C) INCOMING CALL (full-screen takeover)                       -->
+    <!-- ============================================================= -->
+    <div class="frame-wrap">
+      <div class="device">
+        <div class="screen">
+          <div class="pill-cam"></div>
+
+          <div class="callscreen">
+            <div class="call-bg"></div>
+
+            <div class="call-content">
+              <div class="statusbar" style="color:var(--ink)">
+                <span class="mono">9:41</span>
+                <span class="sb-right">
+                  <svg class="sb-icon" width="18" height="14" viewBox="0 0 18 14" fill="currentColor"><rect x="0" y="9" width="3" height="4" rx="1"/><rect x="5" y="6" width="3" height="7" rx="1"/><rect x="10" y="3" width="3" height="10" rx="1"/><rect x="15" y="0" width="3" height="13" rx="1"/></svg>
+                  <svg class="sb-icon" width="24" height="14" viewBox="0 0 24 14" fill="none"><rect x="1" y="2" width="19" height="10" rx="2.5" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="4" width="13" height="6" rx="1" fill="currentColor"/><rect x="21" y="5" width="2" height="4" rx="1" fill="currentColor"/></svg>
+                </span>
+              </div>
+
+              <div class="call-status">
+                <span class="enc">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+                  End-to-end encrypted · Iroh
+                </span>
+              </div>
+
+              <div class="call-hero">
+                <div class="call-avatar">SL</div>
+                <div>
+                  <div class="call-name" style="text-align:center">Sofia Lindqvist</div>
+                </div>
+                <div class="call-kind">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M23 7l-7 5 7 5V7Z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+                  Incoming video call
+                </div>
+              </div>
+
+              <div class="call-actions">
+                <div class="call-secondary">
+                  <div class="call-sec-btn" role="button">
+                    <span class="sec-ic">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2Z"/></svg>
+                    </span>
+                    Message
+                  </div>
+                  <div class="call-sec-btn" role="button">
+                    <span class="sec-ic">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                    </span>
+                    Remind me
+                  </div>
+                </div>
+
+                <div class="slide-track">
+                  <button class="call-round decline" aria-label="Decline">
+                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16.9a15 15 0 0 1 20 0l-2.5 2.5-3-1.3v-2.4a12 12 0 0 0-9 0v2.4l-3 1.3Z"/></svg>
+                  </button>
+                  <span class="slide-hint">
+                    slide to answer
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+                  </span>
+                  <button class="call-round accept" aria-label="Accept">
+                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.6a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.5-1.3a2 2 0 0 1 2.1-.4c.8.3 1.7.6 2.6.7a2 2 0 0 1 1.7 2Z"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+      <div class="frame-cap"><b>C · Incoming call.</b> Full-screen takeover — tinted radial background, calm Signal-like. Red decline (left) / green accept (right) with slide-to-answer; Message + Remind me above.</div>
+    </div>
+
+  </div>
+
+  <!-- differentiator note + tiny mobile-session-control preview -->
+  <div class="diff-note">
+    <div class="dn-glyph">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="16" cy="9" r="1.4" fill="currentColor" stroke="none"/></svg>
+    </div>
+    <div class="dn-text">
+      <b>First-class mobile remote control is our differentiator.</b> Discord, Slack and the conferencing tools can't drive a host from a phone — only the dedicated remote-access incumbents can. Touch mode / Trackpad mode with a compact bottom session toolbar, plus the same unspoofable owner-side indicator and Stop.
+    </div>
+    <div class="sess-mini">
+      <div class="sm-scr">
+        <div class="sm-stop"><span class="session-banner" style="padding:4px 8px;font-size:10px;gap:6px"><span class="session-dot" style="width:6px;height:6px"></span>CONTROL</span></div>
+        <span class="sm-cursor">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" stroke="#0a0b0f" stroke-width="1.2"><path d="M5 3l14 8-6 1 3.5 7-2.5 1L11 13l-4 4Z"/></svg>
+        </span>
+      </div>
+      <div class="sm-bar">
+        <div class="sm-modes">
+          <span class="sm-mode on">Touch</span>
+          <span class="sm-mode">Trackpad</span>
+        </div>
+        <span class="mono faint" style="font-size:10px">28ms</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
