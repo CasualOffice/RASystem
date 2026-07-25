@@ -412,6 +412,43 @@ pub enum ControlMsg {
     /// **no capability** (like the visual pointer, it touches no OS/input/screen surface). Bounded on
     /// decode ([`MAX_ANNOT_POINTS`]).
     Annotate(AnnotateOp),
+    /// Callee → caller: the local user **accepted** an inbound call (ADR-104). Sent once the media
+    /// session is up. Carries the **agreed** media kind, which may **downgrade** the caller's offer (a
+    /// video invite accepted as [`CallMediaKind::Voice`] means the callee keeps their camera off). This
+    /// message conveys *lifecycle only* — it never confers media: each mic/camera frame is still gated
+    /// per-message host-side against the live grant (ADR-103, Inv 15). No capability (call control is
+    /// base session comms, like [`Self::ChatMessage`]); content-free (Inv 8).
+    CallAccept {
+        /// The media kind the callee agreed to (may narrow the invite's offer).
+        media: CallMediaKind,
+    },
+    /// Callee → caller: the call was **declined** (the local user said no), with a stable reason code
+    /// (typically [`ErrorCode::ConsentDenied`]). Drives the caller's FSM to a terminal state.
+    /// Content-free (Inv 8).
+    CallReject {
+        /// Why the call was declined.
+        code: ErrorCode,
+    },
+    /// Callee → caller: the callee is **already in a call** (the one-active-call rule, ADR-104). The
+    /// caller ends without the callee ever being rung. Content-free.
+    CallBusy,
+    /// Either side: **hang up** an accepted (or connecting) call, with a stable reason code
+    /// ([`ErrorCode::NormalClosure`] for a normal end, [`ErrorCode::SessionRevoked`] for an
+    /// emergency-stop-driven tear-down, Inv 4). Drives both FSMs to a terminal state. Content-free.
+    CallHangup {
+        /// Why the call ended.
+        code: ErrorCode,
+    },
+    /// Either side: the sender's mic/camera **mute state** changed mid-call (ADR-104). Muting is the
+    /// sender ceasing to *send* that stream; it is **advisory presentation state**, not the security
+    /// gate — the actual capture is authorized per-message host-side (revoking `audio.mic.capture` /
+    /// `video.camera.capture` is what truly silences a stream, Inv 15). Content-free (two flags).
+    CallMuteState {
+        /// The sender has muted their microphone (stopped sending mic audio).
+        audio_muted: bool,
+        /// The sender has turned their camera off (stopped sending camera video).
+        video_muted: bool,
+    },
 }
 
 /// The freehand-markup tool an [`AnnotateOp::Stroke`] was drawn with. The host renders each accordingly.

@@ -303,6 +303,44 @@ message FileChunk {
 message FileComplete {}
 
 // ---------------------------------------------------------------------------
+// 1:1 call control (ADR-104). In-session control plane; the out-of-session ring
+// (CallInvite/CallCancel) is a signed SignalPayload, not here. Call control is base
+// session comms (no capability); mic/camera media is gated separately per-message
+// host-side (ADR-103). ras_protocol::ControlMsg::Call*.
+// ---------------------------------------------------------------------------
+
+// Which media a call carries. Mirrors ras_protocol::CallMediaKind. UNSPECIFIED(0) is invalid on the
+// wire and decodes to a RasError(InvalidMessage) — a call media kind must always be explicit.
+enum CallMediaKindProto {
+  CALL_MEDIA_KIND_UNSPECIFIED = 0;
+  CALL_MEDIA_KIND_VOICE       = 1;
+  CALL_MEDIA_KIND_VIDEO       = 2;
+}
+
+// Callee accepted; carries the AGREED media kind (may downgrade the invite's offer). Lifecycle only —
+// never confers media (each mic/camera frame is gated per-message host-side). ControlMsg::CallAccept.
+message CallAccept {
+  CallMediaKindProto media = 1;
+}
+// Callee declined, with a stable reason (typically CONSENT_DENIED). ControlMsg::CallReject.
+message CallReject {
+  ErrorCodeProto code = 1;
+}
+// Callee is already in a call (one-active-call rule). ControlMsg::CallBusy.
+message CallBusy {}
+// Either side hangs up an accepted/connecting call, with a reason (NORMAL_CLOSURE / SESSION_REVOKED for
+// emergency stop). ControlMsg::CallHangup.
+message CallHangup {
+  ErrorCodeProto code = 1;
+}
+// Either side's mic/camera mute state changed mid-call. Advisory presentation state, not the security
+// gate (per-message capture authorization is). ControlMsg::CallMuteState.
+message CallMuteState {
+  bool audio_muted = 1;
+  bool video_muted = 2;
+}
+
+// ---------------------------------------------------------------------------
 // Top-level control-channel message
 // ---------------------------------------------------------------------------
 
@@ -334,6 +372,11 @@ message ControlMsg {
     FileComplete    file_complete    = 21;
     Annotate        annotate         = 22;
     CursorPosition  cursor_position  = 23;
+    CallAccept      call_accept      = 24;
+    CallReject      call_reject      = 25;
+    CallBusy        call_busy        = 26;
+    CallHangup      call_hangup      = 27;
+    CallMuteState   call_mute_state  = 28;
   }
 }
 
