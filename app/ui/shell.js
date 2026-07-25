@@ -3,9 +3,11 @@
  * Wired to the LIVE backend for the parts that exist today — contacts, presence, and out-of-session
  * messaging — via the real Tauri commands (`list_contacts` / `list_online` / `send_message` /
  * `add_contact` / `set_contact_blocked` / `call_contact`) and the `presence` / `message` / `call-request`
- * events. The call and remote-session flows are the DESIGNED surfaces running as interactive previews;
- * they get wired to their real backends as ADR-103/104/105 land and the existing session machinery is
- * folded in. Secret hygiene (Inv 8): message bodies are rendered with `textContent`, never innerHTML.
+ * events. The remote-session and 1:1-call flows are wired to their real backends too: the session
+ * viewer/control/audio/chat/clipboard/file path, and the call commands (`call_place`/`accept`/`decline`/
+ * `hangup`/`set_mute`) + the content-free `call-lifecycle` event stream (ADR-104). Where a live command
+ * isn't present in the current build the attempt is caught and the demo preview / an honest toast shows
+ * instead. Secret hygiene (Inv 8): message bodies are rendered with `textContent`, never innerHTML.
  *
  * Runs in two modes: inside the Tauri app (`window.__TAURI__` present) → real data; opened as a plain
  * file / artifact → a demo dataset so the shell always renders. */
@@ -170,8 +172,8 @@
 
   // ---- top-bar actions ----
   el("#topbar").addEventListener("click", (e) => {
-    if (e.target.closest("#actCall")) startIncoming(false);
-    else if (e.target.closest("#actVideo")) startIncoming(true);
+    if (e.target.closest("#actCall")) initiateCall(false);
+    else if (e.target.closest("#actVideo")) initiateCall(true);
     else if (e.target.closest("#actScreen")) screenAction();
   });
   // Clicking "screen" means: I want to VIEW this contact's screen. Live → real viewer session
@@ -183,29 +185,66 @@
     else openConsent();
   }
 
-  // ---- call flow (designed preview; real voice/video calling is ADR-103/104) ----
+  // ---- call flow (ADR-103/104) ----
+  // LIVE: drives the real Tauri call commands (call_place/accept/decline/hangup/set_mute) and lets the
+  // `call-lifecycle` event stream (content-free — Inv 8) drive UI transitions. If those commands aren't
+  // present in this build yet (the on-device driver is a follow-up), the attempt is caught and the user
+  // gets an honest toast rather than a fake call. Demo mode (browser/artifact) keeps the design preview.
   const callwin = el("#callwin"), scrim = el("#scrim"), incall = el("#incall"), pip = el("#pip");
-  let timerInt, secs = 0;
-  function startIncoming(video) {
-    callWith = byId(active); if (!callWith) return;
-    el("#cwname").textContent = callWith.name; el("#cwav").textContent = callWith.init;
+  let timerInt, secs = 0, callVideo = false;
+  const callInvoke = (cmd, args) => (LIVE ? invoke(cmd, args) : Promise.reject(new Error("demo")));
+
+  function showIncoming(name, init, video) {
+    el("#cwname").textContent = name; el("#cwav").textContent = init;
     callwin.querySelector(".csub b").textContent = video ? "Incoming video call" : "Incoming voice call";
     callwin.classList.add("show"); scrim.classList.add("show");
   }
-  function connectCall() {
+  function showInCall(name, label) {
     callwin.classList.remove("show"); scrim.classList.remove("show"); pip.classList.remove("show");
-    el("#rmtname").textContent = callWith.name; incall.classList.add("show"); inCall = true;
-    secs = 0; tick(); clearInterval(timerInt); timerInt = setInterval(tick, 1000); toast("Connected · " + callWith.name);
+    el("#rmtname").textContent = name || ""; incall.classList.add("show"); inCall = true;
+    clearInterval(timerInt);
+    if (label) { el("#ctimer").textContent = label; } // e.g. "Calling…" / "Connecting…"
+    else { secs = 0; tick(); timerInt = setInterval(tick, 1000); }
   }
   function tick() { el("#ctimer").textContent = String(Math.floor(secs / 60)).padStart(2, "0") + ":" + String(secs % 60).padStart(2, "0"); secs++; }
-  function endCall() { incall.classList.remove("show"); pip.classList.remove("show"); inCall = false; clearInterval(timerInt); toast("Call ended", "var(--ink-faint)"); }
-  function minCall() { incall.classList.remove("show"); pip.classList.add("show"); el("#pipname").textContent = callWith.name; toast("Call minimized — still connected"); }
-  el("#btnAcceptA").onclick = connectCall; el("#btnAcceptV").onclick = connectCall;
-  el("#btnDecline").onclick = () => { callwin.classList.remove("show"); scrim.classList.remove("show"); toast("Declined", "var(--ink-faint)"); };
-  el("#btnHang").onclick = endCall; el("#btnPipEnd").onclick = endCall;
+  function endCall(msg) {
+    incall.classList.remove("show"); pip.classList.remove("show"); callwin.classList.remove("show");
+    inCall = false; clearInterval(timerInt);
+    if (msg) toast(msg, "var(--ink-faint)");
+  }
+  function minCall() { incall.classList.remove("show"); pip.classList.add("show"); el("#pipname").textContent = callWith ? callWith.name : ""; toast("Call minimized — still connected"); }
+
+  // Outbound: place a call to the active contact.
+  function initiateCall(video) {
+    callWith = byId(active); if (!callWith) return;
+    callVideo = video;
+    if (!LIVE) { showIncoming(callWith.name, callWith.init, video); return; } // demo: preview the ring
+    showInCall(callWith.name, "Calling…");
+    callInvoke("call_place", { contactId: active, video }).catch(() => {
+      endCall();
+      toast("Voice/video calling isn't available in this build yet", "var(--amber)");
+    });
+  }
+  function acceptCall(video) {
+    if (!LIVE) { showInCall(callWith ? callWith.name : "", null); toast("Connected · " + (callWith ? callWith.name : "")); return; }
+    callVideo = video;
+    callInvoke("call_accept", { video }).catch(() => {}); // UI advances on the `active` lifecycle event
+  }
+  // Mute buttons carry the `on` class while the source is ACTIVE (unmuted); muted = not on.
+  function pushMute() {
+    const audioMuted = !el("#btnMute").classList.contains("on");
+    const videoMuted = !el("#btnCam").classList.contains("on");
+    callInvoke("call_set_mute", { audioMuted, videoMuted }).catch(() => {});
+  }
+
+  el("#btnAcceptA").onclick = () => acceptCall(false);
+  el("#btnAcceptV").onclick = () => acceptCall(true);
+  el("#btnDecline").onclick = () => { callInvoke("call_decline").catch(() => {}); callwin.classList.remove("show"); scrim.classList.remove("show"); toast("Declined", "var(--ink-faint)"); };
+  el("#btnHang").onclick = () => { callInvoke("call_hangup").catch(() => {}); if (!LIVE) endCall("Call ended"); };
+  el("#btnPipEnd").onclick = () => { callInvoke("call_hangup").catch(() => {}); if (!LIVE) endCall("Call ended"); };
   el("#btnMinCall").onclick = minCall; el("#btnExpand").onclick = () => { pip.classList.remove("show"); incall.classList.add("show"); };
-  el("#btnMute").onclick = (e) => e.currentTarget.classList.toggle("on");
-  el("#btnCam").onclick = (e) => e.currentTarget.classList.toggle("on");
+  el("#btnMute").onclick = (e) => { e.currentTarget.classList.toggle("on"); pushMute(); };
+  el("#btnCam").onclick = (e) => { e.currentTarget.classList.toggle("on"); pushMute(); };
 
   // ---- consent -> session flow ----
   const consent = el("#consent"), session = el("#session"), ownerbar = el("#ownerbar");
@@ -486,6 +525,25 @@
       renderList(); if (active === c.id) renderMain();
     });
     listen("call-request", (e) => { const m = e.payload || {}; const c = byId(m.contact_id); toast((c ? c.name : "A contact") + " wants to view your screen", "var(--session)"); });
+    // Content-free 1:1-call lifecycle (ADR-104) — drives the ring / in-call / end UI. Never carries a
+    // media byte (Inv 8); an incoming ring is surfaced but never auto-answered (Inv 1 — the local user
+    // taps Accept). `kind` ∈ outgoing_ringing/incoming_ringing/connecting/active/ended/declined/missed/
+    // failed/remote_mute_changed; optional `contactId`, `media` ("voice"|"video").
+    listen("call-lifecycle", (e) => {
+      const ev = e.payload || {}, kind = ev.kind;
+      const c = ev.contactId ? byId(ev.contactId) : callWith;
+      if (c) callWith = c;
+      const name = c ? c.name : (callWith ? callWith.name : "Contact");
+      const init = c ? c.init : (callWith ? callWith.init : "?");
+      if (kind === "incoming_ringing") { callVideo = ev.media === "video"; showIncoming(name, init, callVideo); }
+      else if (kind === "connecting") { showInCall(name, "Connecting…"); }
+      else if (kind === "active") { showInCall(name, null); toast("Connected · " + name, "var(--online)"); }
+      else if (kind === "ended") { endCall("Call ended"); }
+      else if (kind === "declined") { endCall("Call declined"); }
+      else if (kind === "missed") { endCall("No answer"); }
+      else if (kind === "failed") { endCall("Call failed"); }
+      // outgoing_ringing keeps the "Calling…" state already shown; remote_mute_changed is presentation-only.
+    });
     // Host denied a control request, or revoked an active lease mid-session (Inv 4). Content-free.
     listen("control-consent-denied", () => { if (controller) controller.notifyConsentDenied(); });
     // In-session chat from the remote peer (text is .reveal()'d host-side; render via textContent, Inv 8).
