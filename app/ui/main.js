@@ -1661,14 +1661,14 @@ function setControlState(state) {
       controlBtn.textContent = "Request denied";
       controlBtn.classList.add("denied");
       controlBtn.disabled = true;
-      releaseHeldButtons();
+      releaseHeldInput();
       break;
     case "timeout":
       controlRequestPending = false;
       controlBtn.textContent = "No response — timed out";
       controlBtn.classList.add("pending");
       controlBtn.disabled = true;
-      releaseHeldButtons();
+      releaseHeldInput();
       break;
     default: // "idle"
       clearControlTimers();
@@ -1677,7 +1677,7 @@ function setControlState(state) {
       controlBtn.disabled = !active;
       lastCaps = null;
       lastNum = null;
-      releaseHeldButtons(); // don't leak a held button / stuck drag across control sessions (Inv 4-aligned)
+      releaseHeldInput(); // don't leak a held button / stuck drag across control sessions (Inv 4-aligned)
       break;
   }
   if (banner) {
@@ -1814,6 +1814,7 @@ controlBtn.addEventListener("click", async () => {
 // continuous follow is what makes clicks land where you point, keeps hover states (menus/tooltips)
 // alive, and lets a click cleanly focus the target app (so keystrokes go somewhere).
 const heldButtons = new Set(); // buttons currently pressed on the host, for best-effort release
+const heldKeys = new Set(); // HID usages currently pressed on the host (the exact values we sent), for release
 let lastNx = 0;
 let lastNy = 0;
 // Pointer lock (backlog X8, ADR-087 §3.6): for games/3D/CAD apps that read raw mouse *motion*, not
@@ -1874,22 +1875,31 @@ function forwardButton(e, down) {
 window.addEventListener("pointerdown", (e) => forwardButton(e, true));
 window.addEventListener("pointerup", (e) => forwardButton(e, false));
 window.addEventListener("contextmenu", (e) => { if (controlling) e.preventDefault(); });
-// A drag can end WITHOUT a pointerup reaching us — pointercancel (pen/touch), the window losing focus
-// (alt-tab / a notification), the tab backgrounding, or lost pointer capture. Without this, `dragging`
-// stays true and the host's real cursor keeps following every hover move, and a pressed button stays
-// held. Best-effort: release each tracked button at the last known spot, then clear the drag state.
-function releaseHeldButtons() {
+// Input (a drag OR a keypress) can end WITHOUT its release event reaching us — pointercancel
+// (pen/touch), the window losing focus (alt-tab / an OS notification), the tab backgrounding, lost
+// pointer capture, or a keyup delivered to the OS after focus left the webview. Without releasing on
+// these, a pressed button or a held modifier (Shift/Ctrl/⌘) stays stuck on the HOST while the lease is
+// still active — e.g. every later click becomes a Shift-click on the remote machine. And once control
+// ends, the real keyup is dropped by `forwardKey`'s `!controlling` guard, so it can never release
+// afterward. So flush BOTH held buttons and held keys here, and wire it to every exit hook + the
+// control-ended transitions in `setControlState`. Best-effort (`.catch`), releasing at the last known
+// pointer spot; keys release with `modifiers: 0` (the host clears all modifier flags on an empty byte).
+function releaseHeldInput() {
   for (const button of heldButtons) {
     invoke("input_pointer_button", { nx: lastNx, ny: lastNy, button, down: false }).catch(() => {});
   }
   heldButtons.clear();
+  for (const hidUsage of heldKeys) {
+    invoke("input_key", { hidUsage, down: false, modifiers: 0 }).catch(() => {});
+  }
+  heldKeys.clear();
   dragging = false;
 }
-window.addEventListener("pointercancel", releaseHeldButtons);
-window.addEventListener("lostpointercapture", releaseHeldButtons);
-window.addEventListener("blur", releaseHeldButtons);
+window.addEventListener("pointercancel", releaseHeldInput);
+window.addEventListener("lostpointercapture", releaseHeldInput);
+window.addEventListener("blur", releaseHeldInput);
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) releaseHeldButtons();
+  if (document.hidden) releaseHeldInput();
 });
 window.addEventListener("wheel", (e) => {
   if (!controlling) return;
@@ -1911,7 +1921,15 @@ function forwardKey(e, down) {
   if (hid === undefined) return;
   e.preventDefault();
   syncLockState(e);
-  invoke("input_key", { hidUsage: remapHid(hid), down, modifiers: modifierBits(e) });
+  const hidUsage = remapHid(hid);
+  // Track the exact usage we send so a lost keyup (focus stolen mid-press) or a control-end can still
+  // release it (see `releaseHeldInput`). A browser can repeat keydowns while held — the Set dedups.
+  if (down) {
+    heldKeys.add(hidUsage);
+  } else {
+    heldKeys.delete(hidUsage);
+  }
+  invoke("input_key", { hidUsage, down, modifiers: modifierBits(e) }).catch(() => {});
 }
 // Push the controller's authoritative Caps/Num *state* to the host on change (ADR-074). `getModifierState`
 // is read off the same event that carries the keystroke, so lock changes land in-order with the keys
