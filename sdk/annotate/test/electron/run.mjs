@@ -57,7 +57,11 @@ const html = fs.readFileSync(path.join(ADAPTER, 'overlay.html'), 'utf8')
     .replace(' type="module"', '');
 fs.writeFileSync(path.join(OUT, 'annotate-overlay.html'), html);
 
-const r = spawnSync(electron, [ path.join(HERE, 'smoke.mjs') ], {
+// `--capture` runs the ADR-107 §2 proof (overlay visible in a live capture stream) instead of the
+// window/IPC smoke test. Both need the same bundles built above.
+const script = process.argv.includes('--capture') ? 'capture-stream.mjs' : 'smoke.mjs';
+
+const r = spawnSync(electron, [ path.join(HERE, script) ], {
     stdio: 'inherit',
     env: { ...process.env, ANNOTATE_BUILD: OUT, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' },
 });

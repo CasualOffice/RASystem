@@ -33,7 +33,8 @@
     "test": "node --test 'test/*.test.js'",
     "verify-bundles": "node test/verify-bundles.mjs",
     "smoke": "node test/electron/run.mjs",
-    "check": "npm test && npm run verify-bundles && npm run smoke"
+    "check": "npm test && npm run verify-bundles && npm run smoke",
+    "capture-test": "node test/electron/run.mjs --capture"
   },
   "dependencies": {},
   "engines": {

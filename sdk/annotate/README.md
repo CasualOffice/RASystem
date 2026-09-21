@@ -114,6 +114,16 @@ way the host app's esbuild config would, and asserted on what ended up inside. T
 bug — the preload imported its channel names from `main.js` and so dragged `ipcMain`,
 `BrowserWindow` and `screen` into a sandboxed preload, which fails only at runtime in Electron.
 
+**The core architectural claim is proven.** `npm run capture-test` shows the overlay, opens a live
+`getUserMedia` desktop-capture stream — the same path a Jitsi screen-share uses — and finds the
+overlay's ink in the captured frame (25k ink pixels). ADR-107 §2 holds: marks drawn on the sharer's
+desktop *are* inside the screen capture, which is what makes one renderer, no replicated state, and
+zero-code viewing on mobile all work.
+
+> **Trap worth knowing:** `desktopCapturer.getSources({ thumbnailSize })` thumbnails do **not**
+> contain the overlay, while the live stream does. Testing with thumbnails would wrongly suggest the
+> feature is broken.
+
 **The overlay runs in real Electron** (`npm run smoke`, 13/13): the transparent always-on-top window
 is created and sized to the resolved display, the preload bridge is exposed under contextIsolation,
 ops travel the real IPC path, annotation stays off until admitted, and `capturePage` confirms the
