@@ -80,7 +80,9 @@ export class AnnotatorToolbar {
         this.root.append(this.canvas, this.bar);
         parent.appendChild(this.root);
 
-        this.render({ permission: null });
+        // Hidden until there is actually a shared screen to annotate. Offering "Request to
+        // annotate" when nobody is sharing asks for permission to draw on nothing.
+        this.setVisible(false);
     }
 
     /** Rebuild the bar for the current permission state. */
@@ -127,6 +129,22 @@ export class AnnotatorToolbar {
         const clear = el('button', 'ca-btn', 'Clear mine');
         clear.onclick = () => this._cb.onClear?.();
         this.bar.append(undo, clear);
+    }
+
+    /**
+     * Show or hide the whole UI.
+     *
+     * The toolbar exists only while someone is sharing a screen. With no share there is nothing to
+     * draw on, so the correct amount of UI is none — not a button that would request permission to
+     * annotate a screen that does not exist.
+     */
+    setVisible(on) {
+        this.root.style.display = on ? '' : 'none';
+        this._visible = !!on;
+    }
+
+    get visible() {
+        return this._visible;
     }
 
     /** A transient message — a refusal reason, or why drawing is unavailable right now. */

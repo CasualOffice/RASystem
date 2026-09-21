@@ -182,3 +182,14 @@ test('the request op carries no name — the prompt is labelled from the roster'
     // whatever they wanted.
     assert.deepEqual(Object.keys(request()), [ 'op' ]);
 });
+
+// ── the UI must not exist when there is nothing to annotate ─────────────────────────────────────
+
+test('a request cannot be made against nobody', () => {
+    // The UI bug this mirrors: the toolbar rendered "Request to annotate" with no share in
+    // progress, offering to ask permission to draw on a screen that did not exist. The controller
+    // half of that: there is no sharer to address, so there is nothing to send.
+    const { sharer } = setup();
+    assert.equal(sharer.state().pending.length, 0);
+    assert.equal(sharer.session.store.size, 0);
+});

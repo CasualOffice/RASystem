@@ -65,8 +65,10 @@ export async function start(options = {}) {
         if (id === sharerId) return;
         detach();
         if (!id) {
-            toolbar.render({ permission: null });
-            toolbar.setNote('Waiting for someone to share their screen…');
+            // Nobody is sharing: no toolbar at all. Previously this rendered the request button
+            // with a "waiting for a share" note, which offered to ask permission to draw on
+            // nothing — visible, confusing, and pointing at a screen that did not exist.
+            toolbar.setVisible(false);
             return;
         }
         sharerId = id;
@@ -90,6 +92,7 @@ export async function start(options = {}) {
 
         toolbar.render({ permission: null });
         toolbar.setNote(`${displayName(id)} is sharing.`);
+        toolbar.setVisible(true);
     }
 
     function detach() {

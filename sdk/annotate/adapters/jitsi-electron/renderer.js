@@ -245,6 +245,7 @@ export function setupAnnotateRender(api, opts = {}) {
                 send: op => transport.send(o.sharerId, op),
             });
             surface.setTool(null);
+            toolbar.setVisible(true);   // only ever constructed for a live remote share
 
             annotator = new AnnotatorController({
                 transport,
