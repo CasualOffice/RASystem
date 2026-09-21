@@ -1,0 +1,20 @@
+{
+  "name": "@casualoffice/annotate",
+  "version": "0.0.1",
+  "description": "Embeddable multi-participant screen annotation. Renders on the sharer's real desktop, so every viewer sees it through the ordinary video path. Jitsi transport included.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./core": "./core/index.js",
+    "./surface": "./surface/surface.js",
+    "./overlay": "./overlay/overlay.js",
+    "./transport/jitsi": "./transport/jitsi.js"
+  },
+  "files": ["core", "surface", "overlay", "transport", "latency", "index.js", "README.md"],
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  },
+  "dependencies": {},
+  "engines": { "node": ">=20" }
+}
