@@ -135,8 +135,47 @@ sharer.handle(annotatorId, { name:'casual-annotate', v:1, sid:'x', op:'clear', s
 // → { reason: 'downgraded-to-mine' }  — removes only their own work
 ```
 
+## Desktop app as the sharer
+
+Web-to-web proves the transport. It does **not** prove the product, because the desktop app is the
+half that owns the overlay. Two upstream facts make that harder than it sounds:
+
+1. **`JitsiMeetExternalAPI` hardcodes `https://${domain}`** (`external_api.js:324`) with no SSL
+   opt-out, so the Electron app **cannot** talk to a plain-HTTP deployment at all. A local test has
+   to be HTTPS, self-signed cert and all — the app shows only a black screen otherwise.
+2. **`Conference.tsx:143` rewrites `jitsi-meet://` to `https://`**, so passing a protocol URL on the
+   command line forces HTTPS regardless of `--defaultServerURL`.
+
+So: serve the stack on `https://localhost:8443` (`PUBLIC_URL=https://localhost:8443`,
+`DISABLE_HTTPS=0`) and launch both ends with certificate errors ignored.
+
+```bash
+# desktop (sharer)
+npx electron ./build/main.js --remote-debugging-port=9223     --ignore-certificate-errors --defaultServerURL https://localhost:8443
+
+# web (annotator) — a SEPARATE Chrome with a throwaway profile, so your own browser is untouched
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"     --remote-debugging-port=9224 --ignore-certificate-errors     --user-data-dir=/tmp/chrome-annotate --no-first-run     "https://localhost:8443/AnnotateProof#config.prejoinConfig.enabled=false"
+```
+
+Drive the Electron app into a room over its own IPC rather than by typing at it — keystroke
+automation lands on the wrong window and is not worth debugging:
+
+```js
+// in the LAUNCHER window's renderer (a `page` target, file://…/index.html)
+window.jitsiElectronApp.ipc.send('open-meeting-window',
+    { room: 'AnnotateProof', serverURL: 'https://localhost:8443' });
+```
+
+> **CDP note:** Electron hosts the Jitsi app in an **iframe** target, not a `page`. A driver that
+> filters on `type === 'page'` will report "no target" while the app is plainly running.
+
 ## Result, 2026-09-22
 
-All of the above passed against `docker-jitsi-meet` on localhost: 25/25 points intact, ack and roster
-returned, capabilities negotiated, cursor labelled — and both hostile ops refused, with the sharer's
-stroke surviving and the attacker's own stroke correctly removed.
+**Web ↔ web** (transport): 25/25 points intact, ack and roster returned, capabilities negotiated,
+cursor labelled — and both hostile ops refused, with the sharer's stroke surviving and the
+attacker's own stroke correctly removed.
+
+**Web → desktop** (the real shape — Electron as sharer, browser as annotator): a 31-point stroke
+arrived complete (`[2000,30000]` … `[62000,27206]`), rendered in the annotator's **assigned** colour
+`#1e90ff` derived from the author rather than the wire, `end` received, cursor labelled
+`WebAnnotator` from the roster, all five capabilities negotiated, ack returned to the browser.
