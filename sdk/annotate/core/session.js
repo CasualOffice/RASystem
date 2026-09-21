@@ -100,14 +100,37 @@ export class SharerSession {
     }
 
     /**
-     * Grant one participant permission to draw.
+     * Grant one participant permission to draw — ONLY in answer to a request they actually made.
      *
-     * Only ever called from a real human decision in the host app. There is deliberately no code
-     * path from a `request` op to this method: a request opens a prompt, and nothing else.
+     * The guard is the point. "Only called from a human decision" was previously a comment, and a
+     * comment is not an enforcement: any stray call, a replayed state update, or a second session
+     * object in the same page could grant permission with no prompt ever shown. That is strictly
+     * worse than having no consent feature, because the UI claims a gate that is not there.
+     *
+     * So the gate is structural: without a pending request there is nothing to approve, and this
+     * refuses. A host that genuinely wants to pre-authorise someone (a saved trust decision, say)
+     * must say so explicitly via `preAuthorize`, which is named so it cannot be reached by accident.
+     *
+     * @returns {boolean} true if permission was granted.
      */
     allowParticipant(author) {
+        if (!this.pending.has(author)) return false;
         this._allow.add(author);
         this.pending.delete(author);
+        return true;
+    }
+
+    /**
+     * Grant permission with no request outstanding.
+     *
+     * Deliberately separate from `allowParticipant` and deliberately verbose. This is the only way
+     * to admit someone who never asked, so every such grant is a visible, intentional line in the
+     * host application rather than a side effect.
+     */
+    preAuthorize(author) {
+        this._allow.add(author);
+        this.pending.delete(author);
+        return true;
     }
 
     /** Refuse a pending request, or withdraw a permission already given. */

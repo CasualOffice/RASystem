@@ -115,41 +115,63 @@ and to hit-test `erase`. It is dropped when the share ends.
 The **sharer** needs none of this — it holds every stroke already, so its own eraser hit-tests
 directly against the authoritative set and applies without a round trip.
 
-## 5. Transport — Jitsi's bridge relay
+## 5. Transport — and the upstream dead end that reshaped this design
 
-**Verified against `lib-jitsi-meet` @ `JitsiConference.ts` / `modules/RTC/BridgeChannel.ts`.**
+**Verified against `lib-jitsi-meet` and `jitsi-meet`.** The bridge channel is an `RTCDataChannel`
+**or** a WebSocket to JVB (`BridgeChannel.ts:23`), and every send is
+`JSON.stringify({ colibriClass: 'EndpointMessage', msgPayload, to })` (`BridgeChannel.ts:499`).
 
-The bridge channel is an `RTCDataChannel` **or** a WebSocket to JVB (`BridgeChannel.ts:23`), and every
-send is `JSON.stringify({ colibriClass: 'EndpointMessage', msgPayload, to })` (`BridgeChannel.ts:499`).
-So on the library path the payload is a **JSON object** — no base64, no string packing.
+### 5.1 The iframe External API can send but cannot receive
 
-| Path | API | Payload |
-|---|---|---|
-| `lib-jitsi-meet` (embedder owns the conference) | `conference.sendMessage(payload, to, /* viaBridge */ true)` | object |
-| iframe External API (**jitsi-meet-electron uses this**) | `api.executeCommand('sendEndpointTextMessage', to, text)` → `endpointTextMessageReceived` | **string — must `JSON.stringify`** |
+This is the single most important fact in this document, and it was found the expensive way — after
+the feature had been "verified" several times in pieces and still could not work end to end.
 
-Receive is `JitsiConferenceEvents.ENDPOINT_MESSAGE_RECEIVED` (`JitsiConferenceEvents.ts:216`) on both.
+`sendEndpointTextMessage` wraps its payload as `{ name: 'endpoint-text-message', text }`
+(`API.js:602`, `constants.js:24`). The matching receive notifier, `notifyEndpointTextMessageReceived`,
+is **defined at `API.js:1700` and has zero callers in the web application.** Only the React Native
+path implements the equivalent (`mobile/external-api/middleware.ts:232`).
 
-> **Note:** `sendEndpointMessage(to, payload)` is marked `@deprecated` in favour of `sendMessage`
-> (`JitsiConference.ts:4715`) — though Jitsi's own remote-control feature still calls the deprecated
-> one. Use `sendMessage`.
+> **So `endpointTextMessageReceived` never fires on web or Electron.** A host outside the iframe can
+> send into a conference and can never hear anything back.
 
-**Envelope — mirror Jitsi's own convention.** Remote control tags every message with a `name`
-(`functions.ts:43`: `conference.sendEndpointMessage(to, { name: REMOTE_CONTROL_MESSAGE_NAME, ...event })`).
-We do the same with `name: 'casual-annotate'`, so a room carrying both features demultiplexes cleanly
-and the SDK looks native to anyone reading Jitsi's source.
+That makes an out-of-iframe transport structurally one-way, which in turn makes the whole
+ask-and-approve flow impossible: a request reaches nobody, so no prompt can ever appear. The symptom
+is a participant who sees "Request to annotate", clicks it, and waits forever while the sharer sees
+nothing at all — with no error anywhere.
 
-- **Unicast to the sharer, not broadcast.** Only the sharer renders; the capture path does the
-  fan-out. Bridge load stays flat as the room grows. This is exactly the direction remote control
-  sends in (`actions.ts:608`, unicast to `controller.controlled`).
-- **Cursor ops are lossy by design** — throttled ~20 Hz, coalesced, never retried, last-write-wins.
-- **Stroke ops get a cheap repair, not a protocol:** on `end`, resend the stroke once as one burst.
-  Idempotent by stroke id, so a duplicate costs nothing and a dropped `append` self-heals.
-- There is **no 4 KiB cap on this path** (that bound belongs to `iroh-gossip`, §14). Keep `append`
-  batches small anyway — SCTP-mode data channels and JVB both prefer it, and small batches are what
-  make the drawing look live.
-- The transport sits behind `send(op)` / `onOp(cb)` / `participants()`, so §14 drops in without
-  touching the renderer or the surface.
+### 5.2 Consequence: the SDK runs *inside* the meeting page
+
+The fix is not a workaround, it is the correct shape:
+
+```
+       jitsi-meet page (served)                    Electron main
+  ┌────────────────────────────────┐        ┌───────────────────────┐
+  │ casual-annotate.js             │        │                       │
+  │  ├─ ConferenceTransport ───────┼── JVB  │                       │
+  │  ├─ SharerController + consent │        │                       │
+  │  └─ AnnotatorToolbar + surface │ ─ops─► │ overlay window        │
+  └────────────────────────────────┘ post   └───────────────────────┘
+                                     Message
+```
+
+The script is **served by jitsi-meet through its own `body.html` include** (`index.html:214`), so it
+runs in the page with the real `lib-jitsi-meet` conference — which does receive. Only the overlay
+window, which must be an OS-level always-on-top surface, stays in the Electron main process, and it
+is fed ops over `postMessage` → IPC.
+
+This also removes a whole category of problem: there is now **one transport**, the same code in a
+browser and inside the desktop app, so the two halves cannot drift apart.
+
+### 5.3 The wire
+
+- **Envelope:** `{ name: 'endpoint-text-message', text: JSON.stringify(op) }`, matching the External
+  API's own shape so that a host which *can* receive (mobile, or a future web fix) interoperates
+  without a second format. Incoming messages are accepted wrapped **or** bare.
+- **Unicast to the sharer**, never broadcast — only the sharer renders, and the capture path does the
+  fan-out (§2). Broadcast is reserved for the `roster`, which genuinely needs everyone.
+- **Cursor ops are lossy by design** — throttled ~20 Hz, coalesced, never retried.
+- **Stroke repair, not a protocol:** on `end`, resend the stroke once. Idempotent by stroke id, so a
+  duplicate costs nothing and a dropped `append` self-heals.
 
 ## 6. Coordinate space — and where Jitsi's own code gets it wrong
 
@@ -275,24 +297,61 @@ window is captured in display mode. **Linux/Wayland is the weak one** — an alw
 surface is compositor-dependent, and per the table above Jitsi's own SDK gives up on multi-monitor
 there. Needs on-device verification, the same caveat this repo already carries for its Linux host path.
 
-## 9. Consent and the indicator (invariants)
+## 9. Consent — ask and approve (Inv 1)
 
-Remote people paint on a real desktop, so the RAS invariants apply nearly verbatim:
+Annotation paints on someone's real desktop, so the person whose screen it is decides. Every other
+guarantee in this document is downstream of that one.
 
-- **Off by default.** The sharer explicitly enables annotation per share. Ending the share clears
-  everything and disables it (`overlay.js:75`).
-- **Always-visible indicator.** Reuse the badge (`overlay.js:19`) — it lives on the always-on-top
-  overlay covering the shared display, so it cannot be minimized or occluded. It must name who is
-  currently drawing.
-- **Instant stop.** One control that clears all marks and revokes, plus per-participant mute. The
-  sharer is the final authority (Inv 1).
-- **No capability required** — ADR-097's reasoning holds and is *why* this is safe to ship into a
-  meeting product: annotation is display data, geometry and a colour. It touches no OS input, no
-  screen-write, no filesystem. The moment anything here gains an input path, that reasoning is void
-  and it needs the full grant/capability machinery.
-- **Never logged** (Inv 8) — drawing over a document is content.
+### 9.1 The flow
 
----
+```
+annotator                     sharer (in-page)                person at the keyboard
+    │  request ───────────────────►│
+    │                              │  pending.add(id) ──────────► prompt
+    │                              │◄─────────────────────────── Allow / Deny
+    │◄────────── grant | deny ─────│
+```
+
+- **`request` carries nothing** — not even a display name. A request that named itself would let
+  anyone make the consent prompt say whatever they liked. The prompt is labelled from the sharer's
+  own roster, and the name is inserted as **text, never HTML**.
+- **A refusal is sent explicitly.** Silence is indistinguishable from a dropped message, and leaves
+  the requester's UI spinning forever.
+- **Deny is the default** and dismissing the prompt denies.
+
+### 9.2 A grant is impossible without a request
+
+This was a real defect, found in a live run: permission ended up **granted with no prompt ever
+shown**. That is worse than having no consent feature, because the interface claims a gate that is
+not there.
+
+The cause was that "only called after a human decision" was a *comment*. It is now a *guard*:
+
+| Method | Behaviour |
+|---|---|
+| `allowParticipant(id)` | **refuses** unless that id has a request outstanding; returns `false` |
+| `preAuthorize(id)` | the only way to admit someone who never asked — named so it cannot be reached by accident |
+| `approve(id)` | answers a prompt; returns `false` and emits nothing if there was no request |
+
+So a stray call, a replayed state update, or a second session object in the same page cannot produce
+a grant. A withdrawn permission cannot be restored by a replayed approval either: the original
+request is spent.
+
+Three tests pin this, and one of them is named after the defect.
+
+### 9.3 Revocation puts the pen down
+
+Withdrawing permission removes the participant's marks **and** resets their tool to `null`, so the
+canvas stops accepting pointer events. Re-rendering the toolbar alone would leave the user drawing
+into a void — emitting ops the sharer now refuses, with no feedback.
+
+### 9.4 The rest of the sharer's authority
+
+Off by default per share · an always-visible indicator on the overlay · instant clear + revoke ·
+per-participant mute · an allow-list. Any participant can *send*; the sharer decides who is
+*honoured*. Annotation carries **no capability** (ADR-097): it is geometry and a colour, with no OS
+input, screen-write or filesystem path — which is what keeps it safe to drop into a third-party
+product. The moment anything here gains an input path, that reasoning is void.
 
 ## 10. Security posture
 

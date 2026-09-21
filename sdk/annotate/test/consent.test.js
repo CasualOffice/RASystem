@@ -40,6 +40,15 @@ function bridge() {
 }
 
 /** A sharer in ALLOWLIST mode — nobody may draw until individually approved. */
+/** A surface stand-in that records the tool it was told to use. */
+function recordingSurface() {
+    return {
+        tool: 'unset',
+        setColor() {}, onAck() {}, setAuthor() {},
+        setTool(t) { this.tool = t; },
+    };
+}
+
 function setup() {
     const b = bridge();
     const requests = [];
@@ -58,13 +67,13 @@ function setup() {
     ]);
 
     const aliceT = new ConferenceTransport(b.make('alice', []), EVENTS);
-    const surface = { setColor() {}, setTool() {}, onAck() {}, setAuthor() {} };
+    const surface = recordingSurface();
     const alice = new AnnotatorController({
         transport: aliceT, sharerId: 'sharer', selfId: 'alice', surface,
         onState: s => states.push(s),
     });
 
-    return { sharer, alice, requests, states, aliceT };
+    return { sharer, alice, requests, states, aliceT, surface };
 }
 
 test('a request reaches the sharer as a prompt, and grants nothing by itself', () => {
@@ -185,6 +194,36 @@ test('the request op carries no name — the prompt is labelled from the roster'
 
 // ── the UI must not exist when there is nothing to annotate ─────────────────────────────────────
 
+test('the sharer cannot grant permission nobody asked for', () => {
+    // This is the defect that shipped and was caught in a live run: permission ended up granted
+    // with no prompt shown. It is now impossible by construction rather than by convention.
+    const { sharer, alice } = setup();
+
+    assert.equal(sharer.approve('alice'), false, 'no request outstanding, so nothing to approve');
+    assert.equal(sharer.session.admits('alice'), false);
+    assert.equal(alice.canDraw, false);
+
+    // And no grant went on the wire, so the annotator's UI cannot show tools either.
+    assert.equal(alice.permission, null);
+});
+
+test('a withdrawn permission cannot be restored by a replayed approval', () => {
+    const { sharer, alice } = setup();
+    alice.requestPermission();
+    sharer.approve('alice');
+    sharer.withdraw('alice');
+
+    assert.equal(sharer.approve('alice'), false, 'the old request is spent');
+    assert.equal(sharer.session.admits('alice'), false);
+});
+
+test('preAuthorize is the only way to admit someone who never asked, and it is explicit', () => {
+    const { sharer, alice } = setup();
+    sharer.preAuthorize('alice');
+    assert.equal(sharer.session.admits('alice'), true);
+    assert.equal(alice.permission, 'granted', 'and the annotator is told');
+});
+
 test('a request cannot be made against nobody', () => {
     // The UI bug this mirrors: the toolbar rendered "Request to annotate" with no share in
     // progress, offering to ask permission to draw on a screen that did not exist. The controller
@@ -192,4 +231,23 @@ test('a request cannot be made against nobody', () => {
     const { sharer } = setup();
     assert.equal(sharer.state().pending.length, 0);
     assert.equal(sharer.session.store.size, 0);
+});
+
+test('revoking puts the pen down, not just the toolbar away', () => {
+    const { sharer, alice, surface } = setup();
+    alice.requestPermission();
+    sharer.approve('alice');
+    surface.setTool(0);
+
+    sharer.withdraw('alice');
+    assert.equal(surface.tool, null,
+        'the canvas must stop accepting input, or the user draws into a void');
+});
+
+test('a denial also puts the pen down', () => {
+    const { sharer, alice, surface } = setup();
+    alice.requestPermission();
+    surface.setTool(0);
+    sharer.reject('alice');
+    assert.equal(surface.tool, null);
 });

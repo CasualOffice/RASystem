@@ -98,9 +98,28 @@ export class SharerController {
         this._emit({ to: '', op: rosterOp(r.colors, r.names, r.caps, r.v) });
     }
 
-    /** The person whose screen this is said yes. */
+    /**
+     * The person whose screen this is said yes.
+     *
+     * Refuses unless that participant actually has a request outstanding, so a grant cannot happen
+     * without a prompt having been raised. Returns false when there was nothing to approve — worth
+     * surfacing rather than ignoring, because it means the UI and the session disagree.
+     *
+     * @returns {boolean}
+     */
     approve(id) {
-        this.session.allowParticipant(id);
+        if (!this.session.allowParticipant(id)) return false;
+        this._emit({ to: id, op: grantOp() });
+        this.pushState();
+        return true;
+    }
+
+    /**
+     * Admit someone who never asked — a saved trust decision, or a host that manages consent its
+     * own way. Named to be hard to reach by accident; `approve` is the path for answering a prompt.
+     */
+    preAuthorize(id) {
+        this.session.preAuthorize(id);
         this._emit({ to: id, op: grantOp() });
         this.pushState();
     }

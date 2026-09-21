@@ -57,8 +57,34 @@ test('allowlist admission honours only named participants', () => {
     const s = new SharerSession({ admit: ADMIT.ALLOWLIST });
     s.participantJoined('alice', 'Alice');
     assert.equal(s.admits('alice'), false);
-    s.allowParticipant('alice');
+    // `preAuthorize` is the explicit path for admitting someone who never asked; `allowParticipant`
+    // answers a real request and refuses without one.
+    s.preAuthorize('alice');
     assert.equal(s.admits('alice'), true);
+});
+
+test('allowParticipant REFUSES when nobody asked — a grant needs a request', () => {
+    // The defect this closes: permission could be granted with no prompt ever shown, which is
+    // worse than having no consent gate at all, because the UI claims a gate that is not there.
+    const s = new SharerSession({ admit: ADMIT.ALLOWLIST });
+    s.participantJoined('mallory', 'Mallory');
+
+    assert.equal(s.allowParticipant('mallory'), false);
+    assert.equal(s.admits('mallory'), false, 'no request means nothing to approve');
+});
+
+test('allowParticipant succeeds exactly once per request', () => {
+    const s = new SharerSession({ admit: ADMIT.ALLOWLIST });
+    s.participantJoined('alice', 'Alice');
+    s.pending.add('alice');
+
+    assert.equal(s.allowParticipant('alice'), true);
+    assert.equal(s.admits('alice'), true);
+    // A replayed approval finds no pending request. It cannot re-grant, and more importantly it
+    // cannot grant someone whose permission was withdrawn in between.
+    s.denyParticipant('alice');
+    assert.equal(s.allowParticipant('alice'), false);
+    assert.equal(s.admits('alice'), false);
 });
 
 test('mute silences one participant without affecting the others', () => {

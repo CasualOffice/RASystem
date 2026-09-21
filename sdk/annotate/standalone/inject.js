@@ -98,6 +98,11 @@ function amSharing(room) {
 }
 
 export async function start(options = {}) {
+    // One session per page, ever. The re-arm loop below plus a page that fires its load hooks twice
+    // could otherwise leave two toolbars, two transports and two SharerControllers alive at once —
+    // with the older one holding stale permission state that the visible UI knows nothing about.
+    if (window.CasualAnnotateSession) return window.CasualAnnotateSession;
+
     const room = await waitForConference();
     const selfId = room.myUserId();
     const transport = new ConferenceTransport(room, EVENTS, { sid: options.sid });
@@ -177,6 +182,8 @@ export async function start(options = {}) {
 
     function becomeSharer() {
         if (sharer) return sharer;
+        // Registered once and only once: `transport.onOp` below must not accumulate handlers, or a
+        // single incoming op would be applied several times.
         sharer = new SharerController({
             emit: ({ to, op }) => (to ? transport.send(to, op) : transport.broadcast(op)),
             onRequest: async (req) => {
@@ -236,7 +243,7 @@ export async function start(options = {}) {
     attach(currentSharer());
     syncSharerState();
 
-    window.CasualAnnotateSession = {
+    const api = {
         transport, toolbar,
         get annotator() { return annotator; },
         get surface() { return surface; },
@@ -246,21 +253,32 @@ export async function start(options = {}) {
         stop() {
             clearInterval(timer);
             detach();
+            sharer?.revoke();
+            sharer = null;
             toolbar.destroy();
             transport.dispose();
+            // Release the singleton so a later conference starts clean, with no inherited consent.
+            if (window.CasualAnnotateSession === api) window.CasualAnnotateSession = undefined;
         },
     };
 
-    return window.CasualAnnotateSession;
+    window.CasualAnnotateSession = api;
+    return api;
 }
 
 // Auto-start when the page loads it. Re-arms if the user leaves and rejoins, so a second meeting
 // in the same tab still gets the UI.
+//
+// `stop()` clears the singleton, so the next conference builds a fresh session rather than
+// inheriting permission state from the last one. A participant who was allowed to draw on the
+// previous meeting must ask again for this one.
 async function run() {
+    if (window.__casualAnnotateRunning) return;
+    window.__casualAnnotateRunning = true;
+
     for (;;) {
         try {
             const session = await start();
-            // Wait until this conference ends, then arm again for the next one.
             while (window.APP?.conference?._room?.myUserId?.()) {
                 await new Promise(r => setTimeout(r, 2000));
             }

@@ -29,11 +29,35 @@ That last row is what makes mobile tractable: **seeing annotations requires no c
 every participant — including a years-old mobile build — sees them correctly and always will. Only
 *drawing* needs the SDK.
 
+## Where the code runs — and why
+
+The SDK runs **inside the jitsi-meet page**, served by jitsi-meet itself. That is forced, not chosen:
+the iframe External API's `endpointTextMessageReceived` event has **no callers in jitsi-meet's web
+app** (`API.js:1700` is defined and never invoked; only mobile implements the equivalent). Anything
+outside the page can send into a conference and never hear back — which makes an out-of-iframe
+transport one-way and the ask-and-approve flow impossible.
+
+```
+       jitsi-meet page (served)                   Electron main
+  ┌────────────────────────────────┐       ┌──────────────────────┐
+  │ casual-annotate.js             │       │                      │
+  │  ├─ transport ─────────────────┼─ JVB  │                      │
+  │  ├─ sharer + consent prompt    │       │                      │
+  │  └─ toolbar + draw surface     │ ops─► │ overlay window       │
+  └────────────────────────────────┘       └──────────────────────┘
+```
+
+Only the overlay — an OS-level always-on-top window a browser cannot have — lives in Electron.
+One transport, the same code in both places, so the halves cannot drift apart.
+
+See [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Layout
 
 | Path | Runs where | Depends on |
 |---|---|---|
 | `core/` | anywhere | nothing — pure, no DOM, no I/O |
+| `standalone/` | the jitsi-meet page | DOM — **the main entry point for any deployment** |
 | `surface/` | browser · Electron · mobile webview | DOM |
 | `overlay/` | Electron main + a transparent window | Electron |
 | `transport/jitsi.js` | wherever the conference lives | lib-jitsi-meet **or** the iframe External API |
@@ -66,6 +90,10 @@ npm run check          # all three
    error.
 6. **The overlay is always transparent and click-through.** Making it interactive is what caused the
    macOS white screen that ADR-100 was written to fix.
+7. **A grant is impossible without a request.** `allowParticipant` refuses when nothing is pending;
+   `preAuthorize` is the only way to admit someone who never asked, and is named to be hard to reach
+   by accident. This closes a real defect in which permission was granted with no prompt shown —
+   worse than no consent feature, because the UI claimed a gate that was not there.
 
 ## Quick start — annotator
 

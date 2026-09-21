@@ -125,6 +125,10 @@ export class AnnotatorController {
         }
         if (d.op.op === OP.DENY || d.op.op === OP.REVOKE) {
             this.permission = d.op.op === OP.DENY ? 'denied' : 'revoked';
+            // Put the pen down. Re-rendering the toolbar hides the tools, but the canvas would keep
+            // accepting pointer events and emitting ops that the sharer now refuses — the user
+            // would appear to be drawing into a void.
+            this.surface.setTool?.(null);
             this._emit();
             return;
         }
