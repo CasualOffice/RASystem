@@ -6,7 +6,9 @@
 
 import { contextBridge, ipcRenderer } from 'electron';
 
-import { CH } from './main.js';
+// `./channels.js` and not `./main.js`: the preload runs in a sandboxed renderer and must never
+// bundle ipcMain / BrowserWindow / screen.
+import { CH } from './channels.js';
 
 const on = (channel, fn) => {
     const cb = (_e, payload) => fn(payload);

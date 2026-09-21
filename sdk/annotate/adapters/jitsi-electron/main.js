@@ -21,17 +21,9 @@
 import { ipcMain } from 'electron';
 
 import { AnnotationOverlayWindow } from '../../overlay/window.js';
+import { CH } from './channels.js';
 
-/** IPC channels, namespaced so they cannot collide with the host app's own. */
-export const CH = Object.freeze({
-    START: 'casual-annotate:start',     // renderer → main   (invoke) show the overlay
-    STOP: 'casual-annotate:stop',       // renderer → main   (invoke)
-    OP: 'casual-annotate:op',           // renderer → main → overlay: one received op
-    CONTROL: 'casual-annotate:control', // renderer → main → overlay: admit/mute/clear
-    EMIT: 'casual-annotate:emit',       // overlay  → main → renderer: an op to put on the wire
-    STATE: 'casual-annotate:state',     // overlay  → main → renderer: counts, roster, legacy peers
-    READY: 'casual-annotate:ready',     // overlay  → main
-});
+export { CH };
 
 class AnnotateMain {
     constructor(hostWindow, opts = {}) {

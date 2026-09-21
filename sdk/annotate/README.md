@@ -45,7 +45,9 @@ No build step, no runtime dependencies, no TypeScript toolchain — plain ES mod
 is what this repo's `node --check` gate expects.
 
 ```bash
-npm test          # or: node --test 'test/*.test.js'
+npm test              # 102 unit tests
+npm run verify-bundles # Electron bundle boundaries (skips if esbuild is absent)
+npm run check         # both
 ```
 
 ## The invariants worth knowing before you change anything
@@ -97,7 +99,7 @@ transport.onOp((sender, msg) => {
 | `sharer.js` · `annotator.js` controllers | **Implemented and unit-tested end to end** over a two-endpoint fake bridge |
 | `transport/jitsi.js` | **Implemented, tested against a fake conference.** Never run against a live JVB |
 | `latency/` estimator + verdict | **Implemented and unit-tested** |
-| `adapters/jitsi-electron/` | **Written, never executed** — needs Electron + a jitsi-meet-electron build |
+| `adapters/jitsi-electron/` | **Written and verified to bundle** — all five Electron entry points build clean and their boundaries hold. Never *run* in Electron |
 | `latency/` pixel beacon (draw/read) | **Written, never executed** — needs a DOM and a real encoder |
 | `surface/` | **Written, never executed** — needs a DOM |
 | `overlay/` | **Written, never executed** — needs Electron, and its display resolution is per-platform (§8.1) |
@@ -105,6 +107,23 @@ transport.onOp((sender, msg) => {
 **102 unit tests green** (`npm test`), covering the op codec, the store's author-scoping, palette
 assignment, letterbox-aware geometry, the session's security posture, backward compatibility, the
 transport's repair/throttle behaviour, and an end-to-end annotator→sharer round trip with acks.
+
+**Bundle boundaries verified** (`npm run verify-bundles`): each Electron entry point is bundled the
+way the host app's esbuild config would, and asserted on what ended up inside. This caught a real
+bug — the preload imported its channel names from `main.js` and so dragged `ipcMain`,
+`BrowserWindow` and `screen` into a sandboxed preload, which fails only at runtime in Electron.
+
+## Installing into `jitsi-meet-electron`
+
+```bash
+node adapters/jitsi-electron/install.mjs /path/to/jitsi-meet-electron
+cd /path/to/jitsi-meet-electron && npm install && npm start
+```
+
+Seven idempotent, sentinel-marked edits plus a symlink and the overlay HTML. `--dry` previews,
+`--revert` restores the checkout to pristine (verified as an exact round trip). Nothing is forked:
+when upstream moves, the script names the anchor that no longer matches instead of silently
+producing a broken build.
 
 Nothing here has been run inside a real Jitsi meeting yet. The next step is **A2** — one annotator
 to one Electron sharer — because it is the phase that can invalidate the design, followed

@@ -11,10 +11,22 @@
     "./overlay": "./overlay/overlay.js",
     "./transport/jitsi": "./transport/jitsi.js"
   },
-  "files": ["core", "surface", "overlay", "transport", "latency", "index.js", "README.md"],
+  "files": [
+    "core",
+    "surface",
+    "overlay",
+    "transport",
+    "latency",
+    "index.js",
+    "README.md"
+  ],
   "scripts": {
-    "test": "node --test 'test/*.test.js'"
+    "test": "node --test 'test/*.test.js'",
+    "verify-bundles": "node test/verify-bundles.mjs",
+    "check": "npm test && npm run verify-bundles"
   },
   "dependencies": {},
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }
