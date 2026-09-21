@@ -134,6 +134,12 @@ trap: raw `scaleFactor` 2, normalised to 1.
 Verified end to end against a real checkout: `tsc --noEmit` clean, all five esbuild targets build,
 and the app launches with the integration compiled in.
 
+**Proven against a real server.** Two participants on a local `docker-jitsi-meet`, ops crossing
+JVB's endpoint-message relay: a 25-point stroke arrived complete, the ack and roster came back,
+capabilities negotiated, and the cursor carried the right display name. The security model held
+against real hostile ops — an `erase` of another author's stroke was refused and a `clear: "all"`
+from a non-moderator was downgraded to their own work. Runbook: [`test/live/`](test/live/README.md).
+
 ## Installing into `jitsi-meet-electron`
 
 ```bash
