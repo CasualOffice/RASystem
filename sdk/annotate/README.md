@@ -38,6 +38,8 @@ every participant — including a years-old mobile build — sees them correctly
 | `overlay/` | Electron main + a transparent window | Electron |
 | `transport/jitsi.js` | wherever the conference lives | lib-jitsi-meet **or** the iframe External API |
 | `latency/` | both ends | DOM (measurement harness) |
+| `sharer.js` · `annotator.js` | anywhere | nothing — controllers, transport- and DOM-agnostic |
+| `adapters/jitsi-electron/` | Electron | `jitsi-meet-electron` ([wiring guide](adapters/jitsi-electron/README.md)) |
 
 No build step, no runtime dependencies, no TypeScript toolchain — plain ES modules with JSDoc, which
 is what this repo's `node --check` gate expects.
@@ -91,12 +93,18 @@ transport.onOp((sender, msg) => {
 
 | Module | State |
 |---|---|
-| `core/` (ops, store, palette, geometry, session, compat) | **Implemented and unit-tested.** 86 tests green, run in CI-able plain Node |
+| `core/` (ops, store, palette, geometry, session, compat) | **Implemented and unit-tested** |
+| `sharer.js` · `annotator.js` controllers | **Implemented and unit-tested end to end** over a two-endpoint fake bridge |
 | `transport/jitsi.js` | **Implemented, tested against a fake conference.** Never run against a live JVB |
 | `latency/` estimator + verdict | **Implemented and unit-tested** |
+| `adapters/jitsi-electron/` | **Written, never executed** — needs Electron + a jitsi-meet-electron build |
 | `latency/` pixel beacon (draw/read) | **Written, never executed** — needs a DOM and a real encoder |
 | `surface/` | **Written, never executed** — needs a DOM |
 | `overlay/` | **Written, never executed** — needs Electron, and its display resolution is per-platform (§8.1) |
+
+**102 unit tests green** (`npm test`), covering the op codec, the store's author-scoping, palette
+assignment, letterbox-aware geometry, the session's security posture, backward compatibility, the
+transport's repair/throttle behaviour, and an end-to-end annotator→sharer round trip with acks.
 
 Nothing here has been run inside a real Jitsi meeting yet. The next step is **A2** — one annotator
 to one Electron sharer — because it is the phase that can invalidate the design, followed

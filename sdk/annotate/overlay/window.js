@@ -145,6 +145,11 @@ export class AnnotationOverlayWindow {
         return win;
     }
 
+    /** The overlay page's `webContents`, for the main-process relay. Null before `show`. */
+    get webContents() {
+        return this._win?.webContents ?? null;
+    }
+
     /** Displays got rearranged mid-share — re-resolve rather than keep stale bounds. */
     _reposition() {
         if (!this._win || !this._sourceId) return;
