@@ -21,6 +21,21 @@
 
 import { envelope, isAnnotateMessage } from '../core/ops.js';
 
+/**
+ * The envelope the iframe External API uses (`modules/API/constants.js:24`).
+ *
+ * This matters more than it looks. `sendEndpointTextMessage` wraps its payload as
+ * `{ name: 'endpoint-text-message', text }` and the API only surfaces INCOMING messages carrying
+ * that exact name (`API.js:602`). So a `ConferenceTransport` that puts `{ name: 'casual-annotate' }`
+ * straight on the bridge is invisible to an `ExternalApiTransport` peer: the bytes arrive and the
+ * External API silently drops them for having the wrong name.
+ *
+ * Both transports therefore speak this envelope, so a browser participant and the Electron app can
+ * actually talk to each other. The cost is our JSON nested inside a string field; the alternative is
+ * two halves of the same SDK that cannot interoperate.
+ */
+const TEXT_MESSAGE_NAME = 'endpoint-text-message';
+
 /** Lazily-ish generated session id. Distinguishes two shares in one room. */
 function newSessionId() {
     return `cas-${Math.random().toString(36).slice(2, 10)}`;
@@ -97,14 +112,30 @@ export class ConferenceTransport extends BaseJitsiTransport {
         // attribution guarantee §7.2 depends on. We take the id from there, never from the payload.
         this._onMessage = (participant, payload) => {
             const sender = participant?.getId?.() ?? participant?._id;
+
+            // Accept both shapes: the External API envelope (what we and the iframe API send) and a
+            // bare payload, so a deployment where both ends use this transport still works.
+            if (payload?.name === TEXT_MESSAGE_NAME) {
+                let inner;
+                try {
+                    inner = JSON.parse(payload.text);
+                } catch {
+                    return; // somebody else's endpoint text message
+                }
+                return this._deliver(sender, inner);
+            }
             this._deliver(sender, payload);
         };
         this._conf.on(this._evt, this._onMessage);
     }
 
     _rawSend(to, payload) {
-        // Object payload — the bridge channel stringifies it itself (`BridgeChannel.ts:499`).
-        this._conf.sendMessage(payload, to, /* sendThroughVideobridge */ true);
+        // Wrapped in the External API's envelope so an iframe-API peer can see it at all.
+        this._conf.sendMessage(
+            { name: TEXT_MESSAGE_NAME, text: JSON.stringify(payload) },
+            to,
+            /* sendThroughVideobridge */ true,
+        );
     }
 
     /** Endpoint ids currently in the room, for the roster. */

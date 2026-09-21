@@ -51,7 +51,29 @@ export function setupAnnotateRender(api, opts = {}) {
     // here, so this is the only place that knows which display to put the overlay on.
     bridge.onSource(({ sourceId }) => {
         liveSourceId = sourceId;
+        debug('source', sourceId);
     });
+
+    /**
+     * A visible trace of why annotation is or is not running.
+     *
+     * Every failure in this path is silent by nature — a missing source id, a refused overlay, a
+     * share event that never arrived — and all of them look identical from the outside: no button,
+     * no dialog, nothing. This makes the difference inspectable instead of guessable.
+     */
+    const trace = [];
+    function debug(event, detail) {
+        trace.push({ t: Date.now(), event, detail });
+        if (trace.length > 50) trace.shift();
+        window.__casualAnnotate = {
+            get sharing() { return sharing; },
+            get liveSourceId() { return liveSourceId; },
+            get attachedTo() { return attachedTo; },
+            get selfId() { return selfId; },
+            trace,
+        };
+    }
+    debug('init');
 
     // ── wire → overlay ──────────────────────────────────────────────────────────────────────────
     // The sender id comes from the relay's `senderInfo`, never from the payload — that is the whole
@@ -71,6 +93,7 @@ export function setupAnnotateRender(api, opts = {}) {
     let lastPending = new Set();
     const unsubStateReal = bridge.onState((s) => {
         opts.onSharerState?.(s);
+        if (s?.pending?.length) debug('pending', s.pending);
 
         // A newly-pending request → native prompt. Tracked so a state update for any other reason
         // does not re-prompt for someone already being asked about.
@@ -98,7 +121,9 @@ export function setupAnnotateRender(api, opts = {}) {
         // Ask the overlay FIRST. If it refuses — a window share, or Linux multi-monitor — annotation
         // stays off and the caller gets a reason. Enabling first and discovering the overlay is
         // invisible would mean people drawing into nothing while the UI says it works.
+        debug('startSharing', sourceId);
         const r = await bridge.start(sourceId);
+        debug('overlay', r);
         if (!r?.ok) {
             const reason = r?.reason ?? 'display-not-resolved';
             opts.onRefused?.(REFUSAL[reason] ?? 'Annotation is not available for this share.', reason);
@@ -126,6 +151,7 @@ export function setupAnnotateRender(api, opts = {}) {
     // `e.details.sourceId` and so ALWAYS fell into the no-source branch, which meant the overlay
     // never appeared and the feature silently did nothing. The id comes from main instead.
     api.on('screenSharingStatusChanged', (e) => {
+        debug('screenSharingStatusChanged', { on: e?.on, haveSource: !!liveSourceId });
         if (e?.on) {
             if (liveSourceId) startSharing(liveSourceId);
             else opts.onRefused?.(
@@ -139,8 +165,47 @@ export function setupAnnotateRender(api, opts = {}) {
     let annotator = null;
     let surface = null;
     let toolbar = null;
+    let attachedTo = null;
+    let selfId = null;
 
-    return {
+    api.on('videoConferenceJoined', (e) => {
+        selfId = e?.id ?? selfId;
+    });
+
+    /**
+     * Show or hide the annotator UI as remote shares come and go.
+     *
+     * `contentSharingParticipantsChanged` carries the ids of everyone currently sharing content
+     * (`subscriber.web.ts:36`). We attach to the first that is not us — annotating your own screen
+     * from your own meeting window is meaningless, since you can just draw on your desktop.
+     *
+     * This is what makes the option APPEAR on its own. Without it the SDK works but nothing in the
+     * UI ever offers it, which is indistinguishable from the feature not existing.
+     */
+    function syncRemoteShare(ids) {
+        const remote = (ids ?? []).filter(id => id && id !== selfId);
+        const target = remote[0] ?? null;
+
+        if (target === attachedTo) return;
+
+        if (!target) {
+            attachedTo = null;
+            publicApi.stopAnnotating();
+            return;
+        }
+        attachedTo = target;
+        publicApi.annotate({ sharerId: target, selfId: selfId ?? '' });
+    }
+
+    api.on('contentSharingParticipantsChanged', (e) => {
+        debug('contentSharingParticipantsChanged', e);
+        // The payload has been both a bare array and `{ data }` across versions — accept either
+        // rather than silently doing nothing on the shape we did not expect.
+        const ids = Array.isArray(e) ? e : (e?.data ?? e?.participantIds ?? []);
+        syncRemoteShare(ids);
+    });
+
+    const publicApi = {
         transport,
         startSharing,
         stopSharing,
@@ -209,6 +274,7 @@ export function setupAnnotateRender(api, opts = {}) {
 
         dispose() {
             this.stopAnnotating();
+            attachedTo = null;
             unsubOps?.();
             unsubEmit?.();
             unsubStateReal?.();
@@ -218,4 +284,6 @@ export function setupAnnotateRender(api, opts = {}) {
             transport.dispose();
         },
     };
+
+    return publicApi;
 }

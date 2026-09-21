@@ -19,11 +19,20 @@ function fakeConference(participants = []) {
         sent: [],
         on(evt, fn) { handlers.set(evt, fn); },
         off(evt) { handlers.delete(evt); },
-        sendMessage(payload, to, viaBridge) { this.sent.push({ payload, to, viaBridge }); },
+        sendMessage(payload, to, viaBridge) {
+            // Unwrap the External API envelope so assertions read the op, not the transport frame.
+            const inner = payload?.name === 'endpoint-text-message' ? JSON.parse(payload.text) : payload;
+            this.sent.push({ payload: inner, envelope: payload, to, viaBridge });
+        },
         getParticipants() { return participants; },
         /** Simulate JVB delivering a message from `id`. */
         deliver(id, payload) {
             handlers.get(EVENTS.ENDPOINT_MESSAGE_RECEIVED)?.({ getId: () => id }, payload);
+        },
+        /** Deliver the way the iframe External API would — wrapped. */
+        deliverWrapped(id, payload) {
+            handlers.get(EVENTS.ENDPOINT_MESSAGE_RECEIVED)?.({ getId: () => id },
+                { name: 'endpoint-text-message', text: JSON.stringify(payload) });
         },
     };
 }
@@ -176,4 +185,44 @@ test('CursorSender throttles and coalesces', () => {
     assert.equal(conf.sent.length, 2, 'past the gap, the latest position is sent');
     assert.equal(conf.sent[1].payload.x, 4, 'coalesced to the newest position, not a backlog');
     c.dispose();
+});
+
+// ── interoperability with the iframe External API ───────────────────────────────────────────────
+
+test('outgoing messages use the External API envelope, or an iframe peer never sees them', () => {
+    const conf = fakeConference();
+    const t = new ConferenceTransport(conf, EVENTS);
+    t.send('sharer', { op: 'undo' });
+
+    // The regression this guards: `sendEndpointTextMessage` wraps as
+    // { name: 'endpoint-text-message', text } and the External API surfaces ONLY that name
+    // (API.js:602). A bare { name: 'casual-annotate' } on the bridge arrives and is silently
+    // dropped — a browser annotator and the Electron app could not talk at all.
+    assert.equal(conf.sent[0].envelope.name, 'endpoint-text-message');
+    assert.equal(typeof conf.sent[0].envelope.text, 'string');
+    assert.equal(JSON.parse(conf.sent[0].envelope.text).name, 'casual-annotate');
+});
+
+test('incoming messages are accepted in BOTH the wrapped and bare shapes', () => {
+    const conf = fakeConference();
+    const t = new ConferenceTransport(conf, EVENTS);
+    const seen = [];
+    t.onOp((sender, msg) => seen.push({ sender, op: msg.op }));
+
+    const payload = { name: 'casual-annotate', v: 1, sid: 's', op: 'undo' };
+    conf.deliverWrapped('alice', payload);   // from an iframe-API peer
+    conf.deliver('bob', payload);            // from another ConferenceTransport
+
+    assert.deepEqual(seen, [ { sender: 'alice', op: 'undo' }, { sender: 'bob', op: 'undo' } ]);
+});
+
+test('a foreign endpoint-text-message is ignored rather than throwing', () => {
+    const conf = fakeConference();
+    const t = new ConferenceTransport(conf, EVENTS);
+    let count = 0;
+    t.onOp(() => count++);
+
+    conf.deliver('bob', { name: 'endpoint-text-message', text: 'not json at all' });
+    conf.deliver('bob', { name: 'endpoint-text-message', text: JSON.stringify({ hello: 'chat' }) });
+    assert.equal(count, 0);
 });
