@@ -18,6 +18,7 @@
 import { ExternalApiTransport } from '../../transport/jitsi.js';
 import { AnnotatorController } from '../../annotator.js';
 import { AnnotationSurface } from '../../surface/surface.js';
+import { AnnotatorToolbar } from '../../surface/toolbar.js';
 import { ADMIT } from '../../core/session.js';
 import { isAnnotateMessage } from '../../core/ops.js';
 
@@ -43,6 +44,14 @@ export function setupAnnotateRender(api, opts = {}) {
 
     const transport = new ExternalApiTransport(api);
     let sharing = false;
+    let liveSourceId = null;
+
+    // The iframe API never carries the desktop source id — `screensharingDetails` has only
+    // `sourceType` (`actions.web.ts:144`). Main observes the real id from the picker and pushes it
+    // here, so this is the only place that knows which display to put the overlay on.
+    bridge.onSource(({ sourceId }) => {
+        liveSourceId = sourceId;
+    });
 
     // ── wire → overlay ──────────────────────────────────────────────────────────────────────────
     // The sender id comes from the relay's `senderInfo`, never from the payload — that is the whole
@@ -52,13 +61,28 @@ export function setupAnnotateRender(api, opts = {}) {
         bridge.forwardOp(sender, msg);
     });
 
+
     // ── overlay → wire ──────────────────────────────────────────────────────────────────────────
     const unsubEmit = bridge.onEmit(({ to, op }) => {
         if (to) transport.send(to, op);
         else transport.broadcast(op);
     });
 
-    const unsubState = bridge.onState(s => opts.onSharerState?.(s));
+    let lastPending = new Set();
+    const unsubStateReal = bridge.onState((s) => {
+        opts.onSharerState?.(s);
+
+        // A newly-pending request → native prompt. Tracked so a state update for any other reason
+        // does not re-prompt for someone already being asked about.
+        for (const p of s?.pending ?? []) {
+            if (lastPending.has(p.id)) continue;
+            lastPending.add(p.id);
+            bridge.ask({ id: p.id, name: p.name }).then(({ allowed }) => {
+                bridge.control({ type: allowed ? 'approve' : 'reject', id: p.id });
+                lastPending.delete(p.id);
+            }).catch(() => lastPending.delete(p.id));
+        }
+    });
 
     /** Push the conference roster down to the overlay, which owns colour assignment. */
     const syncParticipants = () => {
@@ -70,7 +94,7 @@ export function setupAnnotateRender(api, opts = {}) {
     }
 
     /** Begin annotation for a share we are hosting. */
-    async function startSharing(sourceId, { admit = ADMIT.EVERYONE } = {}) {
+    async function startSharing(sourceId, { admit = ADMIT.ALLOWLIST } = {}) {
         // Ask the overlay FIRST. If it refuses — a window share, or Linux multi-monitor — annotation
         // stays off and the caller gets a reason. Enabling first and discovering the overlay is
         // invisible would mean people drawing into nothing while the UI says it works.
@@ -81,6 +105,9 @@ export function setupAnnotateRender(api, opts = {}) {
             return { ok: false, reason };
         }
         sharing = true;
+        // ALLOWLIST, not EVERYONE: with EVERYONE anyone in the room could draw the moment a share
+        // starts and the consent prompt would be decoration. Each participant is approved
+        // individually, by the person whose screen it is.
         bridge.control({ type: 'admit', mode: admit });
         syncParticipants();
         return { ok: true };
@@ -93,20 +120,25 @@ export function setupAnnotateRender(api, opts = {}) {
         await bridge.stop();
     }
 
-    // Screen-share lifecycle drives annotation. The source id comes from the Electron picker the
-    // Jitsi SDK already installs; without one we cannot place the overlay, so we do not pretend to.
+    // Screen-share lifecycle drives annotation.
+    //
+    // `e.details` carries only `sourceType`, never the id — an earlier version of this file read
+    // `e.details.sourceId` and so ALWAYS fell into the no-source branch, which meant the overlay
+    // never appeared and the feature silently did nothing. The id comes from main instead.
     api.on('screenSharingStatusChanged', (e) => {
         if (e?.on) {
-            const sourceId = e?.details?.sourceId;
-            if (sourceId) startSharing(sourceId);
-            else opts.onRefused?.('Annotation needs a screen-share source id.', 'no-source-id');
+            if (liveSourceId) startSharing(liveSourceId);
+            else opts.onRefused?.(
+                'Annotation could not determine which screen is being shared.', 'no-source-id');
         } else {
+            liveSourceId = null;
             stopSharing();
         }
     });
 
     let annotator = null;
     let surface = null;
+    let toolbar = null;
 
     return {
         transport,
@@ -121,39 +153,65 @@ export function setupAnnotateRender(api, opts = {}) {
         setAdmit: mode => bridge.control({ type: 'admit', mode }),
 
         /**
-         * Start annotating somebody ELSE's share.
-         * @param {{sharerId: string, selfId: string, canvas: HTMLCanvasElement, video: HTMLVideoElement}} o
+         * Put the annotator UI on screen for somebody else's share.
+         *
+         * The toolbar and canvas are OUR layer over the Jitsi iframe, not part of it: the meeting is
+         * cross-origin, so no control can be added to its real toolbar from here.
+         *
+         * @param {{sharerId: string, selfId: string, video?: HTMLVideoElement, parent?: HTMLElement}} o
          */
         annotate(o) {
             this.stopAnnotating();
+
+            toolbar = new AnnotatorToolbar({
+                parent: o.parent,
+                onRequest: () => annotator?.requestPermission(),
+                onTool: t => surface?.setTool(t),
+                onUndo: () => surface?.undo(),
+                onClear: () => surface?.clearMine(),
+            });
+
             surface = new AnnotationSurface({
-                canvas: o.canvas,
-                video: o.video,
-                onStatus: o.onStatus,
+                canvas: toolbar.canvas,
+                // Without a real <video> element we cannot map coordinates onto the sharer's pixels
+                // (§6). The surface refuses to draw and says why rather than guessing.
+                video: o.video ?? document.querySelector('video') ?? { videoWidth: 0, videoHeight: 0 },
+                onStatus: msg => toolbar.setNote(msg),
                 send: op => transport.send(o.sharerId, op),
             });
+            surface.setTool(null);
+
             annotator = new AnnotatorController({
                 transport,
                 sharerId: o.sharerId,
                 selfId: o.selfId,
                 surface,
-                onState: o.onState,
+                onState: (st) => {
+                    toolbar.render({
+                        permission: st.permission,
+                        color: st.color,
+                        canErase: st.caps?.includes('erase') ?? true,
+                    });
+                    o.onState?.(st);
+                },
             });
-            return { annotator, surface };
+            return { annotator, surface, toolbar };
         },
 
         stopAnnotating() {
             annotator?.dispose();
             surface?.dispose();
+            toolbar?.destroy();
             annotator = null;
             surface = null;
+            toolbar = null;
         },
 
         dispose() {
             this.stopAnnotating();
             unsubOps?.();
             unsubEmit?.();
-            unsubState?.();
+            unsubStateReal?.();
             for (const evt of [ 'participantJoined', 'participantLeft', 'displayNameChange' ]) {
                 api.removeListener?.(evt, syncParticipants);
             }

@@ -72,6 +72,11 @@ export class SharerSession {
         this._limiter = new RateLimiter();
         /** @type {Map<string, {x: number, y: number, t: number}>} author → live cursor. */
         this.cursors = new Map();
+        /**
+         * @type {Set<string>} authors whose permission request is awaiting a human answer.
+         * A pending request grants NOTHING — it only means a prompt is open (Inv 1).
+         */
+        this.pending = new Set();
         /** @type {Map<string, string>} author → display name, from the conference roster. */
         this._names = new Map();
         /**
@@ -94,8 +99,22 @@ export class SharerSession {
         return this._admit;
     }
 
+    /**
+     * Grant one participant permission to draw.
+     *
+     * Only ever called from a real human decision in the host app. There is deliberately no code
+     * path from a `request` op to this method: a request opens a prompt, and nothing else.
+     */
     allowParticipant(author) {
         this._allow.add(author);
+        this.pending.delete(author);
+    }
+
+    /** Refuse a pending request, or withdraw a permission already given. */
+    denyParticipant(author) {
+        this._allow.delete(author);
+        this.pending.delete(author);
+        this.cursors.delete(author);
     }
 
     /** Silence one participant without ending the session for everyone. */
@@ -135,6 +154,8 @@ export class SharerSession {
         this.cursors.delete(author);
         this._muted.delete(author);
         this._peers.delete(author);
+        this._allow.delete(author);
+        this.pending.delete(author);
         this._limiter.forget(author);
     }
 
@@ -202,18 +223,32 @@ export class SharerSession {
      */
     handle(sender, raw, now = Date.now()) {
         if (!isAnnotateMessage(raw)) return no('not-ours');
-        if (!this.admits(sender)) return no('not-admitted');
         if (!this._limiter.allow(sender, now)) return no('rate-limited');
 
+        // Admission is checked AFTER decode, not before, for one reason: a permission REQUEST
+        // necessarily arrives from someone not yet admitted. Gating every message on admission
+        // first would silently drop the very op whose purpose is to ask for admission.
         const d = decode(raw);
         if (!d.ok) return { accepted: false, reason: d.reason, kind: d.kind };
         const op = d.op;
+
+        // Everything except `hello` and `request` requires admission.
+        if (op.op !== OP.HELLO && op.op !== OP.REQUEST && !this.admits(sender)) return no('not-admitted');
 
         // A capability announcement changes nothing about the canvas — it records what this client
         // can do so we never send it something it would drop on the floor.
         if (op.op === OP.HELLO) {
             this._peers.set(sender, new PeerProfile({ v: op.hv, caps: op.caps }));
             return { accepted: true, changed: false, reason: 'hello' };
+        }
+
+        // A permission request is NOT a grant. It records that someone is asking and hands the
+        // decision up to the host app, which must put it in front of the person whose screen this
+        // is. Nothing here can widen what the requester may do (Inv 1).
+        if (op.op === OP.REQUEST) {
+            if (this.admits(sender)) return { accepted: true, changed: false, reason: 'already-allowed' };
+            this.pending.add(sender);
+            return { accepted: true, changed: false, reason: 'request', requestFrom: sender };
         }
 
         // Cursors are transient presentation state, not stored markup.

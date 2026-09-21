@@ -24,6 +24,7 @@ const ADAPTER = path.join(ROOT, 'adapters', 'jitsi-electron');
 
 /** esbuild is a dev convenience, not a dependency — skip rather than fail when it is absent. */
 function findEsbuild() {
+    if (process.env.ESBUILD_PATH && fs.existsSync(process.env.ESBUILD_PATH)) return process.env.ESBUILD_PATH;
     for (const p of [
         path.join(ROOT, 'node_modules', '.bin', 'esbuild'),
         path.join(ROOT, '..', '..', 'node_modules', '.bin', 'esbuild'),

@@ -56,6 +56,8 @@ export const CAPS = Object.freeze({
     ACK: 'ack',
     /** Sharer broadcasts the colour/name roster. */
     ROSTER: 'roster',
+    /** Ask-and-approve: request / grant / deny / revoke (ADR-107 §9). */
+    CONSENT: 'consent',
 });
 
 /**
@@ -68,7 +70,7 @@ export const BASELINE_CAPS = Object.freeze([ CAPS.STROKES ]);
 
 /** Everything this build implements. */
 export const LOCAL_CAPS = Object.freeze([
-    CAPS.STROKES, CAPS.CURSORS, CAPS.ERASE, CAPS.ACK, CAPS.ROSTER,
+    CAPS.STROKES, CAPS.CURSORS, CAPS.ERASE, CAPS.ACK, CAPS.ROSTER, CAPS.CONSENT,
 ]);
 
 /**

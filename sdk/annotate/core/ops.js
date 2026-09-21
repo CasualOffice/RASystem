@@ -77,13 +77,22 @@ export const OP = Object.freeze({
     ROSTER: 'roster',
     /** Optional capability announcement. Absent ⇒ the peer is old; assume the baseline, never fail. */
     HELLO: 'hello',
+    /** Annotator → sharer: "may I draw on your screen?" (ADR-107 §9). */
+    REQUEST: 'request',
+    /** Sharer → annotator: the answer. Always sent, so a denial is never silence. */
+    GRANT: 'grant',
+    DENY: 'deny',
+    /** Sharer → annotator: permission withdrawn mid-session. */
+    REVOKE: 'revoke',
 });
 
 /** Ops an ANNOTATOR may send to the sharer. Anything else from an annotator is rejected. */
-const ANNOTATOR_OPS = new Set([ OP.BEGIN, OP.APPEND, OP.END, OP.UNDO, OP.ERASE, OP.CLEAR, OP.CURSOR, OP.HELLO ]);
+const ANNOTATOR_OPS = new Set([
+    OP.BEGIN, OP.APPEND, OP.END, OP.UNDO, OP.ERASE, OP.CLEAR, OP.CURSOR, OP.HELLO, OP.REQUEST,
+]);
 
 /** Ops the SHARER may send back. Broadcast, small, infrequent. */
-const SHARER_OPS = new Set([ OP.ACK, OP.ROSTER, OP.HELLO ]);
+const SHARER_OPS = new Set([ OP.ACK, OP.ROSTER, OP.HELLO, OP.GRANT, OP.DENY, OP.REVOKE ]);
 
 /** `clear` scopes. `all` is honoured only from the sharer or a moderator (enforced by the caller). */
 export const CLEAR_SCOPE = Object.freeze({ MINE: 'mine', ALL: 'all' });
@@ -183,6 +192,37 @@ export function roster(colors, names, caps, v) {
 }
 
 /**
+ * Ask the sharer for permission to draw on their screen.
+ *
+ * Deliberately carries nothing but the op. The requester's identity and display name come from the
+ * relay and the sharer's own roster — a request that carried its own name would let anyone raise a
+ * consent prompt that says whatever they like, which is the oldest trick in the consent-dialog book.
+ */
+export function request() {
+    return { op: OP.REQUEST };
+}
+
+/** Sharer → annotator: permission granted. */
+export function grant() {
+    return { op: OP.GRANT };
+}
+
+/**
+ * Sharer → annotator: refused.
+ *
+ * Sent explicitly rather than by staying silent, so the requester's UI can say "declined" instead of
+ * spinning forever — and so a denial is distinguishable from a dropped message.
+ */
+export function deny() {
+    return { op: OP.DENY };
+}
+
+/** Sharer → annotator: permission withdrawn. */
+export function revoke() {
+    return { op: OP.REVOKE };
+}
+
+/**
  * Announce our version and capabilities. Optional in BOTH directions: a peer that never sends one
  * is treated as the baseline, never as an error. This is what lets a years-old mobile build keep
  * drawing against a current sharer (compat R2).
@@ -271,6 +311,14 @@ export function decode(msg, opts = {}) {
         }
         case OP.UNDO:
             return okOp({ op: OP.UNDO });
+        case OP.REQUEST:
+            return okOp({ op: OP.REQUEST });
+        case OP.GRANT:
+            return okOp({ op: OP.GRANT });
+        case OP.DENY:
+            return okOp({ op: OP.DENY });
+        case OP.REVOKE:
+            return okOp({ op: OP.REVOKE });
         case OP.ERASE: {
             if (!Array.isArray(msg.ids) || msg.ids.length === 0) return fail('empty-erase');
             if (msg.ids.length > LIMITS.MAX_ERASE_IDS) return fail('erase-too-long');

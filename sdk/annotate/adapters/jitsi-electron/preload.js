@@ -26,6 +26,10 @@ export function installAnnotateBridge() {
         forwardOp: (sender, msg) => ipcRenderer.send(CH.OP, { sender, msg }),
         /** admit / mute / unmute / clear / roster — see `overlay-page.js`. */
         control: payload => ipcRenderer.send(CH.CONTROL, payload),
+        /** Put a native consent prompt on screen. Resolves `{ allowed }`. */
+        ask: ({ id, name }) => ipcRenderer.invoke(CH.ASK, { id, name }),
+        /** The desktop source id of the live share, observed in main. */
+        onSource: fn => on(CH.SOURCE, fn),
         /** The overlay wants something on the wire (an ack, or the roster broadcast). */
         onEmit: fn => on(CH.EMIT, fn),
         /** Render-state summary for the meeting UI: counts, participants, legacy-peer warning. */

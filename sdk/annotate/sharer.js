@@ -11,18 +11,22 @@
 // Everything that decides WHAT goes out lives here. Everything that decides HOW it travels does not.
 
 import { SharerSession, ADMIT } from './core/session.js';
-import { ack as ackOp, roster as rosterOp } from './core/ops.js';
+import { ack as ackOp, roster as rosterOp, grant as grantOp, deny as denyOp, revoke as revokeOp } from './core/ops.js';
 
 export class SharerController {
     /**
      * @param {object} opts
      * @param {(msg: {to: string, op: object}) => void} opts.emit - `to: ''` means broadcast.
      * @param {(state: object) => void} [opts.onState]
+     * @param {(req: {id: string, name: string}) => void} [opts.onRequest] - someone is asking to
+     *   draw on this screen. The host app MUST put this in front of the person whose screen it is;
+     *   the SDK never answers on their behalf (Inv 1).
      * @param {string} [opts.admit] - starts at `ADMIT.NONE`: annotation is off until enabled (Inv 1).
      */
-    constructor({ emit, onState, admit = ADMIT.NONE } = {}) {
+    constructor({ emit, onState, onRequest, admit = ADMIT.NONE } = {}) {
         this._emit = emit;
         this._onState = onState ?? (() => {});
+        this._onRequest = onRequest ?? (() => {});
         this._moderators = new Set();
         this.session = new SharerSession({
             admit,
@@ -50,6 +54,16 @@ export class SharerController {
         // A `hello` says what that client can do; the roster says what we can do, so it can gate its
         // UI instead of offering a button whose ops we would drop (compat R4).
         if (r.accepted && r.reason === 'hello') this.broadcastRoster();
+
+        // Someone is asking for permission. Hand it up — a human decides, and until they do the
+        // requester can still do nothing.
+        if (r.requestFrom) {
+            this._onRequest({ id: r.requestFrom, name: this.session.nameOf(r.requestFrom) });
+            this.pushState();
+        }
+
+        // Already permitted and asking again (a reconnect, say): answer immediately.
+        if (r.accepted && r.reason === 'already-allowed') this._emit({ to: sender, op: grantOp() });
 
         if (r.changed) this.pushState();
         return r;
@@ -82,6 +96,28 @@ export class SharerController {
     broadcastRoster() {
         const r = this.session.rosterOp();
         this._emit({ to: '', op: rosterOp(r.colors, r.names, r.caps, r.v) });
+    }
+
+    /** The person whose screen this is said yes. */
+    approve(id) {
+        this.session.allowParticipant(id);
+        this._emit({ to: id, op: grantOp() });
+        this.pushState();
+    }
+
+    /** They said no. Answer explicitly — silence would leave the requester's UI spinning. */
+    reject(id) {
+        this.session.denyParticipant(id);
+        this._emit({ to: id, op: denyOp() });
+        this.pushState();
+    }
+
+    /** Withdraw a permission already granted, mid-session. */
+    withdraw(id) {
+        this.session.denyParticipant(id);
+        this.session.store.dropAuthor(id);
+        this._emit({ to: id, op: revokeOp() });
+        this.pushState();
     }
 
     mute(id) {
@@ -120,6 +156,7 @@ export class SharerController {
             admit: this.session.admit,
             strokes: this.session.store.size,
             cursors: this.session.cursors.size,
+            pending: [ ...this.session.pending ].map(id => ({ id, name: this.session.nameOf(id) })),
             hasLegacyPeers: this.session.hasLegacyPeers(),
             participants: Object.entries(roster.colors).map(([ id, color ]) => ({
                 id,

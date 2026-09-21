@@ -6,7 +6,7 @@
 // The surface is injected as an interface, so this controller is DOM-free and unit-testable. In the
 // browser you pass an `AnnotationSurface`; in a test you pass a recorder.
 
-import { hello as helloOp, decode, OP, TOOL } from './core/ops.js';
+import { hello as helloOp, request as requestOp, decode, OP, TOOL } from './core/ops.js';
 import { CAPS, LOCAL_CAPS, PeerProfile } from './core/compat.js';
 import { StrokeSender, CursorSender } from './transport/jitsi.js';
 import { AckTimer } from './latency/beacon.js';
@@ -46,6 +46,8 @@ export class AnnotatorController {
         this.sharerProfile = new PeerProfile();
         this.color = '#ff3b30';
         this.videoLagMs = DEFAULT_VIDEO_LAG_MS;
+        /** `null` = never asked · 'pending' · 'granted' · 'denied'. Drives the annotator's UI. */
+        this.permission = null;
 
         surface.setAuthor?.(selfId);
         this._unsub = transport.onOp((sender, msg) => this._onOp(sender, msg));
@@ -67,6 +69,23 @@ export class AnnotatorController {
     availableTools() {
         const tools = [ TOOL.PEN, TOOL.HIGHLIGHTER, TOOL.ARROW, TOOL.RECT ];
         return { tools, erase: this.supports(CAPS.ERASE), cursors: this.supports(CAPS.CURSORS) };
+    }
+
+    /**
+     * Ask the sharer for permission to draw on their screen.
+     *
+     * Returns nothing useful on purpose: the answer arrives asynchronously as `grant` or `deny`,
+     * because a human has to look at a dialog first. Watch `permission` via `onState`.
+     */
+    requestPermission() {
+        this.permission = 'pending';
+        this.transport.send(this.sharerId, requestOp());
+        this._emit();
+    }
+
+    /** True once the sharer's own user has said yes. Gate the drawing UI on this, not on hope. */
+    get canDraw() {
+        return this.permission === 'granted';
     }
 
     /** Report pointer position, if the sharer renders cursors at all. */
@@ -99,6 +118,17 @@ export class AnnotatorController {
             return;
         }
 
+        if (d.op.op === OP.GRANT) {
+            this.permission = 'granted';
+            this._emit();
+            return;
+        }
+        if (d.op.op === OP.DENY || d.op.op === OP.REVOKE) {
+            this.permission = d.op.op === OP.DENY ? 'denied' : 'revoked';
+            this._emit();
+            return;
+        }
+
         if (d.op.op === OP.ACK) {
             const rtt = this.ackTimer.acked(d.op.id);
             if (rtt !== null) this.videoLagMs = estimateVideoLag(rtt, this.ackTimer.median);
@@ -108,6 +138,8 @@ export class AnnotatorController {
 
     _emit(roster) {
         this._onState({
+            permission: this.permission,
+            canDraw: this.canDraw,
             color: this.color,
             caps: [ ...this.sharerProfile.caps ],
             sharerIsLegacy: this.sharerProfile.isLegacy,

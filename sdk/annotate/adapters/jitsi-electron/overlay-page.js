@@ -32,6 +32,9 @@ bridge.onControl((c) => {
     switch (c.type) {
         case 'admit': return controller.setAdmit(c.mode);
         case 'participants': return controller.syncParticipants(c.participants);
+        case 'approve': return controller.approve(c.id);
+        case 'reject': return controller.reject(c.id);
+        case 'withdraw': return controller.withdraw(c.id);
         case 'mute': return controller.mute(c.id);
         case 'unmute': return controller.unmute(c.id);
         case 'clear': return controller.clearAll();

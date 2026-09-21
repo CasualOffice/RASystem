@@ -58,8 +58,11 @@ const edits = [
     {
         file: 'main.ts',
         why: 'install it once the meeting window exists',
-        anchor: 'setupRemoteControlMain(meetingWindow',
-        after: true,
+        // BEFORE setupScreenSharingMain, not after: setupAnnotateMain wraps
+        // `session.setDisplayMediaRequestHandler` so it can observe which display the user picked,
+        // and the SDK installs its handler through that setter. Wrap it after and we see nothing.
+        anchor: 'setupScreenSharingMain(meetingWindow',
+        before: true,
         indent: 4,
         body: block(
             'setupAnnotateMain(meetingWindow, {\n'

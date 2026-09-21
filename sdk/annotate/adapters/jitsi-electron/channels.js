@@ -13,4 +13,6 @@ export const CH = Object.freeze({
     EMIT: 'casual-annotate:emit',       // overlay  → main → renderer: an op to put on the wire
     STATE: 'casual-annotate:state',     // overlay  → main → renderer: counts, roster, legacy peers
     READY: 'casual-annotate:ready',     // overlay  → main
+    ASK: 'casual-annotate:ask',         // renderer → main: native consent prompt
+    SOURCE: 'casual-annotate:source',   // main → renderer: the live share's desktop source id
 });

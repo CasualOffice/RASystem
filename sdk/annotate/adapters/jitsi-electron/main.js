@@ -18,7 +18,7 @@
 //     meeting renderer ──(sender, op)──► main ──► overlay window   (applies + renders)
 //     meeting renderer ◄──────(ack)──── main ◄──                   (back onto the transport)
 
-import { ipcMain } from 'electron';
+import { dialog, ipcMain } from 'electron';
 
 import { AnnotationOverlayWindow } from '../../overlay/window.js';
 import { CH } from './channels.js';
@@ -36,6 +36,9 @@ class AnnotateMain {
             sourceId2Coordinates: opts.sourceId2Coordinates,
         });
         this._ready = false;
+        this._sourceId = null;
+
+        this._watchScreenShareSource();
 
         // `handle`, not `on`: a refusal (window share, unresolvable Linux multi-monitor) has to
         // reach the UI. Swallowing it would leave remote participants drawing into nothing while
@@ -54,6 +57,58 @@ class AnnotateMain {
         ipcMain.on(CH.CONTROL, (_e, payload) => this._toOverlay(CH.CONTROL, payload));
         ipcMain.on(CH.EMIT, (_e, payload) => this._toHost(CH.EMIT, payload));
         ipcMain.on(CH.STATE, (_e, payload) => this._toHost(CH.STATE, payload));
+
+        // The consent prompt. This is the whole point of the feature's safety story, so it is a
+        // NATIVE dialog on the sharer's own desktop — not something drawn inside the meeting UI,
+        // where a hostile page could imitate it.
+        ipcMain.handle(CH.ASK, async (_e, { id, name }) => {
+            const who = String(name || id || 'A participant').slice(0, 64);
+            const { response } = await dialog.showMessageBox(this._host, {
+                type: 'question',
+                buttons: [ 'Allow', 'Deny' ],
+                defaultId: 1,          // Deny is the default — the safe answer needs no thought
+                cancelId: 1,           // dismissing the dialog denies
+                title: 'Annotation request',
+                message: `${who} wants to draw on your shared screen.`,
+                detail: 'They will be able to draw marks on the screen you are sharing. '
+                    + 'They cannot click, type, or control anything.',
+                noLink: true,
+            });
+            return { allowed: response === 0 };
+        });
+    }
+
+    /**
+     * Learn which display is being shared.
+     *
+     * The iframe API never tells us: `screensharingDetails` carries only `sourceType`
+     * (`actions.web.ts:144`), never the source id. The id exists only in the main process, inside
+     * the `setDisplayMediaRequestHandler` callback that `@jitsi/electron-sdk` installs.
+     *
+     * So we wrap that setter before the SDK calls it and observe the source the user picked. We do
+     * not change the picker or the result — the original callback is invoked with exactly what it
+     * would have received. `setupAnnotateMain` MUST therefore run before `setupScreenSharingMain`.
+     */
+    _watchScreenShareSource() {
+        const session = this._host?.webContents?.session;
+        if (!session || session.__casualAnnotateWrapped) return;
+
+        const original = session.setDisplayMediaRequestHandler.bind(session);
+        session.setDisplayMediaRequestHandler = (handler, opts) => original((request, callback) => {
+            const observe = (result) => {
+                const id = result?.video?.id ?? result?.video?.sourceId ?? null;
+                this._sourceId = id;
+                if (id) this._toHost(CH.SOURCE, { sourceId: id });
+                callback(result);
+            };
+            return handler(request, observe);
+        }, opts);
+        session.__casualAnnotateWrapped = true;
+    }
+
+    /** The source id of the live share, or null. */
+    get sourceId() {
+        return this._sourceId;
     }
 
     _toOverlay(channel, payload) {
@@ -67,7 +122,7 @@ class AnnotateMain {
     }
 
     dispose() {
-        for (const c of [ CH.START, CH.STOP ]) ipcMain.removeHandler(c);
+        for (const c of [ CH.START, CH.STOP, CH.ASK ]) ipcMain.removeHandler(c);
         for (const c of [ CH.READY, CH.OP, CH.CONTROL, CH.EMIT, CH.STATE ]) ipcMain.removeAllListeners(c);
         this._overlay.destroy();
     }
