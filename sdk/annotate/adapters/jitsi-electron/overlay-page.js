@@ -45,6 +45,12 @@ bridge.onControl((c) => {
 // shared screen. The renderer also expires on its own frame; this keeps the UI counter honest.
 setInterval(() => controller.tick(), 1000);
 
+// Diagnostic only. The overlay has no DOM worth inspecting — it is one canvas — so this is how an
+// automated check, or a developer in devtools, can ask what the session actually holds rather than
+// inferring it from pixels. Read-only, and nothing in the SDK depends on it.
+Object.defineProperty(window, '__annotateStrokeCount', { get: () => session.store.size });
+Object.defineProperty(window, '__annotateCursorCount', { get: () => session.cursors.size });
+
 window.addEventListener('beforeunload', () => renderer.dispose());
 
 bridge.ready();

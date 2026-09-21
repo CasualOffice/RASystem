@@ -45,9 +45,10 @@ No build step, no runtime dependencies, no TypeScript toolchain — plain ES mod
 is what this repo's `node --check` gate expects.
 
 ```bash
-npm test              # 102 unit tests
-npm run verify-bundles # Electron bundle boundaries (skips if esbuild is absent)
-npm run check         # both
+npm test               # 102 unit tests
+npm run verify-bundles # Electron bundle boundaries (skips without esbuild)
+npm run smoke          # renders the overlay in real Electron (skips without electron)
+npm run check          # all three
 ```
 
 ## The invariants worth knowing before you change anything
@@ -99,10 +100,10 @@ transport.onOp((sender, msg) => {
 | `sharer.js` · `annotator.js` controllers | **Implemented and unit-tested end to end** over a two-endpoint fake bridge |
 | `transport/jitsi.js` | **Implemented, tested against a fake conference.** Never run against a live JVB |
 | `latency/` estimator + verdict | **Implemented and unit-tested** |
-| `adapters/jitsi-electron/` | **Written and verified to bundle** — all five Electron entry points build clean and their boundaries hold. Never *run* in Electron |
+| `adapters/jitsi-electron/` | **Builds and installs into a real `jitsi-meet-electron`** — type-check and full esbuild pass, app launches. The *meeting* path is untested |
 | `latency/` pixel beacon (draw/read) | **Written, never executed** — needs a DOM and a real encoder |
 | `surface/` | **Written, never executed** — needs a DOM |
-| `overlay/` | **Written, never executed** — needs Electron, and its display resolution is per-platform (§8.1) |
+| `overlay/` | **Runs in Electron.** Window, preload bridge, IPC, renderer and display resolution all verified by the smoke test |
 
 **102 unit tests green** (`npm test`), covering the op codec, the store's author-scoping, palette
 assignment, letterbox-aware geometry, the session's security posture, backward compatibility, the
@@ -112,6 +113,16 @@ transport's repair/throttle behaviour, and an end-to-end annotator→sharer roun
 way the host app's esbuild config would, and asserted on what ended up inside. This caught a real
 bug — the preload imported its channel names from `main.js` and so dragged `ipcMain`,
 `BrowserWindow` and `screen` into a sandboxed preload, which fails only at runtime in Electron.
+
+**The overlay runs in real Electron** (`npm run smoke`, 13/13): the transparent always-on-top window
+is created and sized to the resolved display, the preload bridge is exposed under contextIsolation,
+ops travel the real IPC path, annotation stays off until admitted, and `capturePage` confirms the
+canvas painted — **0.44% of pixels non-transparent**, which is both "it drew something" and "the
+ADR-100 white-screen regression is not back". On macOS it also pins the documented scale-factor
+trap: raw `scaleFactor` 2, normalised to 1.
+
+Verified end to end against a real checkout: `tsc --noEmit` clean, all five esbuild targets build,
+and the app launches with the integration compiled in.
 
 ## Installing into `jitsi-meet-electron`
 

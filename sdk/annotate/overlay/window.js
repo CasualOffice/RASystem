@@ -83,10 +83,14 @@ export class AnnotationOverlayWindow {
     /**
      * @param {object} opts
      * @param {string} opts.url - the page hosting `overlay/renderer.js`.
+     * @param {string} [opts.preload] - absolute path to the overlay preload. WITHOUT it the page
+     *   has no `window.casualAnnotateOverlay`, so it receives no ops and renders nothing — the
+     *   window appears to work and is simply always empty.
      * @param {(id: string) => ({x:number,y:number}|undefined)} [opts.sourceId2Coordinates]
      */
-    constructor({ url, sourceId2Coordinates } = {}) {
+    constructor({ url, preload, sourceId2Coordinates } = {}) {
         this._url = url;
+        this._preload = preload;
         this._s2c = sourceId2Coordinates;
         this._win = null;
         this._sourceId = null;
@@ -131,7 +135,12 @@ export class AnnotationOverlayWindow {
             skipTaskbar: true,
             focusable: false,
             show: false,
-            webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+            webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+                sandbox: true,
+                ...(this._preload ? { preload: this._preload } : {}),
+            },
         });
 
         // ADR-100, the non-negotiable part. `forward: true` keeps hover events flowing to the apps

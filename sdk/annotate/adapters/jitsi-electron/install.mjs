@@ -63,7 +63,8 @@ const edits = [
         indent: 4,
         body: block(
             'setupAnnotateMain(meetingWindow, {\n'
-            + '    overlayUrl: `file://${annotatePath.join(rootDir, \'build\', \'annotate-overlay.html\')}`\n'
+            + '    overlayUrl: `file://${annotatePath.join(rootDir, \'build\', \'annotate-overlay.html\')}`,\n'
+            + "    overlayPreload: annotatePath.join(rootDir, 'build', 'annotate-overlay-preload.js')\n"
             + '});',
         ),
     },
@@ -120,7 +121,19 @@ const edits = [
             + '        outdir: OUTDIR,\n'
             + "        platform: 'browser',\n"
             + "        format: 'iife',\n"
-            + '        target: RENDERER_TARGET\n'
+            + '        target: RENDERER_TARGET,\n'
+            + '        plugins: [ {\n'
+            + "            name: 'annotate-html',\n"
+            + '            setup(b) {\n'
+            + '                b.onEnd(() => {\n'
+            + "                    const fs2 = require('fs'), p2 = require('path');\n"
+            + "                    const src = fs2.readFileSync(p2.join(ANNOTATE, 'overlay.html'), 'utf8');\n"
+            + '                    fs2.mkdirSync(OUTDIR, { recursive: true });\n'
+            + "                    fs2.writeFileSync(p2.join(OUTDIR, 'annotate-overlay.html'),\n"
+            + "                        src.replace('./overlay-page.js', './annotate-overlay.js').replace(' type=\"module\"', ''));\n"
+            + '                });\n'
+            + '            }\n'
+            + '        } ]\n'
             + '    },\n'
             + '    annotateOverlayPreload: {\n'
             + '        ...common,\n'
@@ -133,17 +146,18 @@ const edits = [
             + '    },',
         ),
     },
+    {
+        file: 'esbuild.js',
+        why: 'build the overlay targets by default — `buildTargets` is a fixed list, so config entries alone never run',
+        anchor: "const buildTargets = targets.length ? targets : [ 'main', 'preload', 'renderer' ];",
+        after: true,
+        body: block(
+            '// Only when no explicit target was requested: `npm run watch` passes one, and silently\n'
+            + '// widening that would change what the developer asked for.\n'
+            + "if (!targets.length) buildTargets.push('annotateOverlay', 'annotateOverlayPreload');",
+        ),
+    },
 ];
-
-/** Copy the overlay HTML into the build output, pointing at the bundled script + preload. */
-function writeOverlayHtml(root) {
-    const out = path.join(root, 'build');
-    fs.mkdirSync(out, { recursive: true });
-    const src = fs.readFileSync(path.join(HERE, 'overlay.html'), 'utf8');
-    // The bundled entry is emitted as `annotate-overlay.js` beside this file.
-    const html = src.replace('./overlay-page.js', './annotate-overlay.js').replace(' type="module"', '');
-    write(path.join(out, 'annotate-overlay.html'), html);
-}
 
 function write(file, content) {
     if (dry) {
@@ -209,7 +223,6 @@ function apply(root) {
     }
 
     linkSdk(root);
-    writeOverlayHtml(root);
     return { applied, skipped, failures };
 }
 

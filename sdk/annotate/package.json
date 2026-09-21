@@ -9,7 +9,12 @@
     "./core": "./core/index.js",
     "./surface": "./surface/surface.js",
     "./overlay": "./overlay/overlay.js",
-    "./transport/jitsi": "./transport/jitsi.js"
+    "./transport/jitsi": "./transport/jitsi.js",
+    "./latency": "./latency/beacon.js",
+    "./sharer": "./sharer.js",
+    "./annotator": "./annotator.js",
+    "./adapters/jitsi-electron/*": "./adapters/jitsi-electron/*",
+    "./package.json": "./package.json"
   },
   "files": [
     "core",
@@ -17,16 +22,22 @@
     "overlay",
     "transport",
     "latency",
+    "adapters",
     "index.js",
+    "index.d.ts",
+    "sharer.js",
+    "annotator.js",
     "README.md"
   ],
   "scripts": {
     "test": "node --test 'test/*.test.js'",
     "verify-bundles": "node test/verify-bundles.mjs",
-    "check": "npm test && npm run verify-bundles"
+    "smoke": "node test/electron/run.mjs",
+    "check": "npm test && npm run verify-bundles && npm run smoke"
   },
   "dependencies": {},
   "engines": {
     "node": ">=20"
-  }
+  },
+  "types": "./index.d.ts"
 }

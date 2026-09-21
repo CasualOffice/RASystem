@@ -30,6 +30,7 @@ class AnnotateMain {
         this._host = hostWindow;
         this._overlay = new AnnotationOverlayWindow({
             url: opts.overlayUrl,
+            preload: opts.overlayPreload,
             // Windows needs the native addon to locate a display; unused on macOS/Linux. Injected
             // rather than imported so this module never hard-depends on a native build.
             sourceId2Coordinates: opts.sourceId2Coordinates,
@@ -74,7 +75,8 @@ class AnnotateMain {
 
 /**
  * @param {import('electron').BrowserWindow} jitsiMeetWindow
- * @param {{ overlayUrl: string, sourceId2Coordinates?: (id: string) => ({x:number,y:number}|undefined) }} opts
+ * @param {{ overlayUrl: string, overlayPreload?: string,
+ *           sourceId2Coordinates?: (id: string) => ({x:number,y:number}|undefined) }} opts
  */
 export default function setupAnnotateMain(jitsiMeetWindow, opts) {
     return new AnnotateMain(jitsiMeetWindow, opts);
