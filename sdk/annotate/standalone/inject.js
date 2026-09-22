@@ -18,25 +18,13 @@ import { AnnotatorController } from '../annotator.js';
 import { SharerController } from '../sharer.js';
 import { AnnotationSurface } from '../surface/surface.js';
 import { AnnotatorToolbar } from '../surface/toolbar.js';
+import { askToAllow } from '../surface/consent-toast.js';
+import { StatusBadge } from '../surface/status-badge.js';
+import { SharerPanel } from '../surface/sharer-panel.js';
 import { ADMIT } from '../core/session.js';
+import { waitForConference } from './conference.js';
 
 const EVENTS = { ENDPOINT_MESSAGE_RECEIVED: 'conference.endpoint_message_received' };
-
-/**
- * Wait for jitsi-meet to have a live conference.
- *
- * Deliberately waits FOREVER rather than timing out. The script is loaded with the page, but the
- * user may sit on the prejoin screen for minutes, or leave and rejoin. A timeout here meant the
- * script gave up before the meeting started and never armed again — the UI simply never appeared,
- * with no error a user could see.
- */
-async function waitForConference() {
-    for (;;) {
-        const room = window.APP?.conference?._room;
-        if (room?.myUserId?.()) return room;
-        await new Promise(r => setTimeout(r, 500));
-    }
-}
 
 /** The <video> showing the shared screen, so coordinates map to the sharer's pixels (§6). */
 function findShareVideo() {
@@ -49,48 +37,15 @@ function findShareVideo() {
     return vids[0] ?? null;
 }
 
-/**
- * A consent prompt the sharer cannot miss.
- *
- * Rendered in-page rather than as a native dialog for one decisive reason: the External API's
- * `endpointTextMessageReceived` event has NO callers in jitsi-meet's web app
- * (`notifyEndpointTextMessageReceived` is defined at `API.js:1700` and never invoked; only the
- * mobile middleware implements the equivalent). So a host outside the iframe can send but can never
- * RECEIVE — the request could not reach it, and an accept prompt could never appear there.
- *
- * In-page, we hold the real lib-jitsi-meet conference and do receive. So this is where consent has
- * to live.
- */
-function askToAllow({ name }) {
-    return new Promise((resolve) => {
-        const wrap = document.createElement('div');
-        wrap.style.cssText = 'position:fixed;inset:0;z-index:2147483600;display:flex;'
-            + 'align-items:center;justify-content:center;background:rgba(0,0,0,.45);'
-            + 'font:14px/1.5 system-ui,-apple-system,sans-serif';
-        const card = document.createElement('div');
-        card.style.cssText = 'background:#18181b;color:#fff;padding:22px 24px;border-radius:12px;'
-            + 'max-width:420px;box-shadow:0 20px 60px rgba(0,0,0,.6)';
-        const who = String(name || 'A participant').slice(0, 64);
-        card.innerHTML = `<div style="font-size:16px;font-weight:600;margin-bottom:8px">
-            Annotation request</div>
-          <div style="opacity:.85;margin-bottom:6px"><b></b> wants to draw on your shared screen.</div>
-          <div style="opacity:.6;font-size:13px;margin-bottom:18px">They can draw marks only —
-            they cannot click, type, or control anything.</div>
-          <div style="display:flex;gap:8px;justify-content:flex-end">
-            <button data-deny style="padding:8px 16px;border:0;border-radius:8px;
-              background:#3f3f46;color:#fff;font:inherit;cursor:pointer">Deny</button>
-            <button data-allow style="padding:8px 16px;border:0;border-radius:8px;
-              background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer">Allow</button>
-          </div>`;
-        card.querySelector('b').textContent = who;   // never innerHTML — the name is remote input
-        wrap.appendChild(card);
-        document.body.appendChild(wrap);
-
-        const done = (v) => { wrap.remove(); resolve(v); };
-        card.querySelector('[data-allow]').onclick = () => done(true);
-        card.querySelector('[data-deny]').onclick = () => done(false);
-    });
-}
+// The consent prompt (`askToAllow`, imported above from `surface/consent-toast.js`) is rendered
+// IN-PAGE rather than as a native dialog for one decisive reason: the External API's
+// `endpointTextMessageReceived` event has NO callers in jitsi-meet's web app
+// (`notifyEndpointTextMessageReceived` is defined at `API.js:1700` and never invoked; only the
+// mobile middleware implements the equivalent). So a host outside the iframe can send but can never
+// RECEIVE — the request could not reach it, and an accept prompt could never appear there. In-page,
+// we hold the real lib-jitsi-meet conference and do receive. So this is where consent has to live.
+// (The Electron desktop app is different: it keeps a NATIVE dialog, fed by a relay injected into
+// this same page from its privileged main process — ADR-107 Decision 10, `adapters/jitsi-electron/`.)
 
 /** Are WE the one sharing a screen right now? */
 function amSharing(room) {
@@ -180,6 +135,24 @@ export async function start(options = {}) {
     // actually receive them and a prompt appears for the person whose screen it is.
     let sharer = null;
 
+    // The always-visible "this is on" indicator (Inv 7) and the annotator-management panel — both
+    // live in the sharer's own local view, since a browser sharer has no overlay window at all (§13)
+    // to put a capturable badge into. Created once; shown only while we are actually the sharer.
+    const badge = new StatusBadge();
+    const panel = new SharerPanel({
+        onMute: id => sharer?.mute(id),
+        onUnmute: id => sharer?.unmute(id),
+        onRevoke: id => sharer?.withdraw(id),
+    });
+
+    function renderSharerUi(st) {
+        badge.render({
+            on: st.admit !== ADMIT.NONE,
+            count: st.participants.filter(p => p.granted && !p.muted).length,
+        });
+        panel.render(st);
+    }
+
     function becomeSharer() {
         if (sharer) return sharer;
         // Registered once and only once: `transport.onOp` below must not accumulate handlers, or a
@@ -191,7 +164,10 @@ export async function start(options = {}) {
                 allowed ? sharer.approve(req.id) : sharer.reject(req.id);
                 notifyHost({ type: 'consent', id: req.id, allowed });
             },
-            onState: st => notifyHost({ type: 'state', state: st }),
+            onState: (st) => {
+                notifyHost({ type: 'state', state: st });
+                renderSharerUi(st);
+            },
             admit: ADMIT.ALLOWLIST,
         });
         transport.onOp((s, m) => {
@@ -207,12 +183,18 @@ export async function start(options = {}) {
     }
 
     function syncSharerRoster() {
-        sharer?.syncParticipants([
-            { id: selfId, name: room.getLocalDisplayName?.() ?? 'Me', moderator: true },
-            ...room.getParticipants().map(p => ({
+        // The sharer themselves is deliberately NOT in this list. `SharerSession.participantJoined`
+        // assigns a palette colour and a roster entry to everyone in it, so including self meant the
+        // sharer showed up in their own management panel as a permanently not-granted "annotator"
+        // with a dead Mute/Unmute button — you cannot annotate-request your own screen, so there was
+        // never a grant to toggle. Self-as-moderator was never needed either: `_isModerator` is
+        // consulted only for a `clear:"all"` arriving OFF THE WIRE (`core/session.js`), and the
+        // sharer's own `clearAll()`/`revoke()` calls never go through that path.
+        sharer?.syncParticipants(
+            room.getParticipants().map(p => ({
                 id: p.getId(), name: p.getDisplayName(), moderator: false,
             })),
-        ]);
+        );
     }
 
     /** Talk to the Electron shell, if we are inside it. Harmless in a plain browser. */
@@ -231,6 +213,8 @@ export async function start(options = {}) {
         } else if (sharer) {
             sharer.revoke();
             sharer = null;
+            badge.render({ on: false });
+            panel.render({ participants: [] });
         }
     }
 
@@ -256,6 +240,8 @@ export async function start(options = {}) {
             sharer?.revoke();
             sharer = null;
             toolbar.destroy();
+            badge.destroy();
+            panel.destroy();
             transport.dispose();
             // Release the singleton so a later conference starts clean, with no inherited consent.
             if (window.CasualAnnotateSession === api) window.CasualAnnotateSession = undefined;

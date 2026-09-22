@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ConferenceTransport, StrokeSender, CursorSender } from '../transport/jitsi.js';
+import { ConferenceTransport, PostMessageTransport, StrokeSender, CursorSender } from '../transport/jitsi.js';
 import { SharerSession, ADMIT } from '../core/session.js';
 import { StrokeStore } from '../core/store.js';
 import { TOOL } from '../core/ops.js';
@@ -225,4 +225,115 @@ test('a foreign endpoint-text-message is ignored rather than throwing', () => {
     conf.deliver('bob', { name: 'endpoint-text-message', text: 'not json at all' });
     conf.deliver('bob', { name: 'endpoint-text-message', text: JSON.stringify({ hello: 'chat' }) });
     assert.equal(count, 0);
+});
+
+// ── PostMessageTransport (ADR-107 Decision 10) ──────────────────────────────────────────────────
+// Covers the host side of the injected-relay bridge: no fake DOM library, just the same
+// `addEventListener`/`postMessage` shape a real `window`/iframe `contentWindow` exposes.
+
+/** A minimal `window`-shaped event bus, so `PostMessageTransport` can be driven without a real DOM. */
+function fakeHost() {
+    const handlers = new Set();
+    return {
+        addEventListener: (evt, fn) => evt === 'message' && handlers.add(fn),
+        removeEventListener: (evt, fn) => evt === 'message' && handlers.delete(fn),
+        /** Simulate the relay's `window.parent.postMessage(...)` arriving here. */
+        // `source` mirrors what a real `MessageEvent` carries — the sender's window. Defaults to
+        // `target` (the legitimate relay) so existing tests read naturally; the source-rejection
+        // test below passes something else on purpose.
+        deliver: (data, source) => { for (const fn of handlers) fn({ data, source }); },
+        get listenerCount() { return handlers.size; },
+    };
+}
+
+function fakeIframeWindow() {
+    return { sent: [], postMessage(data) { this.sent.push(data); } };
+}
+
+test('PostMessageTransport sends the op verbatim — no second envelope', () => {
+    const target = fakeIframeWindow();
+    const t = new PostMessageTransport(target, { host: fakeHost() });
+
+    const op = { name: 'casual-annotate', v: 1, sid: 's1', seq: 3, op: 'undo' };
+    t.send('alice', op);
+    t.broadcast(op);
+
+    assert.deepEqual(target.sent, [
+        { __casualAnnotateEmit: { to: 'alice', op } },
+        { __casualAnnotateEmit: { to: '', op } },
+    ]);
+});
+
+test('PostMessageTransport requires a target endpoint for send — never broadcasts an op by accident', () => {
+    const t = new PostMessageTransport(fakeIframeWindow(), { host: fakeHost() });
+    assert.throws(() => t.send('', { op: 'undo' }), /never broadcast/);
+});
+
+test('PostMessageTransport delivers ops relayed from the injected in-page script', () => {
+    const host = fakeHost();
+    const target = fakeIframeWindow();
+    const t = new PostMessageTransport(target, { host });
+    const seen = [];
+    t.onOp((sender, msg) => seen.push({ sender, msg }));
+
+    host.deliver({ __casualAnnotateWire: { type: 'op', sender: 'bob', msg: { op: 'undo' } } }, target);
+    // Unrelated postMessage traffic on the same window must not be mistaken for ours.
+    host.deliver({ someOtherLibrary: true }, target);
+
+    assert.deepEqual(seen, [ { sender: 'bob', msg: { op: 'undo' } } ]);
+});
+
+test('PostMessageTransport rejects a message whose source is not the relay it was built for', () => {
+    // The attribution guarantee (§7.2) this class exists to carry depends entirely on this: a
+    // `window` can receive `message` events from ANY sender that can reach it, not only the one
+    // relay frame this instance was constructed for. Without checking `e.source`, anything else
+    // capable of posting into the host window could forge a sender id or a `moderator: true` roster
+    // entry — this is the regression test for that fix.
+    const host = fakeHost();
+    const legitimateRelay = fakeIframeWindow();
+    const somethingElse = fakeIframeWindow();
+    const t = new PostMessageTransport(legitimateRelay, { host });
+    const seen = [];
+    t.onOp((sender, msg) => seen.push({ sender, msg }));
+
+    host.deliver(
+        { __casualAnnotateWire: { type: 'op', sender: 'sharer', msg: { op: 'grant' } } }, somethingElse);
+    assert.deepEqual(seen, [], 'a forged op from an unexpected source must never reach a listener');
+
+    host.deliver({
+        __casualAnnotateWire: {
+            type: 'roster', participants: [ { id: 'attacker', name: 'x', moderator: true } ],
+        },
+    }, somethingElse);
+    assert.deepEqual(t.participants(), [], 'a forged roster from an unexpected source must be ignored');
+
+    // The real relay still works.
+    host.deliver(
+        { __casualAnnotateWire: { type: 'op', sender: 'bob', msg: { op: 'undo' } } }, legitimateRelay);
+    assert.deepEqual(seen, [ { sender: 'bob', msg: { op: 'undo' } } ]);
+});
+
+test('PostMessageTransport.participants() reflects the relay\'s last pushed roster snapshot', () => {
+    const host = fakeHost();
+    const target = fakeIframeWindow();
+    const t = new PostMessageTransport(target, { host });
+
+    assert.deepEqual(t.participants(), []);
+    host.deliver({
+        __casualAnnotateWire: { type: 'roster', participants: [ { id: 'a', name: 'Alice', moderator: false } ] },
+    }, target);
+    assert.deepEqual(t.participants(), [ { id: 'a', name: 'Alice', moderator: false } ]);
+
+    // A later snapshot replaces, rather than merges — stale entries (a departed participant) must
+    // not linger.
+    host.deliver({ __casualAnnotateWire: { type: 'roster', participants: [] } }, target);
+    assert.deepEqual(t.participants(), []);
+});
+
+test('PostMessageTransport.dispose() removes its listener', () => {
+    const host = fakeHost();
+    const t = new PostMessageTransport(fakeIframeWindow(), { host });
+    assert.equal(host.listenerCount, 1);
+    t.dispose();
+    assert.equal(host.listenerCount, 0);
 });

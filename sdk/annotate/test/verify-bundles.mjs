@@ -88,6 +88,17 @@ const CASES = [
         forbid: [ 'require("electron")', 'ipcMain', 'ipcRenderer' ],
         require: [ 'casualAnnotate' ],
     },
+    {
+        // ADR-107 Decision 10: this is `executeJavaScript`'d verbatim into a real, arbitrary
+        // jitsi-meet page — the same class of boundary as the overlay page, and the one that matters
+        // most here, since a leak would put Node/Electron internals directly into third-party web
+        // content rather than just a sandboxed preload.
+        name: 'injected relay',
+        entry: 'injected-relay.js',
+        args: [ '--platform=browser', '--format=iife', '--target=chrome120' ],
+        forbid: [ 'require("electron")', 'ipcMain', 'ipcRenderer', 'BrowserWindow', 'contextBridge' ],
+        require: [ '__casualAnnotateRelay' ],
+    },
 ];
 
 let failed = 0;

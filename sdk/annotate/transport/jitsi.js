@@ -154,11 +154,19 @@ export class ConferenceTransport extends BaseJitsiTransport {
 }
 
 /**
- * Transport over the iframe External API — the jitsi-meet-electron path.
+ * Transport over the iframe External API.
  *
  * `sendEndpointTextMessage` carries a STRING, so ops are JSON-stringified here and parsed on
  * receipt. A malformed or foreign string is dropped silently: this channel is shared with anything
  * else in the room that uses endpoint text messages.
+ *
+ * **Not used by the jitsi-meet-electron adapter (ADR-107 Decision 8, Decision 10) — despite the
+ * name, this is NOT "the jitsi-meet-electron path."** Its receive half (`onMessage` below) depends on
+ * `endpointTextMessageReceived`, which has zero callers in jitsi-meet's web app and never fires on
+ * web or Electron. This class can therefore SEND but can never RECEIVE, which makes it useless for
+ * anything needing a reply — the whole consent loop included. `PostMessageTransport` (below) is what
+ * the Electron adapter actually uses. This class is kept for a host that only ever sends (telemetry,
+ * say) or a future context where the iframe API's receive path genuinely works.
  */
 export class ExternalApiTransport extends BaseJitsiTransport {
     /** @param {object} api - a JitsiMeetExternalAPI instance. */
@@ -195,6 +203,112 @@ export class ExternalApiTransport extends BaseJitsiTransport {
     dispose() {
         this._api.removeListener?.('endpointTextMessageReceived', this._onMessage);
         super.dispose();
+    }
+}
+
+/**
+ * Transport over `postMessage` to an in-page relay injected into a cross-origin iframe — the
+ * jitsi-meet-electron path (ADR-107 Decision 10).
+ *
+ * `jitsi-meet-electron` loads an arbitrary operator's jitsi-meet deployment in a real cross-origin
+ * `<iframe>`. The host renderer cannot reach into that frame's DOM (browser same-origin policy), and
+ * the iframe's own External API can send into the conference but — per Decision 8 —
+ * `endpointTextMessageReceived` never fires, so `ExternalApiTransport` was structurally one-way.
+ *
+ * The fix is not this class; it is `adapters/jitsi-electron/injected-relay.js`, which the Electron
+ * MAIN process injects directly into that frame via `webContents.mainFrame`'s privileged
+ * `executeJavaScript` (bypassing the same-origin restriction the way only a host application can).
+ * That relay runs a real `ConferenceTransport` where `lib-jitsi-meet`'s own event actually fires, and
+ * bridges it to the host over `postMessage` — which crosses a cross-origin iframe boundary just fine,
+ * unlike direct DOM access. This class is purely the HOST side of that bridge.
+ *
+ * No envelope is built here. `BaseJitsiTransport.send/broadcast` would assign a `sid`/`seq` on THIS
+ * side and the relay's own `ConferenceTransport` would assign a second one on the far side — two
+ * envelopes for one op. So this class does not extend `BaseJitsiTransport`; the relay's
+ * `ConferenceTransport` is the only place an envelope is built, exactly once, right before the wire.
+ *
+ * **`e.source` is checked against the exact window this instance was built for.** A first version of
+ * this class accepted a `__casualAnnotateWire` message from *any* sender, trusting the payload shape
+ * alone — which quietly threw away the attribution guarantee the rest of this file is built around
+ * (§7.2: "the sender comes from the relay, never the payload"). `window.addEventListener('message')`
+ * fires for a message from *anything* that can reach this `window` — any other frame this Electron
+ * renderer ever hosts, not only the one relay it was constructed with — so without this check, any
+ * script capable of posting into the host window could forge `{sender: '<any admitted id>', msg:
+ * {...}}` and draw/erase/clear as that participant, or forge a `roster` entry with `moderator: true`
+ * and unlock the `clear:'all'` authority check in `core/session.js`, with no real message ever having
+ * crossed the actual conference. This one check is what makes the class's own claim true.
+ */
+export class PostMessageTransport {
+    /**
+     * @param {Window} targetWindow - the iframe's `contentWindow`, where the relay is injected. Also
+     *   the ONLY accepted source of incoming messages — see the class doc above.
+     * @param {object} [opts]
+     * @param {{addEventListener: Function, removeEventListener: Function}} [opts.host] - where
+     *   `message` events are listened for. Defaults to the real `window`; injectable so this class is
+     *   unit-testable without a DOM (`test/transport.test.js`), matching the rest of this file's
+     *   preference for taking its environment as a parameter rather than reaching for a global.
+     */
+    constructor(targetWindow, { host, targetOrigin = '*' } = {}) {
+        this._target = targetWindow;
+        // Defaults to '*' — the same "unrestricted" default `postMessage` itself has — since the
+        // caller may not always be able to name an exact origin. Pass the real one when it is known
+        // (`renderer.js` derives it from the iframe's own `src`): this is a MUCH lower-stakes gap than
+        // the incoming `e.source` check above — a wrong-recipient reading this data is not a new leak
+        // (every op here is already visible to anyone in the room via lib-jitsi-meet's own events),
+        // whereas an unchecked sender forging one in would have been.
+        this._targetOrigin = targetOrigin;
+        this._host = host ?? (typeof window !== 'undefined' ? window : undefined);
+        if (!this._host) {
+            throw new Error('casual-annotate: PostMessageTransport needs `window` or an injected `host`');
+        }
+        this._roster = [];
+        /** @type {Set<(sender: string, msg: object) => void>} */
+        this._listeners = new Set();
+        this._onMessage = (e) => {
+            // The identity check that makes attribution real — see the class doc. A test's fake
+            // `targetWindow` may not support `===` the way a real `WindowProxy` does across the
+            // `postMessage` boundary; tests pass `e.source` back as the literal object they used, so
+            // this still holds without a DOM.
+            if (e.source !== this._target) return;
+            const d = e?.data?.__casualAnnotateWire;
+            if (!d) return;
+            if (d.type === 'op') {
+                for (const fn of this._listeners) fn(d.sender, d.msg);
+            } else if (d.type === 'roster') {
+                this._roster = d.participants ?? [];
+            }
+        };
+        this._host.addEventListener('message', this._onMessage);
+    }
+
+    /** @param {(sender: string, msg: object) => void} fn */
+    onOp(fn) {
+        this._listeners.add(fn);
+        return () => this._listeners.delete(fn);
+    }
+
+    send(to, op) {
+        if (!to) throw new Error('casual-annotate: send requires a target endpoint (never broadcast ops)');
+        this._target?.postMessage({ __casualAnnotateEmit: { to, op } }, this._targetOrigin);
+    }
+
+    broadcast(op) {
+        this._target?.postMessage({ __casualAnnotateEmit: { to: '', op } }, this._targetOrigin);
+    }
+
+    /**
+     * The relay has no request/response channel back to us, so it proactively pushes a fresh roster
+     * snapshot every couple of seconds (mirroring the polling `standalone/inject.js` already uses,
+     * for the same reason: which conference events fire reliably differs across jitsi-meet versions).
+     * This returns whatever snapshot arrived most recently.
+     */
+    participants() {
+        return this._roster;
+    }
+
+    dispose() {
+        this._host.removeEventListener('message', this._onMessage);
+        this._listeners.clear();
     }
 }
 

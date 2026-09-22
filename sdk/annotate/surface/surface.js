@@ -98,6 +98,15 @@ export class AnnotationSurface {
      * desktop, which is the worst thing this feature can do (§6.2).
      */
     _rect() {
+        // `this.video` is not always a real element — `standalone/inject.js`'s `attach()` passes the
+        // documented `{ videoWidth: 0, videoHeight: 0 }` stand-in whenever `findShareVideo()` finds
+        // no `<video>` yet (nothing rendered, an empty share moment, or the fallback-tested case
+        // where sharing is real but no video element exists for it). `getComputedStyle` requires an
+        // actual `Element` and throws a `TypeError` on anything else — thrown from inside the RAF
+        // loop, that repeats every frame, forever, which is worse than the thing it was guarding
+        // against. `contentRect` already refuses cleanly on an unsized source (`source-not-sized`);
+        // this just has to reach that check alive instead of throwing before it.
+        if (!(this.video instanceof Element)) return { ok: false, reason: 'source-not-sized' };
         const el = this.canvas.getBoundingClientRect();
         const fit = getComputedStyle(this.video).objectFit || FIT.CONTAIN;
         return contentRect(

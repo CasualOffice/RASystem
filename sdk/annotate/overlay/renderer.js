@@ -14,6 +14,7 @@
 import { TOOL } from '../core/ops.js';
 import { StrokeStore } from '../core/store.js';
 import { toHex } from '../core/palette.js';
+import { ADMIT } from '../core/session.js';
 
 /** How long a cursor survives without an update before it fades out. */
 const CURSOR_TTL_MS = 3000;
@@ -57,6 +58,57 @@ export class OverlayRenderer {
         for (const [ author, c ] of this.session.cursors) {
             this._drawCursor(g, c, toHex(this.session.colorOf(author)), this.session.nameOf(author), now);
         }
+        this._drawBadge(g);
+    }
+
+    /**
+     * The always-visible "this is on" indicator (Invariant 7). Claimed in the design doc and ADR-107
+     * ("reusing the RAS badge") but never actually built — grepping the SDK tree for badge/indicator
+     * turned up nothing. This is what makes that claim true: since these pixels are inside the
+     * screen capture (§2, the whole point of this architecture), this is the one badge placement that
+     * is honestly visible to every remote viewer, not just the sharer.
+     */
+    _drawBadge(g) {
+        if (this.session.admit === ADMIT.NONE) return;   // off by default (Inv 1) — nothing to show
+
+        let count = 0;
+        for (const author of Object.keys(this.session.palette.colorMap())) {
+            if (this.session.admits(author)) count++;
+        }
+        const label = count === 0
+            ? 'Annotation is on — nobody can draw yet'
+            : `Annotation is on — ${count} ${count === 1 ? 'person' : 'people'} can draw`;
+
+        const dpr = this._dpr;
+        const padX = 12 * dpr;
+        const padY = 7 * dpr;
+        const dotR = 4 * dpr;
+        const gap = 8 * dpr;
+        g.font = `${12 * dpr}px system-ui, -apple-system, sans-serif`;
+        const textW = g.measureText(label).width;
+        const h = 26 * dpr;
+        const w = padX * 2 + dotR * 2 + gap + textW;
+        const x = 16 * dpr;
+        const y = this.canvas.height - h - 16 * dpr;
+
+        g.globalAlpha = 1;
+        g.fillStyle = 'rgba(24,24,27,0.94)';
+        if (g.roundRect) {
+            g.beginPath();
+            g.roundRect(x, y, w, h, h / 2);
+            g.fill();
+        } else {
+            g.fillRect(x, y, w, h);
+        }
+
+        g.fillStyle = '#ef4444';
+        g.beginPath();
+        g.arc(x + padX + dotR, y + h / 2, dotR, 0, Math.PI * 2);
+        g.fill();
+
+        g.fillStyle = '#fff';
+        g.textBaseline = 'middle';
+        g.fillText(label, x + padX + dotR * 2 + gap, y + h / 2);
     }
 
     /** Normalized `0..=65535` spans the whole overlay, which spans the shared display exactly. */

@@ -1,2 +1,4 @@
 node_modules/
 test/electron/.build/
+test-results/
+playwright-report/

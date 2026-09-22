@@ -36,9 +36,13 @@
     "check": "npm test && npm run verify-bundles && npm run smoke",
     "capture-test": "node test/electron/run.mjs --capture"
   },
-  "dependencies": {},
   "engines": {
     "node": ">=20"
   },
-  "types": "./index.d.ts"
+  "types": "./index.d.ts",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "electron": "^41.7.1",
+    "esbuild": "^0.28.2"
+  }
 }

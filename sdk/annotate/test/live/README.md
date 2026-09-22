@@ -7,6 +7,77 @@ enforce its security model against a real peer?
 Run against a **local** Jitsi, not `meet.jit.si` — the public server now gates rooms behind moderator
 login, and a local stack also lets you inspect prosody/jicofo when something misbehaves.
 
+## 0. The scripted version — start here
+
+What follows this section used to be the only option: stand up docker-jitsi-meet by hand, then paste
+console commands into two browser tabs one at a time. That proved the transport, but never the thing
+a user actually does — click a button, see a prompt, click Allow, draw — which is exactly the gap
+that let the consent flow go unproven for as long as it did (ADR-107 Decision 8/9/10).
+
+Both suites are **deliberately headless and never open a visible window** — an early version of
+`e2e.spec.mjs` used `headless: false` + `--auto-select-desktop-capture-source` to attempt a REAL
+`getDisplayMedia()` share, and it surfaced a real, visible browser window (and a real OS permission
+popup) directly on whatever machine ran it, which is a genuine surprise for anyone sitting at that
+machine and not worth it — see `playwright.config.mjs`'s own comment. Both suites instead simulate
+"someone is sharing" at the API boundary (documented in each file), which is enough to prove the
+consent/draw PROTOCOL; the separate claim that the overlay's pixels really are inside a live capture
+stream is proven headlessly in `test/electron/capture-stream.mjs`.
+
+```bash
+bash setup-docker.sh                                                     # HTTP :8000, idempotent, ~5-10 min cold
+npx playwright install chromium                                          # once
+npm i -D @playwright/test esbuild electron                               # once
+npx playwright test --config test/live/playwright.config.mjs test/live/e2e.spec.mjs        # browser ↔ browser
+```
+
+`e2e.spec.mjs` drives two real browser contexts through the actual UI: request → the sharer's toast →
+Allow → a real pointer-drawn stroke → undo → a forged cross-author erase (refused) → revoke via the
+sharer's management panel (not the console) → confirms drawing stops **and** drops the revoked
+participant's existing marks (`SharerController.withdraw`'s actual behaviour — the earlier draft of
+this test wrongly assumed revoke only blocks future draws).
+
+**`electron.spec.mjs` needs a SECOND, HTTPS docker-jitsi-meet** — `JitsiMeetExternalAPI` hardcodes
+`https://${domain}` with no opt-out (`external_api.js:324`), so the Electron path this test exercises
+can never talk to the plain-HTTP stack above. `setup-docker.sh` deliberately only sets up the HTTP
+case (`DISABLE_HTTPS=1`, the browser suite's requirement) — do NOT point it at this second checkout;
+configure it directly instead, as its own independent compose project so it cannot collide with the
+HTTP stack's containers, network, or ports:
+
+```bash
+git clone --depth 1 https://github.com/jitsi/docker-jitsi-meet.git /tmp/casual-annotate-jitsi-https
+cd /tmp/casual-annotate-jitsi-https && cp env.example .env && ./gen-passwords.sh
+
+# In .env: PUBLIC_URL=https://localhost:8444, HTTPS_PORT=8444, DISABLE_HTTPS left UNSET (or =0),
+# HTTP_PORT=8001, ENABLE_AUTH=0, ENABLE_GUESTS=1, ENABLE_LOBBY=0, ENABLE_PREJOIN_PAGE=0,
+# JVB_ADVERTISE_IPS=127.0.0.1, XMPP_BOSH_URL_BASE=http://xmpp.meet.jitsi:5280 (the same gotcha as
+# the HTTP stack — see below), and JVB_PORT=10001 / JVB_COLIBRI_PORT=8081 / JICOFO_REST_PORT=8889 to
+# avoid colliding with the HTTP stack's own default ports. CONFIG should point at its OWN directory
+# (e.g. ~/.jitsi-meet-cfg-https), pre-created with the same subdirectories `setup-docker.sh` creates
+# (see its own comment on why: a missing one gets auto-created as root by `docker compose up`, and
+# prosody then refuses to start at all).
+
+docker compose -p annotate-https up -d   # a distinct project name — self-signed cert is automatic
+
+node test/electron/e2e-harness/build.mjs
+CASUAL_ANNOTATE_HTTPS_PORT=8444 \
+    npx playwright test --config test/live/playwright.config.mjs test/live/electron.spec.mjs
+```
+
+`electron.spec.mjs` runs a real Electron process as the sharer (`test/electron/e2e-harness/`, which
+wires the actual `adapters/jitsi-electron/main.js` — not a mock — without needing a full
+jitsi-meet-electron checkout), and asserts the specific thing Decision 10 fixed: that a request
+reaches the native `dialog.showMessageBox` seam at all (previously provably unreachable), and that the
+resulting stroke is in the overlay window's own rendered pixels (a real `capturePage()` check, not
+just the session's stroke count).
+
+Both suites pass reliably run individually; back-to-back in a resource-constrained environment they
+can need the one retry `playwright.config.mjs` configures (real local-Jitsi XMPP-join timing under
+contention — re-running an apparently-failed suite alone immediately after has always passed clean).
+
+Everything below this section is the original manual runbook — still useful for interactively
+inspecting `prosody`/`jicofo`/`jvb` state or reproducing something the scripted suite doesn't cover,
+but the scripted version is what should be run to answer "does this actually work."
+
 ## 1. A local Jitsi
 
 ```bash
@@ -179,3 +250,34 @@ attacker's own stroke correctly removed.
 arrived complete (`[2000,30000]` … `[62000,27206]`), rendered in the annotator's **assigned** colour
 `#1e90ff` derived from the author rather than the wire, `end` received, cursor labelled
 `WebAnnotator` from the roster, all five capabilities negotiated, ack returned to the browser.
+
+## Result, 2026-09-22 (scripted, UI-driven — §0) — the first full cycle ever observed
+
+Everything above proved the transport and the store. It never proved the actual product: a person
+clicks a button, sees a prompt, clicks Allow, draws — and, per the design doc's own status line going
+into this run, that exact cycle "has never been observed working end to end, in either shape." This
+run is that observation, for both shapes, driven through the real UI rather than the console:
+
+- **Browser → browser** (`e2e.spec.mjs`): request → the sharer's real toast appears → Allow → a real
+  pointer-dragged stroke lands with correct author/colour attribution → Undo removes it → a forged
+  cross-author `erase` from an unadmitted sender is refused (`not-admitted`) with the victim stroke
+  surviving → revoke through the sharer's management panel (not the console) drops the withdrawn
+  participant's existing marks **and** stops further drawing.
+- **Browser → Electron desktop** (`electron.spec.mjs`, via `test/electron/e2e-harness/`, wiring the
+  real production `adapters/jitsi-electron/main.js`/`renderer.js`/`injected-relay.js` — no
+  jitsi-meet-electron checkout): the request reaches the **native `dialog.showMessageBox` seam**, and
+  the resulting stroke lands in the **overlay window's own rendered pixels** (7,489 non-transparent
+  pixels captured via `webContents.capturePage()`, the same technique `test/electron/smoke.mjs`
+  already used) — not merely the session's stroke count. This is the specific thing Decision 8/9
+  found broken and Decision 10 fixed; before this run it had never been observed working.
+
+Also found live, and fixed, while building this proof (beyond the transport bug Decision 10 already
+names): the harness's own preload bundled `adapters/jitsi-electron/preload.js` raw instead of calling
+`installAnnotateBridge()`, so `window.casualAnnotate` was never actually installed — a bug in the
+TEST, not the SDK. And a real, adversarial multi-agent review of the whole Decision-10 change (23
+confirmed findings — see ADR-107's Status line for the two most serious) was run and fixed before this
+proof, so what is verified here is the code as it stands after that pass, not before it.
+
+**Not yet re-verified:** `adapters/jitsi-electron/install.mjs`'s Decision-10-era edits (the relay
+build target, `relayBundlePath`/`serverOrigin`) against a real jitsi-meet-electron checkout — this
+proof deliberately used the hermetic harness instead, to avoid needing one.

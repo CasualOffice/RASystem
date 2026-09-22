@@ -82,6 +82,14 @@ seconds and, if an anchor moved, the script names which one instead of producing
 its handler through that setter, so wrapping afterwards sees nothing. The installer places it
 correctly — this matters only if you wire it by hand.
 
+**Set `serverOrigin`** to your jitsi-meet deployment's URL (the installer leaves this as a `TODO`
+placeholder — it cannot know it). This is what makes the desktop app work end to end (ADR-107
+Decision 10): main injects a small relay directly into the Jitsi iframe via Electron's privileged
+`executeJavaScript`, so a request from an annotator can actually reach this app's native consent
+dialog — the External API's own receive path never fires, on web or Electron. `serverOrigin` scopes
+that injection to the frame you actually configured, never an unrelated one. Full detail:
+`adapters/jitsi-electron/README.md`.
+
 ### Why the source id is obtained that way
 
 The iframe API never exposes it: `screensharingDetails` carries only `sourceType`, never `sourceId`
@@ -121,13 +129,21 @@ Raise it only while annotation is active; it costs resolution. Then measure rath
 ## 5. Verifying a deployment
 
 ```bash
-npm test                # 125 unit tests
+npm test                # unit tests
 npm run verify-bundles  # Electron bundle boundaries (needs esbuild)
 npm run smoke           # renders the overlay in real Electron (needs electron)
 npm run capture-test    # proves the overlay is inside a live capture stream
 ```
 
-For a live two-participant check, see [`test/live/`](test/live/README.md) — including the
-docker-jitsi-meet HTTPS requirement, which is not optional: `JitsiMeetExternalAPI` hardcodes
-`https://${domain}` (`external_api.js:324`), so the Electron app cannot talk to a plain-HTTP
-deployment and shows only a black screen.
+For a scripted, real two-participant proof driven through the actual UI (request → toast/native
+dialog → allow → draw → undo → revoke) — not console commands — see
+[`test/live/`](test/live/README.md): `setup-docker.sh` stands up docker-jitsi-meet, then
+`e2e.spec.mjs` (browser-to-browser) and `electron.spec.mjs` (a real Electron sharer, using
+`test/electron/e2e-harness/` so a full jitsi-meet-electron checkout is not required) run against it.
+
+The older manual two-participant console runbook (`test/live/README.md`) is kept for reference and
+notes one thing the scripted suite doesn't need: a full jitsi-meet-electron checkout's own
+`JitsiMeetExternalAPI` hardcodes `https://${domain}` (`external_api.js:324`), so it cannot talk to a
+plain-HTTP deployment and shows only a black screen. `test/electron/e2e-harness/` constructs its own
+`JitsiMeetExternalAPI` call directly, against docker-jitsi-meet's default plain-HTTP setup, so this
+does not apply to it.

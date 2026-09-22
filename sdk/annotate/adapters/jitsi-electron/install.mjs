@@ -67,7 +67,15 @@ const edits = [
         body: block(
             'setupAnnotateMain(meetingWindow, {\n'
             + '    overlayUrl: `file://${annotatePath.join(rootDir, \'build\', \'annotate-overlay.html\')}`,\n'
-            + "    overlayPreload: annotatePath.join(rootDir, 'build', 'annotate-overlay-preload.js')\n"
+            + "    overlayPreload: annotatePath.join(rootDir, 'build', 'annotate-overlay-preload.js'),\n"
+            + '    // ADR-107 Decision 10: without this, nothing is injected into the Jitsi iframe and\n'
+            + "    // requests can never reach this app — see adapters/jitsi-electron/README.md.\n"
+            + '    relayBundlePath: annotatePath.join(rootDir, \'build\', \'annotate-relay.js\'),\n'
+            + '    // TODO: set this to your deployment\'s jitsi-meet server origin (e.g.\n'
+            + "    // 'https://meet.example.com'). Left as a placeholder because the installer cannot\n"
+            + '    // know it — omitting it injects the relay into every non-main sub-frame, which works\n'
+            + '    // but is looser than necessary.\n'
+            + "    serverOrigin: undefined,\n"
             + '});',
         ),
     },
@@ -151,13 +159,31 @@ const edits = [
     },
     {
         file: 'esbuild.js',
-        why: 'build the overlay targets by default — `buildTargets` is a fixed list, so config entries alone never run',
+        why: 'add the injected-relay entry point (ADR-107 Decision 10)',
+        anchor: '    renderer: {',
+        before: true,
+        body: block(
+            '    annotateRelay: {\n'
+            + '        ...common,\n'
+            + '        // This is `executeJavaScript`\'d verbatim into the (arbitrary, third-party)\n'
+            + '        // Jitsi server\'s iframe by main.js — it must stay a self-contained IIFE.\n'
+            + "        entryPoints: { 'annotate-relay': require('path').join(ANNOTATE, 'injected-relay.js') },\n"
+            + '        outdir: OUTDIR,\n'
+            + "        platform: 'browser',\n"
+            + "        format: 'iife',\n"
+            + '        target: RENDERER_TARGET,\n'
+            + '    },',
+        ),
+    },
+    {
+        file: 'esbuild.js',
+        why: 'build the overlay + relay targets by default — `buildTargets` is a fixed list, so config entries alone never run',
         anchor: "const buildTargets = targets.length ? targets : [ 'main', 'preload', 'renderer' ];",
         after: true,
         body: block(
             '// Only when no explicit target was requested: `npm run watch` passes one, and silently\n'
             + '// widening that would change what the developer asked for.\n'
-            + "if (!targets.length) buildTargets.push('annotateOverlay', 'annotateOverlayPreload');",
+            + "if (!targets.length) buildTargets.push('annotateOverlay', 'annotateOverlayPreload', 'annotateRelay');",
         ),
     },
 ];

@@ -216,6 +216,30 @@ test('a muted participant is silenced without affecting the session', () => {
     assert.equal(sharer.session.store.size, 1);
 });
 
+test('state() tells "never granted" apart from "granted, then muted" — the panel needs both', () => {
+    // An earlier version collapsed both into one `muted` flag, which made an Unmute button appear
+    // for someone who had never actually been granted access in the first place, and did nothing
+    // when clicked.
+    const { sharer } = pair({ admit: ADMIT.ALLOWLIST });
+    const byId = id => sharer.state().participants.find(p => p.id === id);
+
+    assert.equal(byId('alice').granted, false, 'ALLOWLIST + never approved: not granted');
+    assert.equal(byId('alice').muted, false, 'and not "muted" either — there was nothing to mute');
+
+    sharer.session.pending.add('alice');   // a request landed
+    assert.ok(sharer.approve('alice'));
+    assert.equal(byId('alice').granted, true);
+    assert.equal(byId('alice').muted, false);
+
+    sharer.mute('alice');
+    assert.equal(byId('alice').granted, true, 'muting does not revoke the underlying grant');
+    assert.equal(byId('alice').muted, true);
+
+    sharer.unmute('alice');
+    assert.equal(byId('alice').granted, true);
+    assert.equal(byId('alice').muted, false);
+});
+
 test('the UI state carries counts and participants, never the stroke data', () => {
     const { sharer, annotator, states } = pair();
     annotator.strokes.begin('alice:0', TOOL.PEN);

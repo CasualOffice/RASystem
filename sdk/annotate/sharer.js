@@ -181,7 +181,11 @@ export class SharerController {
                 id,
                 color,
                 name: this.session.nameOf(id),
-                muted: !this.session.admits(id),
+                // Two genuinely different things a UI needs to tell apart — collapsing them into one
+                // `muted` flag (as an earlier version of this did) made "Unmute" meaningless for
+                // someone who was simply never granted access in the first place:
+                granted: this.session.isGranted(id),   // holds a grant right now (mode-dependent)
+                muted: this.session.isMuted(id),        // was granted, then individually silenced
             })),
         };
     }

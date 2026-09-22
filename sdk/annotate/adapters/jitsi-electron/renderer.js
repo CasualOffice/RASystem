@@ -1,13 +1,25 @@
 // Casual Annotate — Electron RENDERER wiring for jitsi-meet-electron (ADR-107 §5, §8).
 //
 // jitsi-meet-electron loads the meeting in an iframe through `JitsiMeetExternalAPI`
-// (`app/features/conference/components/Conference.tsx:188`), so this uses the External API
-// transport — `sendEndpointTextMessage`, which is string-only.
+// (`app/features/conference/components/Conference.tsx:188`).
+//
+// ── The transport, and why it is not the iframe API (ADR-107 Decision 8, Decision 10) ────────────
+//
+// The obvious choice is the External API's `sendEndpointTextMessage` / `endpointTextMessageReceived`.
+// It sends fine. It never receives: `endpointTextMessageReceived` has ZERO callers in jitsi-meet's
+// web app (only the mobile middleware implements the equivalent), so a request from an annotator
+// could reach this app and be silently dropped forever — the defect recorded in Decision 8/9.
+//
+// The fix runs on the OTHER side of the iframe boundary: `main.js` injects a real
+// `ConferenceTransport` directly into the iframe via Electron's privileged `webFrameMain`
+// `executeJavaScript` (`injected-relay.js`), where `lib-jitsi-meet`'s own receive event genuinely
+// fires, and bridges it out over `postMessage` — which, unlike direct DOM access, crosses a
+// cross-origin iframe boundary just fine. `PostMessageTransport` is the host side of that bridge.
 //
 // This module is a RELAY, not a brain. The authoritative session lives in the overlay window (see
 // `main.js`), so everything here either puts bytes on the wire or takes them off it:
 //
-//     endpoint message ──► forwardOp ──► overlay   (applies + renders)
+//     relayed op   ──► forwardOp ──► overlay   (applies + renders)
 //     wire         ◄── onEmit  ◄──────── overlay   (acks, roster)
 //
 // Install beside the SDK's other renderer helpers:
@@ -15,10 +27,11 @@
 //     import { setupAnnotateRender } from '@casualoffice/annotate/adapters/jitsi-electron/renderer.js';
 //     const annotate = setupAnnotateRender(this._api);
 
-import { ExternalApiTransport } from '../../transport/jitsi.js';
+import { PostMessageTransport } from '../../transport/jitsi.js';
 import { AnnotatorController } from '../../annotator.js';
 import { AnnotationSurface } from '../../surface/surface.js';
 import { AnnotatorToolbar } from '../../surface/toolbar.js';
+import { SharerPanel } from '../../surface/sharer-panel.js';
 import { ADMIT } from '../../core/session.js';
 import { isAnnotateMessage } from '../../core/ops.js';
 
@@ -42,7 +55,20 @@ export function setupAnnotateRender(api, opts = {}) {
     const bridge = window.casualAnnotate;
     if (!bridge) throw new Error('casual-annotate: preload bridge missing — call installAnnotateBridge()');
 
-    const transport = new ExternalApiTransport(api);
+    // The frame the relay was injected into (`main.js`). Without it there is nothing to transport
+    // ops over, and failing loud here beats a silent "nothing ever arrives" (the exact defect this
+    // fix exists to close).
+    const iframe = api.getIFrame?.();
+    if (!iframe?.contentWindow) {
+        throw new Error('casual-annotate: JitsiMeetExternalAPI.getIFrame() unavailable — '
+            + 'cannot reach the frame the relay is injected into');
+    }
+    // `iframe.src` is an ordinary HTML attribute — reading it does not cross the cross-origin
+    // boundary the way reading `iframe.contentWindow.location` would. Best-effort: a malformed or
+    // relative `src` just falls back to PostMessageTransport's own '*' default.
+    let targetOrigin;
+    try { targetOrigin = new URL(iframe.src, location.href).origin; } catch { /* fall back to '*' */ }
+    const transport = new PostMessageTransport(iframe.contentWindow, { targetOrigin });
     let sharing = false;
     let liveSourceId = null;
 
@@ -90,9 +116,19 @@ export function setupAnnotateRender(api, opts = {}) {
         else transport.broadcast(op);
     });
 
+    // The management panel lives in the HOST document, not the iframe and not the overlay: the
+    // overlay must never be interactive (ADR-100), and the iframe is a real cross-origin document we
+    // cannot reach into — this is our own layer, same reasoning as the browser toolbar (§5.2).
+    const panel = new SharerPanel({
+        onMute: id => bridge.control({ type: 'mute', id }),
+        onUnmute: id => bridge.control({ type: 'unmute', id }),
+        onRevoke: id => bridge.control({ type: 'withdraw', id }),
+    });
+
     let lastPending = new Set();
     const unsubStateReal = bridge.onState((s) => {
         opts.onSharerState?.(s);
+        panel.render(s);
         if (s?.pending?.length) debug('pending', s.pending);
 
         // A newly-pending request → native prompt. Tracked so a state update for any other reason
@@ -214,6 +250,8 @@ export function setupAnnotateRender(api, opts = {}) {
         },
         mute: id => bridge.control({ type: 'mute', id }),
         unmute: id => bridge.control({ type: 'unmute', id }),
+        /** Withdraw a permission already granted — the panel's "Remove" button calls this too. */
+        withdraw: id => bridge.control({ type: 'withdraw', id }),
         clearAll: () => bridge.control({ type: 'clear' }),
         setAdmit: mode => bridge.control({ type: 'admit', mode }),
 
@@ -279,6 +317,7 @@ export function setupAnnotateRender(api, opts = {}) {
             unsubOps?.();
             unsubEmit?.();
             unsubStateReal?.();
+            panel.destroy();
             for (const evt of [ 'participantJoined', 'participantLeft', 'displayNameChange' ]) {
                 api.removeListener?.(evt, syncParticipants);
             }

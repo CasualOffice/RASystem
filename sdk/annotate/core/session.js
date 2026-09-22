@@ -224,6 +224,17 @@ export class SharerSession {
     /** @returns {boolean} may this participant's ops be honoured at all? */
     admits(author) {
         if (this._muted.has(author)) return false;
+        return this._wouldAdmit(author);
+    }
+
+    /**
+     * Would this participant be admitted, IGNORING mute — i.e. do they actually hold a grant right
+     * now, distinct from "muted after having been granted." `admits()` conflates the two (a muted
+     * participant and one who was simply never granted both read as "not admitted"), which is the
+     * right question for the per-message gate but the wrong one for a UI trying to show three
+     * genuinely different states: never asked/no access, granted and active, granted and muted.
+     */
+    _wouldAdmit(author) {
         switch (this._admit) {
             case ADMIT.EVERYONE: return true;
             case ADMIT.MODERATORS: return this._isModerator(author);
@@ -231,6 +242,17 @@ export class SharerSession {
             case ADMIT.NONE:
             default: return false;
         }
+    }
+
+    /** True once a participant actually holds a grant (allowlisted, moderator under MODERATORS, or
+     * EVERYONE is open) — independent of whether they are currently muted. See `_wouldAdmit` above. */
+    isGranted(author) {
+        return this._wouldAdmit(author);
+    }
+
+    /** True if a participant who otherwise holds a grant has been individually silenced. */
+    isMuted(author) {
+        return this._muted.has(author);
     }
 
     // ── the one entry point ─────────────────────────────────────────────────────────────────────
