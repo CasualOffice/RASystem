@@ -94,18 +94,34 @@ export async function start(options = {}) {
         });
         surface.setTool(null);
 
+        // The toolbar stays hidden — not a "checking…" state, just hidden, same as the "nobody is
+        // sharing" case above — until the sharer's own SharerController actually proves itself alive
+        // (`AnnotatorController`'s `sharerAvailable`, confirmed by its unprompted roster broadcast).
+        // A desktop track alone only proves someone is SHARING; it says nothing about whether their
+        // client is running this SDK at all — a vanilla Jitsi tab or an old build looks identical
+        // from here. Before this, "Request to annotate" appeared regardless and, against a sharer
+        // with no SDK, clicking it just sat in "Waiting for approval…" forever.
+        let shown = false;
         annotator = new AnnotatorController({
             transport, sharerId: id, selfId, surface,
-            onState: st => toolbar.render({
-                permission: st.permission,
-                color: st.color,
-                canErase: st.caps?.includes('erase') ?? true,
-            }),
+            onState: (st) => {
+                if (st.sharerAvailable === false) {
+                    toolbar.setVisible(false);
+                    return;
+                }
+                if (st.sharerAvailable !== true) return; // still checking — nothing to show yet
+                if (!shown) {
+                    shown = true;
+                    toolbar.setNote(`${displayName(id)} is sharing.`);
+                    toolbar.setVisible(true);
+                }
+                toolbar.render({
+                    permission: st.permission,
+                    color: st.color,
+                    canErase: st.caps?.includes('erase') ?? true,
+                });
+            },
         });
-
-        toolbar.render({ permission: null });
-        toolbar.setNote(`${displayName(id)} is sharing.`);
-        toolbar.setVisible(true);
     }
 
     function detach() {

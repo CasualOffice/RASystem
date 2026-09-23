@@ -21,7 +21,7 @@
 // window ever needing to be visible.
 
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +33,17 @@ const BASE = `http://localhost:${PORT}`;
 const ROOM = `AnnotateE2E-${Date.now().toString(36)}`;
 const ROOM_URL = `${BASE}/${ROOM}#config.prejoinConfig.enabled=false&config.disableDeepLinking=true`
     + '&config.startWithVideoMuted=true&config.startWithAudioMuted=true';
+
+// Explicit screenshots at the meaningful moments, saved to disk — proof to look at afterward without
+// a live window competing for resources while the (headless) test runs. See playwright.config.mjs's
+// own comment for why headless is the default here.
+const SHOT_DIR = path.join(ROOT, 'test-results', 'e2e-screenshots');
+mkdirSync(SHOT_DIR, { recursive: true });
+let shotN = 0;
+async function shot(page, label) {
+    shotN += 1;
+    await page.screenshot({ path: path.join(SHOT_DIR, `${String(shotN).padStart(2, '0')}-${label}.png`) });
+}
 
 function bundle() {
     const out = '/tmp/casual-annotate-build/casual-annotate.js';
@@ -130,19 +141,23 @@ test.describe('annotate consent flow — real docker-jitsi-meet, real UI', () =>
 
         await simulateSharing(sharer, annotator);
 
-        // ── the real UI, annotator side: the toolbar must appear once someone is sharing ──────────
+        // ── the real UI, annotator side: the toolbar must appear once someone is sharing AND the
+        //    sharer's own SharerController has confirmed itself alive (the sharerAvailable gate) ────
         const requestBtn = annotator.getByRole('button', { name: 'Request to annotate', exact: true });
         await expect(requestBtn).toBeVisible({ timeout: 20_000 });
+        await shot(annotator, 'annotator-sees-request-button');
         await requestBtn.click();
 
         // ── the real UI, sharer side: the toast, not a console call ────────────────────────────────
         const toast = sharer.getByRole('alertdialog');
         await expect(toast).toBeVisible({ timeout: 10_000 });
+        await shot(sharer, 'sharer-sees-consent-toast');
         await sharer.getByRole('button', { name: 'Allow', exact: true }).click();
 
         // ── the real UI, annotator side: tools appear once granted ─────────────────────────────────
         const penBtn = annotator.getByRole('button', { name: 'Pen', exact: true });
         await expect(penBtn).toBeVisible({ timeout: 10_000 });
+        await shot(annotator, 'annotator-granted-tools-visible');
         await penBtn.click();
 
         // A real pointer-drag stroke on the annotation canvas, not a synthesized op.
@@ -153,6 +168,7 @@ test.describe('annotate consent flow — real docker-jitsi-meet, real UI', () =>
         await annotator.mouse.down();
         for (let i = -80; i <= 80; i += 16) await annotator.mouse.move(cx + i, cy + Math.sin(i / 20) * 10);
         await annotator.mouse.up();
+        await shot(annotator, 'annotator-drew-stroke-local-echo');
 
         // ── assert it actually landed, sharer side ──────────────────────────────────────────────────
         await sharer.waitForFunction(() => window.CasualAnnotateSession?.sharer?.session?.store?.size === 1,
@@ -202,6 +218,7 @@ test.describe('annotate consent flow — real docker-jitsi-meet, real UI', () =>
         // The accessible name includes the live count span ("Annotators 1"), not just the title —
         // match by substring rather than pin an exact string that changes with the roster.
         await sharer.getByRole('button', { name: /Annotators/ }).click();
+        await shot(sharer, 'sharer-management-panel-open');
         await sharer.getByRole('button', { name: /Remove .*annotation access/i }).click();
 
         // `SharerController.withdraw()` (`sharer.js`) deliberately drops the withdrawn participant's
@@ -214,6 +231,7 @@ test.describe('annotate consent flow — real docker-jitsi-meet, real UI', () =>
 
         const requestBtnAgain = annotator.getByRole('button', { name: 'Request to annotate', exact: true });
         await expect(requestBtnAgain).toBeVisible({ timeout: 10_000 });
+        await shot(annotator, 'annotator-back-to-request-after-revoke');
         // Revocation must put the pen down (ADR-107 §9.3) — a further draw must not reach the sharer.
         await annotator.mouse.move(cx, cy - 60);
         await annotator.mouse.down();

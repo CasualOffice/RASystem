@@ -151,7 +151,21 @@ test('Electron sharer: injected relay reaches the native dialog, and the stroke 
     await electronApp.evaluate(({ app }) => { app.__e2e.nextConsentAnswer = true; });
 
     const requestBtn = annotator.getByRole('button', { name: 'Request to annotate', exact: true });
-    await expect(requestBtn).toBeVisible({ timeout: 20_000 });
+    try {
+        await expect(requestBtn).toBeVisible({ timeout: 20_000 });
+    } catch (err) {
+        // Diagnostic-only: both sides already expose exactly this for "why is nothing happening"
+        // (`renderer.js`'s own `window.__casualAnnotate` trace, `AnnotatorController.sharerAvailable`)
+        // — read them before failing instead of guessing blind at which hop broke.
+        const hostDiag = await hostPage.evaluate(() => window.__casualAnnotate ?? null).catch(() => null);
+        const annotatorDiag = await annotator.evaluate(() => ({
+            sharerId: window.CasualAnnotateSession?.sharerId ?? null,
+            sharerAvailable: window.CasualAnnotateSession?.annotator?.sharerAvailable ?? 'no-annotator-controller',
+        })).catch(() => null);
+        console.error('[e2e-electron] DIAGNOSTIC host side (window.__casualAnnotate):', JSON.stringify(hostDiag, null, 2));
+        console.error('[e2e-electron] DIAGNOSTIC annotator side:', JSON.stringify(annotatorDiag, null, 2));
+        throw err;
+    }
     await requestBtn.click();
 
     // ── this is the actual defect this whole fix is for: does the request reach the native-dialog

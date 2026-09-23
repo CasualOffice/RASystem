@@ -18,6 +18,7 @@ export default {
     use: {
         trace: 'retain-on-failure',
         video: 'retain-on-failure',
+        screenshot: 'only-on-failure',
         // Deliberately headless, with no real-capture flags. An earlier version of this config used
         // `headless: false` + `--auto-select-desktop-capture-source` to attempt a REAL
         // `getDisplayMedia()` share — that requires a visible, focusable browser window, which

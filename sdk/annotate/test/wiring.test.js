@@ -274,3 +274,71 @@ test('hello/roster negotiation survives a client that never says hello', () => {
     // Not admitted (not in the roster) but the session must not throw or corrupt.
     assert.ok(sharer.state().participants.length >= 2);
 });
+
+// ── sharerAvailable: don't offer "Request to annotate" against a sharer that was never there ──────
+//
+// `currentSharer()`-style polling (`standalone/inject.js`) can only see "someone is sharing a
+// desktop video track" — nothing about whether their client is running this SDK at all. A vanilla
+// jitsi-meet tab, an old build, or a desktop app with no adapter installed all look identical to
+// that poll. Gate on the sharer's own SharerController proving itself alive instead — it already
+// broadcasts a roster, unprompted, the moment it activates.
+
+test('sharerAvailable starts null and becomes true once the live sharer answers (roster)', () => {
+    // `pair()`'s own AnnotatorController construction sends `hello`, which the real SharerController
+    // answers with a roster over the fake bridge, synchronously — so by construction this is already
+    // proven live, not merely configured to look live.
+    const { annotator } = pair();
+    assert.equal(annotator.sharerAvailable, true);
+});
+
+test('sharerAvailable becomes false after the timeout when nothing is on the other end', async () => {
+    // `sharerId: 'nobody'` was never registered on the fake bridge (`bridge().make(...)` was never
+    // called for it) — `ConferenceTransport._rawSend`'s `sendMessage` finds no handler and silently
+    // delivers nothing, the same as a real relay reaching a participant whose client never answers.
+    const conf = bridge([ participant('me', 'Me') ]).make('me');
+    const transport = new ConferenceTransport(conf, EVENTS);
+    const states = [];
+    const annotator = new AnnotatorController({
+        transport, sharerId: 'nobody', selfId: 'me', surface: fakeSurface(),
+        onState: s => states.push(s),
+        availabilityTimeoutMs: 5, // real timer, kept tiny so the test stays fast
+    });
+
+    assert.equal(annotator.sharerAvailable, null, 'nothing heard yet — must not assume available OR unavailable');
+
+    await new Promise(r => setTimeout(r, 30));
+
+    assert.equal(annotator.sharerAvailable, false);
+    assert.ok(states.some(s => s.sharerAvailable === false), 'the timeout must be observable via onState');
+    annotator.dispose();
+});
+
+test('availabilityTimeoutMs <= 0 disables the timeout — sharerAvailable stays null, never guessed', () => {
+    // The default is always positive in production; this is the escape hatch for a caller that wants
+    // to own its own timeout policy instead. Confirms a disabled timer genuinely never fires, rather
+    // than e.g. firing immediately.
+    const conf = bridge([ participant('me', 'Me') ]).make('me');
+    const transport = new ConferenceTransport(conf, EVENTS);
+    const annotator = new AnnotatorController({
+        transport, sharerId: 'nobody', selfId: 'me', surface: fakeSurface(),
+        availabilityTimeoutMs: -1,
+    });
+    assert.equal(annotator.sharerAvailable, null);
+    annotator.dispose();
+});
+
+test('dispose() before the timeout fires leaves no dangling timer', async () => {
+    const conf = bridge([ participant('me', 'Me') ]).make('me');
+    const transport = new ConferenceTransport(conf, EVENTS);
+    const states = [];
+    const annotator = new AnnotatorController({
+        transport, sharerId: 'nobody', selfId: 'me', surface: fakeSurface(),
+        onState: s => states.push(s),
+        availabilityTimeoutMs: 5,
+    });
+    annotator.dispose();
+    await new Promise(r => setTimeout(r, 30));
+    // If the timer had survived dispose(), it would have called back into a disposed controller's
+    // _emit and pushed a late state update — nothing should arrive after dispose.
+    assert.equal(states.length, 0);
+});

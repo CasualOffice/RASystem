@@ -283,7 +283,12 @@ export function setupAnnotateRender(api, opts = {}) {
                 send: op => transport.send(o.sharerId, op),
             });
             surface.setTool(null);
-            toolbar.setVisible(true);   // only ever constructed for a live remote share
+            // NOT shown yet — same reasoning as `standalone/inject.js`'s `attach()`: a remote desktop
+            // track only proves someone is sharing, not that their client runs this SDK at all. Stay
+            // hidden until `AnnotatorController`'s `sharerAvailable` confirms it via their unprompted
+            // roster broadcast, rather than offering a button that can hang forever against a sharer
+            // with no SharerController on the other end.
+            let shown = false;
 
             annotator = new AnnotatorController({
                 transport,
@@ -291,6 +296,13 @@ export function setupAnnotateRender(api, opts = {}) {
                 selfId: o.selfId,
                 surface,
                 onState: (st) => {
+                    if (st.sharerAvailable === false) {
+                        toolbar.setVisible(false);
+                        o.onState?.(st);
+                        return;
+                    }
+                    if (st.sharerAvailable !== true) { o.onState?.(st); return; }
+                    if (!shown) { shown = true; toolbar.setVisible(true); }
                     toolbar.render({
                         permission: st.permission,
                         color: st.color,

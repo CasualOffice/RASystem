@@ -1637,6 +1637,33 @@ IMPLEMENTATION NOTES (for the plan):
     `ras-protocol` mirror is a schema-compat obligation, not a change. Depends on ADR-097 (op model) +
     ADR-100 (overlay discipline); relates to ADR-094 (the deferred gossip transport) and ADR-057 (the
     browser-controller track).
+  - **Follow-up, 2026-09-23 — `sharerAvailable`: the toolbar must not offer "Request to annotate"
+    against a sharer that has no SDK on the other end.** Before this, the button appeared the instant
+    a peer's track was tagged `videoType: 'desktop'`, regardless of whether their client was actually
+    running this SDK — a plain Jitsi tab or an old build looked identical from here, and clicking it
+    sat in "Waiting for approval…" forever with no way to tell why. `AnnotatorController` now tracks a
+    tri-state `sharerAvailable` (`null` = checking, `true` = confirmed, `false` = timed out after
+    `AVAILABILITY_TIMEOUT_MS = 8s`), flipped `true` the moment ANY decoded op arrives from the sharer
+    (not only a roster push, so a late arrival self-heals even after the timeout already fired); both
+    `standalone/inject.js` and the Electron `renderer.js` gate the toolbar on it — hidden outright
+    while `null`, hidden with no button at all if `false`, shown only once `true`. **Verified live,
+    browser → browser** (`e2e.spec.mjs`, screenshots saved): the toast, the granted toolbar, the
+    sharer's badge/panel, and the post-revoke collapse back to a single "Request to annotate" button
+    all render correctly through the real UI. **Browser → Electron desktop
+    (`electron.spec.mjs`) initially failed** at the exact point this feature gates — the annotator's
+    button never became visible — reproducibly, twice, not the class of XMPP-join flakiness the
+    suite's retry exists to absorb. Root-caused with a diagnostic re-run (dumping
+    `renderer.js`'s own `window.__casualAnnotate` trace and `AnnotatorController.sharerAvailable`
+    at the point of failure): `sharerId` was set but no `AnnotatorController` existed at all — its
+    constructor's synchronous `transport.send(sharerId, helloOp(...))` (`annotator.js`) had thrown
+    (the JVB bridge channel is not always open yet right after join) and, being unguarded, aborted
+    construction partway — a **pre-existing latent bug**, not new, previously invisible because the
+    old toolbar showed unconditionally regardless of whether the controller was ever built; this
+    feature's gating on a live controller is what surfaced it. Fixed by wrapping that send in a
+    try/catch (`annotator.js`) so a transient send failure can't corrupt construction — the
+    availability timeout/self-heal machinery already tolerates a dropped hello. **Re-verified live
+    after the fix: full pass** — native dialog seam invoked, stroke painted into the overlay's own
+    pixels (7489 non-transparent px).
 
 
 ## Licensing

@@ -15,6 +15,20 @@ import { AckTimer } from './latency/beacon.js';
 const DEFAULT_VIDEO_LAG_MS = 600;
 
 /**
+ * How long to wait for the sharer's unprompted `roster` broadcast before concluding annotation is
+ * not available at all, rather than leaving "Request to annotate" offered forever.
+ *
+ * The sharer's own `becomeSharer()`/`startSharing()` broadcasts a roster immediately — but "someone
+ * is sharing a desktop track" (which is all `currentSharer()` polling can see) says nothing about
+ * whether THEIR client is even running this SDK at all. A vanilla jitsi-meet tab, an old build with
+ * no annotate script, or a desktop app that never had the adapter installed all look identical from
+ * here: a normal screen share, no roster ever coming. Before this, the toolbar showed a working-
+ * looking "Request to annotate" button regardless, and clicking it just sat in "Waiting for
+ * approval…" forever — indistinguishable from a slow human, not a feature that was never there.
+ */
+const AVAILABILITY_TIMEOUT_MS = 8_000;
+
+/**
  * @typedef {object} SurfaceLike
  * @property {(hex: string) => void} setColor
  * @property {(tool: number|string|null) => void} setTool
@@ -30,8 +44,10 @@ export class AnnotatorController {
      * @param {string} opts.selfId
      * @param {SurfaceLike} opts.surface
      * @param {(state: object) => void} [opts.onState]
+     * @param {number} [opts.availabilityTimeoutMs] - overridable for tests; production callers
+     *   should never need to pass this.
      */
-    constructor({ transport, sharerId, selfId, surface, onState }) {
+    constructor({ transport, sharerId, selfId, surface, onState, availabilityTimeoutMs = AVAILABILITY_TIMEOUT_MS }) {
         this.transport = transport;
         this.sharerId = sharerId;
         this.selfId = selfId;
@@ -48,13 +64,28 @@ export class AnnotatorController {
         this.videoLagMs = DEFAULT_VIDEO_LAG_MS;
         /** `null` = never asked · 'pending' · 'granted' · 'denied'. Drives the annotator's UI. */
         this.permission = null;
+        /**
+         * True once the sharer's `SharerController` has actually proven itself alive by broadcasting
+         * a `roster` — see `AVAILABILITY_TIMEOUT_MS` above. `null` while still waiting, `false` once
+         * the wait has timed out with nothing heard.
+         */
+        this.sharerAvailable = null;
+        this._availabilityTimer = availabilityTimeoutMs > 0 ? setTimeout(() => {
+            this._availabilityTimer = null;
+            if (this.sharerAvailable === null) {
+                this.sharerAvailable = false;
+                this._emit();
+            }
+        }, availabilityTimeoutMs) : null;
 
         surface.setAuthor?.(selfId);
         this._unsub = transport.onOp((sender, msg) => this._onOp(sender, msg));
 
-        // Announce ourselves. Optional by design — an old client sends nothing and still works —
-        // but sending it is what lets the sharer tailor what it expects from us.
-        transport.send(sharerId, helloOp([ ...LOCAL_CAPS ]));
+        // A synchronous send can throw (e.g. the JVB bridge channel isn't open yet, right after
+        // join) — must not abort the constructor, or the caller is left with a half-built object.
+        try {
+            transport.send(sharerId, helloOp([ ...LOCAL_CAPS ]));
+        } catch { /* self-heals: sharerAvailable's own timeout/retry paths still apply */ }
     }
 
     /**
@@ -107,6 +138,18 @@ export class AnnotatorController {
         const d = decode(msg, { fromSharer: true });
         if (!d.ok) return;
 
+        // ANY genuine, decoded op from the sharer — not just the roster it broadcasts unprompted —
+        // is proof its `SharerController` is actually alive. Checked here, once, rather than only on
+        // `roster`, so a grant/deny/ack arriving through some other ordering still counts; the
+        // common case is still the roster, since that is what arrives before anyone has asked.
+        if (this.sharerAvailable !== true) {
+            this.sharerAvailable = true;
+            if (this._availabilityTimer !== null) {
+                clearTimeout(this._availabilityTimer);
+                this._availabilityTimer = null;
+            }
+        }
+
         if (d.op.op === OP.ROSTER) {
             this.sharerProfile = new PeerProfile({ v: d.op.peerVersion, caps: d.op.caps });
             const mine = d.op.colors?.[this.selfId];
@@ -149,6 +192,11 @@ export class AnnotatorController {
             sharerIsLegacy: this.sharerProfile.isLegacy,
             videoLagMs: this.videoLagMs,
             dataRttMs: this.ackTimer.median,
+            // `null` = still waiting to hear from the sharer at all · `true` = confirmed alive ·
+            // `false` = waited AVAILABILITY_TIMEOUT_MS and heard nothing. Gate the "Request to
+            // annotate" button on this, not on "someone is sharing a desktop track" — that alone
+            // says nothing about whether their client is running this SDK at all.
+            sharerAvailable: this.sharerAvailable,
             participants: roster
                 ? Object.entries(roster.colors ?? {}).map(([ id, color ]) => ({
                     id, color, name: roster.names?.[id] ?? id,
@@ -160,6 +208,10 @@ export class AnnotatorController {
     dispose() {
         this._unsub?.();
         this.cursors.dispose();
+        if (this._availabilityTimer !== null) {
+            clearTimeout(this._availabilityTimer);
+            this._availabilityTimer = null;
+        }
     }
 }
 
