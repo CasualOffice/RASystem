@@ -1,0 +1,57 @@
+<!doctype html>
+<!--
+  Casual Annotate — hermetic Electron e2e harness, host page.
+
+  Constructs a real `JitsiMeetExternalAPI` iframe against the live docker-jitsi-meet — the same
+  integration shape jitsi-meet-electron uses (`adapters/jitsi-electron/README.md` §3) — and wires the
+  real `setupAnnotateRender`. No bundler: `renderer.js`'s relative ES module imports resolve fine
+  over `file://`, so only the preload (sandboxed, needs CJS) and the overlay/relay (get injected into
+  someone else's page, need to be self-contained IIFEs) are pre-bundled by `build.mjs`.
+-->
+<html>
+<head><meta charset="utf-8"><title>Casual Annotate — Electron e2e harness</title></head>
+<body style="margin:0">
+  <div id="meet" style="width:1280px;height:760px"></div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    window.__harnessServer = params.get('server') || 'http://localhost:8000';
+  </script>
+  <script type="module">
+    // `fetch` + evaluate rather than a `<script src>` tag: a plain script element pointed
+    // cross-origin (file:// -> http://localhost:8000) never fired a network request at all under
+    // this harness's headless Electron — no load, no error, no request even observed over CDP.
+    // `fetch`, which the rest of this file already needs for lib-jitsi-meet's own XHR/WS traffic to
+    // work at all, does not have that problem and fails loudly (a rejected promise) if the server is
+    // unreachable, rather than hanging forever.
+    const apiSrc = await fetch(`${window.__harnessServer}/external_api.js`).then(r => {
+        if (!r.ok) throw new Error(`external_api.js: HTTP ${r.status}`);
+        return r.text();
+    });
+    (0, eval)(apiSrc);   // indirect eval — runs in global scope, defines window.JitsiMeetExternalAPI
+
+    const { setupAnnotateRender } = await import('../../../adapters/jitsi-electron/renderer.js');
+
+    const room = `AnnotateE2E-${Date.now().toString(36)}`;
+    const api = new JitsiMeetExternalAPI(new URL(window.__harnessServer).host, {
+        roomName: room,
+        parentNode: document.getElementById('meet'),
+        width: 1280,
+        height: 760,
+        configOverwrite: {
+            prejoinConfig: { enabled: false },
+            disableDeepLinking: true,
+            startWithVideoMuted: true,
+            startWithAudioMuted: true,
+        },
+    });
+
+    const annotate = setupAnnotateRender(api, {
+        onSharerState: s => { window.__lastSharerState = s; },
+        onRefused: (message, reason) => { window.__lastRefusal = { message, reason }; console.warn('[annotate] refused', reason, message); },
+    });
+
+    window.__harness = { api, annotate, room };
+    console.log('[harness] ready, room =', room);
+  </script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+{
+  "name": "@casualoffice/annotate",
+  "version": "0.0.1",
+  "description": "Embeddable multi-participant screen annotation. Renders on the sharer's real desktop, so every viewer sees it through the ordinary video path. Jitsi transport included.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./core": "./core/index.js",
+    "./surface": "./surface/surface.js",
+    "./overlay": "./overlay/overlay.js",
+    "./transport/jitsi": "./transport/jitsi.js",
+    "./latency": "./latency/beacon.js",
+    "./sharer": "./sharer.js",
+    "./annotator": "./annotator.js",
+    "./adapters/jitsi-electron/*": "./adapters/jitsi-electron/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "core",
+    "surface",
+    "overlay",
+    "transport",
+    "latency",
+    "adapters",
+    "index.js",
+    "index.d.ts",
+    "sharer.js",
+    "annotator.js",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test 'test/*.test.js'",
+    "verify-bundles": "node test/verify-bundles.mjs",
+    "smoke": "node test/electron/run.mjs",
+    "check": "npm test && npm run verify-bundles && npm run smoke",
+    "capture-test": "node test/electron/run.mjs --capture"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "types": "./index.d.ts",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "electron": "^41.7.1",
+    "esbuild": "^0.28.2"
+  }
+}
