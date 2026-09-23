@@ -12,7 +12,7 @@
 //     npx playwright test --config test/live/playwright.config.mjs test/live/electron.spec.mjs
 
 import { test, expect, _electron } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,6 +43,7 @@ async function waitForRoom(frameOrPage) {
 
 test('Electron sharer: injected relay reaches the native dialog, and the stroke reaches the overlay', async ({ browser }) => {
     execFileSync('node', [ path.join(HARNESS, 'build.mjs') ], { cwd: ROOT, stdio: 'inherit' });
+    mkdirSync(path.join(ROOT, 'test-results', 'electron-proof'), { recursive: true });
 
     const electronApp = await _electron.launch({
         args: [ path.join(HARNESS, 'main.js') ],
@@ -166,6 +167,7 @@ test('Electron sharer: injected relay reaches the native dialog, and the stroke 
         console.error('[e2e-electron] DIAGNOSTIC annotator side:', JSON.stringify(annotatorDiag, null, 2));
         throw err;
     }
+    await annotator.screenshot({ path: path.join(ROOT, 'test-results', 'electron-proof', '01-request-button-visible.png') });
     await requestBtn.click();
 
     // ── this is the actual defect this whole fix is for: does the request reach the native-dialog
@@ -188,6 +190,7 @@ test('Electron sharer: injected relay reaches the native dialog, and the stroke 
     await annotator.mouse.down();
     for (let i = -100; i <= 100; i += 10) await annotator.mouse.move(cx + i, cy);
     await annotator.mouse.up();
+    await annotator.screenshot({ path: path.join(ROOT, 'test-results', 'electron-proof', '02-pen-selected-annotator-side.png') });
 
     // ── it must reach the OVERLAY WINDOW's own session — the authoritative one (`overlay-page.js`) ──
     const strokeCount = await electronApp.evaluate(async ({ BrowserWindow }) => {
@@ -199,7 +202,7 @@ test('Electron sharer: injected relay reaches the native dialog, and the stroke 
     expect(strokeCount).toBe(1);
 
     // ── and it must have actually painted (reusing the same technique as `test/electron/smoke.mjs`) ─
-    const { opaque, total } = await electronApp.evaluate(async ({ BrowserWindow }) => {
+    const { opaque, total, png } = await electronApp.evaluate(async ({ BrowserWindow }) => {
         const overlayWin = BrowserWindow.getAllWindows().find(w => w.webContents
             && w.webContents.getURL().includes('annotate-overlay'));
         const image = await overlayWin.webContents.capturePage();
@@ -207,9 +210,10 @@ test('Electron sharer: injected relay reaches the native dialog, and the stroke 
         const bitmap = image.toBitmap();
         let n = 0;
         for (let i = 3; i < bitmap.length; i += 4) if (bitmap[i] > 16) n++;
-        return { opaque: n, total: size.width * size.height };
+        return { opaque: n, total: size.width * size.height, png: image.toPNG().toString('base64') };
     });
     console.log(`[e2e-electron] overlay painted ${opaque}/${total} non-transparent px`);
+    writeFileSync(path.join(ROOT, 'test-results', 'electron-proof', '03-overlay-window-pixels.png'), Buffer.from(png, 'base64'));
     expect(opaque).toBeGreaterThan(0);
 
     await electronApp.close();

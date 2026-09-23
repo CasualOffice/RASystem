@@ -71,6 +71,7 @@ export function setupAnnotateRender(api, opts = {}) {
     const transport = new PostMessageTransport(iframe.contentWindow, { targetOrigin });
     let sharing = false;
     let liveSourceId = null;
+    let rosterResyncTimer = null;
 
     // The iframe API never carries the desktop source id — `screensharingDetails` has only
     // `sourceType` (`actions.web.ts:144`). Main observes the real id from the picker and pushes it
@@ -171,12 +172,19 @@ export function setupAnnotateRender(api, opts = {}) {
         // individually, by the person whose screen it is.
         bridge.control({ type: 'admit', mode: admit });
         syncParticipants();
+        // One-shot + event-triggered broadcasts can each be lost (the roster round-trip here has
+        // 4 more hops than the browser path's single XMPP relay: main<->overlay IPC, the injected
+        // relay, a postMessage bridge). A periodic resync — same interval as the browser sharer's
+        // own poll in standalone/inject.js — self-heals within a couple of ticks, well inside
+        // AnnotatorController's 8s availability window, instead of depending on one lucky delivery.
+        rosterResyncTimer = setInterval(syncParticipants, 1500);
         return { ok: true };
     }
 
     async function stopSharing() {
         if (!sharing) return;
         sharing = false;
+        if (rosterResyncTimer !== null) { clearInterval(rosterResyncTimer); rosterResyncTimer = null; }
         bridge.control({ type: 'revoke' });
         await bridge.stop();
     }
@@ -326,6 +334,7 @@ export function setupAnnotateRender(api, opts = {}) {
         dispose() {
             this.stopAnnotating();
             attachedTo = null;
+            if (rosterResyncTimer !== null) { clearInterval(rosterResyncTimer); rosterResyncTimer = null; }
             unsubOps?.();
             unsubEmit?.();
             unsubStateReal?.();

@@ -1661,9 +1661,18 @@ IMPLEMENTATION NOTES (for the plan):
     old toolbar showed unconditionally regardless of whether the controller was ever built; this
     feature's gating on a live controller is what surfaced it. Fixed by wrapping that send in a
     try/catch (`annotator.js`) so a transient send failure can't corrupt construction — the
-    availability timeout/self-heal machinery already tolerates a dropped hello. **Re-verified live
-    after the fix: full pass** — native dialog seam invoked, stroke painted into the overlay's own
-    pixels (7489 non-transparent px).
+    availability timeout/self-heal machinery already tolerates a dropped hello. A second live re-run
+    then hit a second, related gap: the constructor no longer crashed, but `sharerAvailable` still
+    landed `false` (8s timeout, nothing heard) — the one-shot + event-triggered roster broadcasts in
+    `renderer.js` can each be individually lost across the Electron path's extra hops, with nothing
+    to retry them. Fixed the same way the browser sharer already does it: `renderer.js` now reruns
+    `syncParticipants()` on a 1500ms interval while sharing (cleared on stop/dispose), so a lost
+    round-trip self-heals within a tick or two instead of depending on one delivery landing inside
+    the 8s window. **Re-verified live after both fixes, screenshots captured from the passing run
+    (`test/live/electron.spec.mjs`, saved to `test-results/electron-proof/`):** the annotator's real
+    "Request to annotate" button, and — the actual security-relevant proof — the Electron overlay
+    window's own captured pixels showing the drawn stroke and the "Annotation is on" indicator, i.e.
+    what a real remote viewer's video would contain.
 
 
 ## Licensing
